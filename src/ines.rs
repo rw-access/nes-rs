@@ -1,5 +1,5 @@
-use super::cartridge::Cartridge;
 use super::cartridge;
+use super::cartridge::Cartridge;
 
 const MAGIC: [u8; 4] = ['N' as u8, 'E' as u8, 'S' as u8, 0x1a];
 
@@ -112,7 +112,9 @@ impl INESHeader {
     }
 }
 
-pub fn load<R: std::io::Read>(reader: &mut R) -> Option<cartridge::Cartridge> {
+pub fn load<R: std::io::Read>(reader: &mut R) -> Option<(cartridge::Cartridge, u8)> {
     let header = INESHeader::parse(reader)?;
-    header.read(reader)
+    let cartridge = header.read(reader)?;
+
+    Some((cartridge, header.mapper))
 }

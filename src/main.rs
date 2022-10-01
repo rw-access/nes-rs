@@ -2,7 +2,6 @@ use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
 
 // Construct a new RGB ImageBuffer with the specified width and height.
 
-
 use std::process::exit;
 
 fn save_png(rom_path: &str, bmp_path: &str) {
@@ -11,7 +10,7 @@ fn save_png(rom_path: &str, bmp_path: &str) {
     let mut rom_file = std::fs::File::open(rom_path).unwrap();
     let mut bmp_file = std::fs::File::create(bmp_path).unwrap();
 
-    let c = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
+    let (c, _) = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
 
     let num_tiles = c.chr.len() * TILES_PER_BANK;
     let tiles_x = 32 as usize;
@@ -30,7 +29,7 @@ fn save_png(rom_path: &str, bmp_path: &str) {
 
             for tile_y in 0..8usize {
                 let lo_y = tile[tile_y];
-                let hi_y = tile[tile_y+8];
+                let hi_y = tile[tile_y + 8];
 
                 for tile_x in 0..8usize {
                     let lo_px = (lo_y >> (7 - tile_x)) & 0b1;
@@ -47,7 +46,15 @@ fn save_png(rom_path: &str, bmp_path: &str) {
         }
     }
 
-    write_buffer_with_format(&mut bmp_file, &img, img.width(), img.height(), image::ColorType::L8, image::ImageOutputFormat::Png).expect("failed to save image")
+    write_buffer_with_format(
+        &mut bmp_file,
+        &img,
+        img.width(),
+        img.height(),
+        image::ColorType::L8,
+        image::ImageOutputFormat::Png,
+    )
+    .expect("failed to save image")
 }
 
 fn main() {
