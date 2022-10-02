@@ -1,4 +1,4 @@
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Opcode {
     ADC,
     AHX,
@@ -77,7 +77,7 @@ pub(crate) enum Opcode {
     XAA,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum AddressingMode {
     Implied,
     Accumulator,      // A
