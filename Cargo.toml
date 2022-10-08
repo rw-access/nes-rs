@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+sdl2 = "0.32.1"
 image = "0.24.0"
 arrayvec = "0.7.2"
+dyn-clone = "1.0.9"

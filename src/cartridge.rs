@@ -1,16 +1,19 @@
+use dyn_clone::DynClone;
+
 #[derive(Clone, Copy)]
 pub enum MirroringMode {
-    Horizontal,
-    Vertical,
-    SingleScreenLowerBank,
-    FourScreen,
-    SingleScreenUpperBank,
+    Horizontal = 0,
+    Vertical = 1,
+    SingleScreenLowerBank = 2,
+    FourScreen = 3,
+    SingleScreenUpperBank = 4,
 }
 
 pub type ProgBank = [u8; 0x4000];
 pub type ChrBank = [u8; 0x2000];
 pub type SaveRamBank = [u8; 0x2000];
 
+#[derive(Clone)]
 pub struct Cartridge {
     pub prg: Vec<ProgBank>,     // 0x4000 aligned
     pub chr: Vec<ChrBank>,      // 0x2000 aligned
@@ -18,7 +21,7 @@ pub struct Cartridge {
     pub mirror: MirroringMode,
 }
 
-pub(crate) trait Mapper {
+pub trait Mapper: DynClone {
     // fn new(cartridge: Cartridge) -> Self;
     fn mirror(&self) -> MirroringMode;
     fn read(&self, address: u16) -> u8;
@@ -26,6 +29,9 @@ pub(crate) trait Mapper {
     fn read_page(&self, page: u8) -> Option<&[u8; 256]>;
 }
 
+dyn_clone::clone_trait_object!(Mapper);
+
+#[derive(Clone)]
 struct UxROM {
     cartridge: Cartridge,
     first_bank: usize,
@@ -48,25 +54,25 @@ impl Mapper for UxROM {
     }
 
     fn read(&self, address: u16) -> u8 {
-        if address < 0x2000 {
-            self.cartridge.chr[0][address as usize]
-        } else if address < 0x8000 {
-            0
-        } else if address < 0xC000 {
-            // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
-            self.cartridge.prg[self.first_bank][address as usize % 0x4000]
-        } else {
-            // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
-            self.cartridge.prg[self.last_bank][address as usize % 0x4000]
+        match address {
+            0x0000..=0x1fff => self.cartridge.chr[0][address as usize],
+            0x2000..=0x7fff => 0,
+            0x8000..=0xbfff => {
+                // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
+                self.cartridge.prg[self.first_bank][address as usize % 0x4000]
+            }
+            0xc000.. => {
+                // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
+                self.cartridge.prg[self.last_bank][address as usize % 0x4000]
+            }
         }
     }
 
     fn write(&mut self, address: u16, data: u8) {
-        if address < 0x2000 {
-            self.cartridge.chr[0][address as usize] = data
-        } else if address < 0x8000 {
-        } else {
-            self.first_bank = data as usize & 0x0f;
+        match address {
+            0x0000..=0x1fff => self.cartridge.chr[0][address as usize] = data,
+            0x2000..=0x7fff => {}
+            0x8000.. => self.first_bank = data as usize & 0x0f,
         }
     }
 
@@ -74,23 +80,26 @@ impl Mapper for UxROM {
         let bank_start = ((page as usize) << 8) % 0x4000;
         let bank_stop = (bank_start + 256) % 0x4000;
 
-        if page < 0x80 {
+        match page {
             // internal CPU read
-            None
-        } else if page < 0xC0 {
-            // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
-            self.cartridge.prg[self.first_bank][bank_start..bank_stop]
-                .try_into()
-                .ok()
-        } else {
-            // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
-            self.cartridge.prg[self.last_bank][bank_start..bank_stop]
-                .try_into()
-                .ok()
+            0x00..=0x7f => None,
+            0x80..=0xBF => {
+                // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
+                self.cartridge.prg[self.first_bank][bank_start..bank_stop]
+                    .try_into()
+                    .ok()
+            }
+            0xC0.. => {
+                // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
+                self.cartridge.prg[self.last_bank][bank_start..bank_stop]
+                    .try_into()
+                    .ok()
+            }
         }
     }
 }
 
+#[derive(Clone)]
 struct NROM {
     uxrom: UxROM,
 }
@@ -113,9 +122,10 @@ impl Mapper for NROM {
     }
 
     fn write(&mut self, address: u16, data: u8) {
-        if address < 0x2000 {
-            self.uxrom.write(address, data);
-        }
+        match address {
+            0x0000..=0x1fff => self.uxrom.write(address, data),
+            0x2000.. => {}
+        };
     }
 
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
@@ -123,7 +133,7 @@ impl Mapper for NROM {
     }
 }
 
-pub(crate) fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
+pub fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
     match mapper {
         0 => Some(Box::new(NROM::new(cartridge))),
         2 => Some(Box::new(UxROM::new(cartridge))),

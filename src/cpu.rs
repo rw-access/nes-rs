@@ -1,4 +1,5 @@
 use crate::bus::MemoryBus;
+use crate::cartridge::Mapper;
 use crate::instructions::*;
 
 enum StatusFlags {
@@ -12,7 +13,7 @@ enum StatusFlags {
     N = 7, // Negative Flag
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CPU {
     cycles: u64,
     pc: u16,
@@ -21,6 +22,22 @@ pub(crate) struct CPU {
     y: u8,
     status: u8,
     sp: u8,
+    ram: [u8; 0x800],
+}
+
+impl Default for CPU {
+    fn default() -> Self {
+        Self {
+            cycles: Default::default(),
+            pc: Default::default(),
+            a: Default::default(),
+            x: Default::default(),
+            y: Default::default(),
+            status: Default::default(),
+            sp: Default::default(),
+            ram: [0; 0x800],
+        }
+    }
 }
 
 fn crosses_page_boundary(a: u16, b: u16) -> bool {
@@ -40,8 +57,13 @@ impl CPU {
         self.status = (1 << StatusFlags::I as u8) | (1 << StatusFlags::U as u8);
         self.pc = self.read_address(bus, 0xfffc);
 
-        // TODO: disable frame IRQ, disable all audio, clear IO registers
-        // 0x4000 -> 0x4013, 0x4015, 0x4017
+        // Disable frame IRQ, disable all audio, clear IO registers
+        for addr in 0x4000..=0x4013 {
+            self.write_byte(bus, addr, 0x00);
+        }
+
+        self.write_byte(bus, 0x4015, 0x40);
+        self.write_byte(bus, 0x4017, 0x40);
     }
 
     fn check_status_bit(&self, bit: StatusFlags) -> bool {
@@ -71,6 +93,20 @@ impl CPU {
         bus: &mut MemoryBus,
         log: Option<&mut dyn std::io::Write>,
     ) -> u16 {
+        // NMI takes the highest priority
+        if bus.ppu.read_nmi_line() {
+            if let Some(log) = log {
+                write!(log, "======== NMI ========\n").unwrap();
+            }
+
+            self.push_address(bus, self.pc);
+            self.dispatch(bus, Opcode::PHP, None);
+            self.pc = self.read_address(bus, 0xFFFA);
+            self.write_status_bit(StatusFlags::I, true);
+            self.cycles = self.cycles.wrapping_add(7);
+            return 7;
+        }
+
         let pre_cycles = self.cycles;
 
         // decode the instrucation @ PC
@@ -492,23 +528,23 @@ impl CPU {
 
     fn read_byte(&self, bus: &MemoryBus, addr: u16) -> u8 {
         // https://www.nesdev.org/wiki/CPU_memory_map
-        if addr < 0x2000 {
-            bus.ram[addr as usize % bus.ram.len()]
-        } else if addr < 0x4000 {
-            // ppu register read
-            0
-        } else if addr == 0x4016 {
-            // controller read
-            0
-        } else if addr < 0x4018 {
-            // APU read
-            0
-        } else if addr < 0x401f {
-            // CPU test mode
-            0
-        } else {
-            // mapper read
-            bus.mapper.read(addr)
+        match addr {
+            0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()],
+            0x2000..=0x3fff => bus.ppu.read_register(bus.mapper.as_ref(), addr), // PPU
+            0x4000..=0x4013 => 0,                                                // APU
+            0x4014 => 0,                                                         // DMA
+            0x4016 => 0,                                                         // controller 1
+            0x4017 => 0,                                                         // controller 2
+            0x4018..=0x401F => 0, // disabled test mode
+            _ => bus.mapper.read(addr),
+        }
+    }
+
+    fn read_page<'a>(&'a self, mapper: &'a dyn Mapper, page: u8) -> Option<&'a [u8; 256]> {
+        match page {
+            0x00..=0x1f => (&self.ram[(page as usize) << 8..][..256]).try_into().ok(),
+            0x20..=0x7f => None, // IO ports
+            0x80.. => mapper.read_page(page),
         }
     }
 
@@ -527,22 +563,21 @@ impl CPU {
         u16::from_le_bytes([lo, hi])
     }
 
-    fn write_byte(&self, bus: &mut MemoryBus, addr: u16, data: u8) {
+    fn write_byte(&mut self, bus: &mut MemoryBus, addr: u16, data: u8) {
         // https://www.nesdev.org/wiki/CPU_memory_map
-        if addr < 0x2000 {
-            bus.ram[addr as usize % 0x2000] = data;
-        } else if addr < 0x4000 {
-            // ppu register write
-        } else if addr == 0x4016 {
-            // controller write
-        } else if addr < 0x4018 {
-            // APU write
-        } else if addr < 0x401f {
-            // CPU test mode
-        } else {
-            // mapper write
-            bus.mapper.write(addr, data);
-        }
+        match addr {
+            0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()] = data,
+            0x2000..=0x3fff => bus.ppu.write_register(bus.mapper.as_mut(), addr, data), // PPU
+            0x4000..=0x4013 => {}                                                       // APU
+            0x4014 => {
+                let page = self.read_page(bus.mapper.as_ref(), data);
+                bus.ppu.write_dma(page);
+            } // DMA
+            0x4016 => {}          // controller 1
+            0x4017 => {}          // controller 2
+            0x4018..=0x401F => {} // disabled test mode
+            _ => bus.mapper.write(addr, data),
+        };
     }
 
     fn push_byte(&mut self, bus: &mut MemoryBus, data: u8) {
@@ -743,6 +778,7 @@ impl CPU {
     ) {
         // C000  4C F5 C5  JMP $C5F5                       A:00 X:00 Y:00 P:24 SP:FD CYC:7
         // PC    < raw >   < assembly >                    < registers >             < timing >
+        let prev_ppu_address = bus.ppu.last_read.get();
 
         // alocate a string on the stack, because it's fixed size and we can keep track of the position information
         // as it grows. once complete, there's a single copy to the writer
@@ -868,12 +904,16 @@ impl CPU {
         .unwrap();
 
         writer.write(&str_buf.as_bytes()).unwrap();
+
+        // restore the PPU last read address
+        bus.ppu.last_read.set(prev_ppu_address);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::cartridge;
+    use crate::console::Console;
     use crate::ines;
 
     use crate::bus::MemoryBus;
@@ -885,14 +925,8 @@ mod tests {
         let mut rom_file = std::fs::File::open("tests/nestest.nes").unwrap();
         let (c, m) = ines::load(&mut rom_file).expect("failed to load cartridge");
 
-        let mut bus = MemoryBus {
-            ram: [0; 0x800],
-            mapper: cartridge::new(c, m).unwrap(),
-        };
-
-        let mut cpu = CPU::default();
-        cpu.reset(&mut bus);
-        cpu.pc = 0xc000;
+        let mut console = Console::new(cartridge::new(c, m).unwrap());
+        console.cpu.pc = 0xc000;
 
         // match offset for nestest.nes
         cpu.cycles = 7;
