@@ -1,3 +1,7 @@
+use std::rc::Rc;
+
+use crate::cartridge::{ChrBank, ProgBank, CHR, PRG};
+
 use super::cartridge;
 use super::cartridge::Cartridge;
 
@@ -66,49 +70,51 @@ impl INESHeader {
         // 4. CHR ROM data, if present (8192 * y bytes)
         // 5. PlayChoice INST-ROM, if present (0 or 8192 bytes)
         // 6. PlayChoice PROM, if present (16 bytes Data, 16 bytes CounterOut) (this is often missing, see PC10 ROM-Images for details)
+        if self.has_trainer {
+            return None;
+        }
 
-        let mut c = Cartridge {
-            prg: Vec::with_capacity(self.prg_banks as usize),
-            chr: Vec::with_capacity(self.chr_banks as usize),
+        // load PRG ROM
+        let mut prg_banks: Vec<ProgBank> = Vec::with_capacity(self.prg_banks as usize);
+        unsafe {
+            // only risk is reading uninitialized memory
+            prg_banks.set_len(self.prg_banks as usize);
+        }
+
+        for bank in &mut prg_banks {
+            reader.read_exact(bank.as_mut_slice()).ok()?;
+        }
+
+        // load CHR ROM / CHR RAM
+        let chr = if self.chr_banks == 0 {
+            CHR::RAM(vec![[0u8; 8192]])
+        } else {
+            let mut chr_banks: Vec<ChrBank> = Vec::with_capacity(self.chr_banks as usize);
+            unsafe {
+                // only risk is reading uninitialized memory
+                chr_banks.set_len(self.chr_banks as usize);
+            }
+
+            for bank in &mut chr_banks {
+                reader.read_exact(bank.as_mut_slice()).ok()?;
+            }
+
+            CHR::ROM(Rc::new(chr_banks))
+        };
+
+        // PRG RAM??
+        ();
+
+        Some(Cartridge {
+            prg: Rc::new(PRG { banks: prg_banks }),
+            chr,
             sram: Vec::with_capacity(self.ram_size as usize),
             mirror: match (self.four_screen_mirror, self.mirror) {
                 (true, _) => cartridge::MirroringMode::FourScreen,
                 (false, false) => cartridge::MirroringMode::Horizontal,
                 (false, true) => cartridge::MirroringMode::Vertical,
             },
-        };
-
-        unsafe {
-            // already preallocated with capacity, so this is perfectly safe
-            // since unitialized u8 is perfectly acceptable and it will be scanned into
-            c.prg.set_len(self.prg_banks as usize);
-            c.chr.set_len(self.chr_banks as usize);
-            c.sram.set_len(self.ram_size as usize);
-        };
-
-        if self.has_trainer {
-            return None;
-        }
-
-        // load PRG ROM
-        for prg in &mut c.prg {
-            reader.read_exact(prg.as_mut_slice()).ok()?;
-        }
-
-        // load CHR ROM
-        for chr in &mut c.chr {
-            reader.read_exact(chr.as_mut_slice()).ok()?;
-        }
-
-        // CHR RAM
-        if c.chr.len() == 0 {
-            c.chr = vec![[0u8; 8192]];
-        }
-
-        // PRG RAM??
-        ();
-
-        Some(c)
+        })
     }
 }
 

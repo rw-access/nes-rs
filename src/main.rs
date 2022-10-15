@@ -42,13 +42,13 @@ fn save_png(rom_path: &str, bmp_path: &str) {
 
     let (c, _) = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
 
-    let num_tiles = c.chr.len() * TILES_PER_BANK;
+    let num_tiles = c.chr.get_banks().len() * TILES_PER_BANK;
     let tiles_x = 32 as usize;
     let tiles_y = num_tiles / tiles_x;
 
     let mut img: GrayImage = ImageBuffer::new((1 + tiles_x * 9) as u32, (1 + tiles_y * 9) as u32);
 
-    for (bank_no, bank) in c.chr.iter().enumerate() {
+    for (bank_no, bank) in c.chr.get_banks().iter().enumerate() {
         for (tile_no, tile) in bank.chunks_exact(16).enumerate() {
             // 16 bytes per tile
             // planeOne = offset + [0 ... 7]

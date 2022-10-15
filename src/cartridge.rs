@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use dyn_clone::DynClone;
 
 #[derive(Clone, Copy)]
@@ -14,9 +16,36 @@ pub type ChrBank = [u8; 0x2000];
 pub type SaveRamBank = [u8; 0x2000];
 
 #[derive(Clone)]
+pub enum CHR {
+    ROM(Rc<Vec<ChrBank>>),
+    RAM(Vec<ChrBank>),
+}
+
+impl CHR {
+    pub fn get_banks(&self) -> &Vec<ChrBank> {
+        match self {
+            CHR::ROM(banks) => banks,
+            CHR::RAM(banks) => banks,
+        }
+    }
+
+    pub fn get_banks_mut(&mut self) -> Option<&mut Vec<ChrBank>> {
+        match self {
+            CHR::ROM(_) => None,
+            CHR::RAM(banks) => Some(banks),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PRG {
+    pub(crate) banks: Vec<ProgBank>,
+}
+
+#[derive(Clone)]
 pub struct Cartridge {
-    pub prg: Vec<ProgBank>,     // 0x4000 aligned
-    pub chr: Vec<ChrBank>,      // 0x2000 aligned
+    pub prg: Rc<PRG>,           // 0x4000 aligned
+    pub chr: CHR,               // 0x2000 aligned
     pub sram: Vec<SaveRamBank>, // 0x2000 aligned
     pub mirror: MirroringMode,
 }
@@ -41,7 +70,7 @@ struct UxROM {
 impl UxROM {
     fn new(cartridge: Cartridge) -> Self {
         UxROM {
-            last_bank: cartridge.prg.len() - 1,
+            last_bank: cartridge.prg.banks.len() - 1,
             cartridge,
             first_bank: 0,
         }
@@ -55,22 +84,26 @@ impl Mapper for UxROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => self.cartridge.chr[0][address as usize],
+            0x0000..=0x1fff => self.cartridge.chr.get_banks()[0][address as usize],
             0x2000..=0x7fff => 0,
             0x8000..=0xbfff => {
                 // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
-                self.cartridge.prg[self.first_bank][address as usize % 0x4000]
+                self.cartridge.prg.banks[self.first_bank][address as usize % 0x4000]
             }
             0xc000.. => {
                 // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
-                self.cartridge.prg[self.last_bank][address as usize % 0x4000]
+                self.cartridge.prg.banks[self.last_bank][address as usize % 0x4000]
             }
         }
     }
 
     fn write(&mut self, address: u16, data: u8) {
         match address {
-            0x0000..=0x1fff => self.cartridge.chr[0][address as usize] = data,
+            0x0000..=0x1fff => {
+                if let Some(banks) = self.cartridge.chr.get_banks_mut() {
+                    banks[0][address as usize] = data;
+                }
+            }
             0x2000..=0x7fff => {}
             0x8000.. => self.first_bank = data as usize & 0x0f,
         }
@@ -85,13 +118,13 @@ impl Mapper for UxROM {
             0x00..=0x7f => None,
             0x80..=0xBF => {
                 // CPU $8000-$BFFF: 16 KB switchable PRG ROM bank
-                self.cartridge.prg[self.first_bank][bank_start..bank_stop]
+                self.cartridge.prg.banks[self.first_bank][bank_start..bank_stop]
                     .try_into()
                     .ok()
             }
             0xC0.. => {
                 // CPU $C000-$FFFF: 16 KB PRG ROM bank, fixed to the last bank
-                self.cartridge.prg[self.last_bank][bank_start..bank_stop]
+                self.cartridge.prg.banks[self.last_bank][bank_start..bank_stop]
                     .try_into()
                     .ok()
             }

@@ -1,5 +1,3 @@
-use std::io::stdout;
-
 use crate::{
     apu::APU,
     bus::MemoryBus,
