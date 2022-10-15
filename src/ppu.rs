@@ -523,7 +523,7 @@ impl PPU {
                     tile_y &= 0x7;
 
                     let tile_address_lo =
-                        pattern_table_address | (tile_index as u16) << 4  | (0 << 3) | tile_y as u16;
+                        pattern_table_address | (tile_index as u16) << 4 | (0 << 3) | tile_y as u16;
                     let tile_address_hi = tile_address_lo | (1 << 3);
 
                     processed_sprite.tile = TileData {
