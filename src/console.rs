@@ -5,15 +5,29 @@ use crate::{
     controller::{Button, Controller},
     cpu::CPU,
     ppu::{Screen, PPU},
+    snapshot::Snapshot,
 };
 
 pub struct Console {
     pub(crate) bus: MemoryBus,
     pub(crate) cpu: CPU,
-    pub(crate) latest_screen: Screen,
+    pub(crate) screens: [Screen; 2],
+    pub(crate) latest_screen: bool,
 }
 
 impl Console {
+    pub fn take_snapshot(&self) -> Snapshot {
+        Snapshot {
+            bus: self.bus.clone(),
+            cpu: self.cpu.clone(),
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: Snapshot) {
+        self.bus = snapshot.bus;
+        self.cpu = snapshot.cpu;
+    }
+
     pub fn update_buttons(&mut self, button: Button, pressed: bool) {
         self.bus.controller.update_button(button, pressed);
     }
@@ -27,7 +41,8 @@ impl Console {
                 controller: Controller::default(),
             },
             cpu: CPU::default(),
-            latest_screen: Screen::default(),
+            latest_screen: false,
+            screens: [Screen::default(), Screen::default()],
         };
 
         console.bus.ppu.reset();
@@ -37,10 +52,11 @@ impl Console {
 
     fn step(&mut self) {
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
+        let pending_screen = &mut self.screens[(!self.latest_screen) as usize];
         for _ in 0..cycles {
-            self.bus.ppu.step(self.bus.mapper.as_mut());
-            self.bus.ppu.step(self.bus.mapper.as_mut());
-            self.bus.ppu.step(self.bus.mapper.as_mut());
+            self.bus.ppu.step(self.bus.mapper.as_mut(), pending_screen);
+            self.bus.ppu.step(self.bus.mapper.as_mut(), pending_screen);
+            self.bus.ppu.step(self.bus.mapper.as_mut(), pending_screen);
         }
     }
 
@@ -54,10 +70,10 @@ impl Console {
             self.step();
         }
 
-        self.latest_screen = self.bus.ppu.pending_screen.clone();
+        self.latest_screen = !self.latest_screen;
     }
 
     pub fn screen(&self) -> &Screen {
-        &self.latest_screen
+        &self.screens[self.latest_screen as usize]
     }
 }

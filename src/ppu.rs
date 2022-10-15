@@ -223,7 +223,6 @@ pub(crate) struct PPU {
     w: bool,
     pub(crate) in_vblank: bool,
     fine_x: u8,
-    pub(crate) pending_screen: Screen,
     oam: [u8; 256],
     secondary_oam: [u8; 32],
     palette_ram: [u8; 32],
@@ -250,7 +249,6 @@ impl Default for PPU {
             v: Default::default(),
             t: Default::default(),
             w: Default::default(),
-            pending_screen: Default::default(),
             oam: [0; 256],
             secondary_oam: Default::default(),
             palette_ram: [0; 32],
@@ -330,7 +328,7 @@ impl PPU {
         return parsed_mask.show_background || parsed_mask.show_sprites;
     }
 
-    pub(crate) fn step(&mut self, mapper: &dyn Mapper) {
+    pub(crate) fn step(&mut self, mapper: &dyn Mapper, screen: &mut Screen) {
         // change signals on the next cycle
         match self.last_read.get() {
             Some(0x2002) => {
@@ -352,7 +350,7 @@ impl PPU {
         self.last_read.set(None);
 
         match self.scanline {
-            0..=239 => self.step_visible(mapper),
+            0..=239 => self.step_visible(mapper, screen),
             240 => self.step_post_render(mapper),
             241..=260 => self.step_vblank(mapper),
             261 => self.step_pre_render(mapper),
@@ -406,7 +404,7 @@ impl PPU {
         self.status_reg |= (overflow as u8) << 5;
     }
 
-    fn render_pixel(&mut self) {
+    fn render_pixel(&mut self, screen: &mut Screen) {
         let x = self.cycle_in_scanline - 1;
         let y = self.scanline;
 
@@ -457,11 +455,11 @@ impl PPU {
         // set the sprite zero hit bit
         self.status_reg |= (zero_hit as u8) << 6;
 
-        self.pending_screen.pixels[y as usize][x as usize] =
+        screen.pixels[y as usize][x as usize] =
             self.palette_ram[PPU::mirror_palette(color) as usize];
     }
 
-    fn step_visible(&mut self, mapper: &dyn Mapper) {
+    fn step_visible(&mut self, mapper: &dyn Mapper, screen: &mut Screen) {
         if !self.rendering_enabled() {
             return;
         }
@@ -469,7 +467,7 @@ impl PPU {
         match self.cycle_in_scanline {
             0 => {}
             1..=256 => {
-                self.render_pixel();
+                self.render_pixel(screen);
                 self.fetch_background_tile(mapper);
             }
             257 => {

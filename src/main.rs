@@ -1,4 +1,5 @@
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
+use nes::snapshot::Snapshot;
 use nes::{cartridge, console::Console, controller::Button};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -6,6 +7,7 @@ use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::sys::KeyCode;
 // Construct a new RGB ImageBuffer with the specified width and height.
 
+use std::collections::VecDeque;
 use std::process::exit;
 use std::time::Duration;
 
@@ -114,6 +116,8 @@ fn play_rom(rom_path: &str) {
         .build()
         .expect("could not make a canvas");
 
+    let mut history: VecDeque<Snapshot> = VecDeque::new();
+
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
     canvas.present();
@@ -126,6 +130,8 @@ fn play_rom(rom_path: &str) {
         .unwrap();
 
     let mut raw_texture = [0 as u8; (WIDTH * HEIGHT * SCALING * SCALING * 3) as usize];
+
+    let mut rewind = false;
 
     'run_loop: loop {
         let pre_draw = std::time::Instant::now();
@@ -141,6 +147,10 @@ fn play_rom(rom_path: &str) {
                 Event::KeyDown {
                     keycode: Some(k), ..
                 } => {
+                    if k == Keycode::I {
+                        rewind = true;
+                    }
+
                     if let Some(button) = get_button(k) {
                         console.update_buttons(button, true);
                     }
@@ -148,11 +158,22 @@ fn play_rom(rom_path: &str) {
                 Event::KeyUp {
                     keycode: Some(k), ..
                 } => {
+                    if k == Keycode::I {
+                        rewind = false;
+                    }
+
                     if let Some(button) = get_button(k) {
                         console.update_buttons(button, false);
                     }
                 }
                 _ => {}
+            }
+        }
+
+        if rewind {
+            match history.pop_back() {
+                Some(snapshot) => console.restore_snapshot(snapshot),
+                None => rewind = false,
             }
         }
 
@@ -184,6 +205,10 @@ fn play_rom(rom_path: &str) {
             .unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
+
+        if !rewind {
+            history.push_back(console.take_snapshot());
+        }
 
         // sleep for 1/60th of a second
         let elapsed = pre_draw.elapsed();

@@ -7,3 +7,4 @@ pub mod cpu;
 pub mod ines;
 mod instructions;
 pub(crate) mod ppu;
+pub mod snapshot;
