@@ -4,7 +4,7 @@ use crate::{
     apu::APU,
     bus::MemoryBus,
     cartridge::Mapper,
-    controller::Controller,
+    controller::{Button, Controller},
     cpu::CPU,
     ppu::{Screen, PPU},
 };
@@ -16,6 +16,10 @@ pub struct Console {
 }
 
 impl Console {
+    pub fn update_buttons(&mut self, button: Button, pressed: bool) {
+        self.bus.controller.update_button(button, pressed);
+    }
+
     pub fn new(mapper: Box<dyn Mapper>) -> Self {
         let mut console = Console {
             bus: MemoryBus {

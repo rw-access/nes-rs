@@ -533,7 +533,7 @@ impl CPU {
             0x2000..=0x3fff => bus.ppu.read_register(bus.mapper.as_ref(), addr), // PPU
             0x4000..=0x4013 => 0,                                                // APU
             0x4014 => 0,                                                         // DMA
-            0x4016 => 0,                                                         // controller 1
+            0x4016 => bus.controller.read(),                                     // controller 1
             0x4017 => 0,                                                         // controller 2
             0x4018..=0x401F => 0, // disabled test mode
             _ => bus.mapper.read(addr),
@@ -573,9 +573,9 @@ impl CPU {
                 let page = self.read_page(bus.mapper.as_ref(), data);
                 bus.ppu.write_dma(page);
             } // DMA
-            0x4016 => {}          // controller 1
-            0x4017 => {}          // controller 2
-            0x4018..=0x401F => {} // disabled test mode
+            0x4016 => bus.controller.write(data), // controller 1
+            0x4017 => {}                          // controller 2
+            0x4018..=0x401F => {}                 // disabled test mode
             _ => bus.mapper.write(addr, data),
         };
     }

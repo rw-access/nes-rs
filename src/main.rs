@@ -1,8 +1,9 @@
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
-use nes::{cartridge, console::Console};
+use nes::{cartridge, console::Console, controller::Button};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::{Color, PixelFormatEnum};
+use sdl2::sys::KeyCode;
 // Construct a new RGB ImageBuffer with the specified width and height.
 
 use std::process::exit;
@@ -18,6 +19,20 @@ const PALETTE_RGB: [u32; 64] = [
     0xFECCC5, 0xF7D8A5, 0xE4E594, 0xCFEF96, 0xBDF4AB, 0xB3F3CC, 0xB5EBF2, 0xB8B8B8, 0x000000,
     0x000000,
 ];
+
+fn get_button(keycode: Keycode) -> Option<Button> {
+    match keycode {
+        Keycode::W => Some(Button::Up),
+        Keycode::A => Some(Button::Left),
+        Keycode::S => Some(Button::Down),
+        Keycode::D => Some(Button::Right),
+        Keycode::J => Some(Button::B),
+        Keycode::K => Some(Button::A),
+        Keycode::Period => Some(Button::Start),
+        Keycode::Comma => Some(Button::Select),
+        _ => None,
+    }
+}
 
 fn save_png(rom_path: &str, bmp_path: &str) {
     const TILES_PER_BANK: usize = 0x2000 / 16;
@@ -73,6 +88,7 @@ fn save_png(rom_path: &str, bmp_path: &str) {
 }
 
 fn play_rom(rom_path: &str) {
+    const SCALING: u32 = 2;
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 240;
     let frame_duration = Duration::from_secs(1) / 60;
@@ -88,7 +104,7 @@ fn play_rom(rom_path: &str) {
 
     // draw the screen, for now make a function
     let window = video_subsystem
-        .window("nes-rs", WIDTH, HEIGHT)
+        .window("nes-rs", WIDTH * SCALING, HEIGHT * SCALING)
         .position_centered()
         .build()
         .expect("could not initialize video subsystem");
@@ -106,10 +122,10 @@ fn play_rom(rom_path: &str) {
 
     let creator = canvas.texture_creator();
     let mut texture = creator
-        .create_texture_target(PixelFormatEnum::RGB24, 256, 240)
+        .create_texture_target(PixelFormatEnum::RGB24, WIDTH * SCALING, HEIGHT * SCALING)
         .unwrap();
 
-    let mut raw_texture = [0 as u8; (WIDTH * HEIGHT * 3) as usize];
+    let mut raw_texture = [0 as u8; (WIDTH * HEIGHT * SCALING * SCALING * 3) as usize];
 
     'run_loop: loop {
         let pre_draw = std::time::Instant::now();
@@ -122,27 +138,49 @@ fn play_rom(rom_path: &str) {
                 } => {
                     break 'run_loop;
                 }
+                Event::KeyDown {
+                    keycode: Some(k), ..
+                } => {
+                    if let Some(button) = get_button(k) {
+                        console.update_buttons(button, true);
+                    }
+                }
+                Event::KeyUp {
+                    keycode: Some(k), ..
+                } => {
+                    if let Some(button) = get_button(k) {
+                        console.update_buttons(button, false);
+                    }
+                }
                 _ => {}
             }
         }
 
         console.wait_vblank();
 
-        let mut idx = 0;
-        for row in console.screen().pixels {
-            for column in row {
+        for (y, row) in console.screen().pixels.iter().enumerate() {
+            for (x, palette_color) in row.iter().enumerate() {
                 // decode the palette
-                let [_, r, g, b] = PALETTE_RGB[column as usize].to_be_bytes();
-                raw_texture[idx] = r;
-                raw_texture[idx + 1] = g;
-                raw_texture[idx + 2] = b;
-                idx += 3;
+                let [_, r, g, b] = PALETTE_RGB[*palette_color as usize].to_be_bytes();
+
+                for y_off in 0..SCALING {
+                    let row_start =
+                        (y * SCALING as usize + y_off as usize) * (WIDTH * SCALING) as usize;
+                    for x_off in 0..SCALING {
+                        let column_offset = x * SCALING as usize + x_off as usize;
+                        let px_offset = (row_start + column_offset) * 3;
+
+                        raw_texture[px_offset] = r;
+                        raw_texture[px_offset + 1] = g;
+                        raw_texture[px_offset + 2] = b;
+                    }
+                }
             }
         }
 
         canvas.clear();
         texture
-            .update(None, &raw_texture, (WIDTH * 3) as usize)
+            .update(None, &raw_texture, (SCALING * WIDTH * 3) as usize)
             .unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
