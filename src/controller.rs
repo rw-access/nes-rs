@@ -11,20 +11,30 @@ pub enum Button {
     Right = 7,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ButtonState(u8);
+
+impl ButtonState {
+    pub fn set(&mut self, button: Button) {
+        self.0 |= 1 << (button as u8);
+    }
+
+    pub fn unset(&mut self, button: Button) {
+        self.0 &= !(1 << (button as u8));
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Controller {
-    pub(crate) button_state: u8,
+    button_state: ButtonState,
     strobe: bool,
 
     index: Cell<u8>,
 }
 
 impl Controller {
-    pub(crate) fn update_button(&mut self, button: Button, pressed: bool) {
-        let mask: u8 = 1 << button as u8;
-        let new_bits: u8 = (pressed as u8) << button as u8;
-
-        self.button_state = (self.button_state & !mask) | new_bits;
+    pub(crate) fn update_buttons(&mut self, state: ButtonState) {
+        self.button_state = state;
     }
 
     pub(crate) fn read(&self) -> u8 {
@@ -36,7 +46,7 @@ impl Controller {
         let index = self.index.get();
 
         if index < 8 {
-            result = (self.button_state >> index) & 1;
+            result = (self.button_state.0 >> index) & 1;
             self.index.set(if !self.strobe { index + 1 } else { index });
         }
 

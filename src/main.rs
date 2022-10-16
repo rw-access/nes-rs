@@ -1,4 +1,7 @@
+use clap::builder::Str;
+use clap::Parser;
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
+use nes::controller::ButtonState;
 use nes::snapshot::Snapshot;
 use nes::{cartridge, console::Console, controller::Button};
 use sdl2::event::Event;
@@ -89,7 +92,7 @@ fn save_png(rom_path: &str, bmp_path: &str) {
     .expect("failed to save image")
 }
 
-fn play_rom(rom_path: &str) {
+fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<u16>) {
     const SCALING: u32 = 2;
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 240;
@@ -132,6 +135,7 @@ fn play_rom(rom_path: &str) {
     let mut raw_texture = [0 as u8; (WIDTH * HEIGHT * SCALING * SCALING * 3) as usize];
 
     let mut rewind = false;
+    let mut button_state = ButtonState::default();
 
     'run_loop: loop {
         let pre_draw = std::time::Instant::now();
@@ -152,7 +156,8 @@ fn play_rom(rom_path: &str) {
                     }
 
                     if let Some(button) = get_button(k) {
-                        console.update_buttons(button, true);
+                        button_state.set(button);
+                        console.update_buttons(button_state);
                     }
                 }
                 Event::KeyUp {
@@ -160,10 +165,12 @@ fn play_rom(rom_path: &str) {
                 } => {
                     if k == Keycode::I {
                         rewind = false;
+                        console.update_buttons(button_state);
                     }
 
                     if let Some(button) = get_button(k) {
-                        console.update_buttons(button, false);
+                        button_state.unset(button);
+                        console.update_buttons(button_state);
                     }
                 }
                 _ => {}
@@ -172,8 +179,13 @@ fn play_rom(rom_path: &str) {
 
         if rewind {
             match history.pop_back() {
-                Some(snapshot) => console.restore_snapshot(snapshot),
-                None => rewind = false,
+                Some(snapshot) => {
+                    console.restore_snapshot(snapshot, &cpu_ignore_rewind, &ppu_ignore_rewind)
+                }
+                None => {
+                    console.update_buttons(button_state);
+                    rewind = false;
+                }
             }
         }
 
@@ -218,21 +230,34 @@ fn play_rom(rom_path: &str) {
     }
 }
 
-fn main() {
-    let str_args: Vec<String> = std::env::args().collect();
-    let args: Vec<&str> = str_args.iter().map(|s| s.as_str()).collect();
+#[derive(clap::Parser)]
+enum CLI {
+    Play {
+        #[arg(short, long)]
+        rom: String,
+        #[arg(short, long)]
+        cpu_ignore_rewind: Vec<u16>,
+        #[arg(short, long)]
+        ppu_ignore_rewind: Vec<u16>,
+    },
+    CHRDump {
+        #[arg(long)]
+        rom: String,
+        #[arg(long)]
+        out: String,
+    },
+}
 
-    match args[1..] {
-        ["chr-dump", rom_path, png_path] => save_png(rom_path, png_path),
-        ["play", rom_path] => play_rom(rom_path),
-        _ => {
-            println!(
-                "usage:
-            chr-dump <in_file.nes> <out_file.png>
-            play <in_file.nes> 
-            "
-            );
-            exit(1);
-        }
-    }
+fn main() {
+    let args = CLI::parse();
+    println!("size of snapshot = {}", std::mem::size_of::<Snapshot>());
+
+    match args {
+        CLI::CHRDump { rom, out } => save_png(&rom, &out),
+        CLI::Play {
+            rom,
+            cpu_ignore_rewind,
+            ppu_ignore_rewind,
+        } => play_rom(&rom, cpu_ignore_rewind, ppu_ignore_rewind),
+    };
 }

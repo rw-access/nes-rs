@@ -2,7 +2,7 @@ use crate::{
     apu::APU,
     bus::MemoryBus,
     cartridge::Mapper,
-    controller::{Button, Controller},
+    controller::{Button, ButtonState, Controller},
     cpu::CPU,
     ppu::{Screen, PPU},
     snapshot::Snapshot,
@@ -23,13 +23,44 @@ impl Console {
         }
     }
 
-    pub fn restore_snapshot(&mut self, snapshot: Snapshot) {
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: Snapshot,
+        cpu_ignore: &Vec<u16>,
+        ppu_ignore: &Vec<u16>,
+    ) {
+        // read preserved addresses
+        let cpu_backup_contents: Vec<u8> = cpu_ignore
+            .iter()
+            .map(|addr| self.cpu.read_byte(&self.bus, *addr))
+            .collect();
+        let ppu_backup_contents: Vec<u8> = ppu_ignore
+            .iter()
+            .map(|addr| self.bus.ppu.read_byte(self.bus.mapper.as_ref(), *addr))
+            .collect();
+
         self.bus = snapshot.bus;
         self.cpu = snapshot.cpu;
+
+        // restore preserved addresses
+        cpu_ignore
+            .iter()
+            .zip(cpu_backup_contents)
+            .for_each(|(addr, data)| {
+                self.cpu.write_byte(&mut self.bus, *addr, data);
+            });
+        ppu_ignore
+            .iter()
+            .zip(ppu_backup_contents)
+            .for_each(|(addr, data)| {
+                self.bus
+                    .ppu
+                    .write_byte(self.bus.mapper.as_mut(), *addr, data);
+            });
     }
 
-    pub fn update_buttons(&mut self, button: Button, pressed: bool) {
-        self.bus.controller.update_button(button, pressed);
+    pub fn update_buttons(&mut self, state: ButtonState) {
+        self.bus.controller.update_buttons(state);
     }
 
     pub fn new(mapper: Box<dyn Mapper>) -> Self {

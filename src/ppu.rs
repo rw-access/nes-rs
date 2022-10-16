@@ -723,7 +723,7 @@ impl PPU {
         offset & !((is_mirrored as u8) << 4)
     }
 
-    fn read_byte(&self, mapper: &dyn Mapper, addr: u16) -> u8 {
+    pub(crate) fn read_byte(&self, mapper: &dyn Mapper, addr: u16) -> u8 {
         match addr {
             0x0000..=0x1fff => mapper.read(addr),
             0x2000..=0x3eff => {
@@ -750,7 +750,7 @@ impl PPU {
         }
     }
 
-    fn write_byte(&mut self, mapper: &mut dyn Mapper, addr: u16, data: u8) {
+    pub(crate) fn write_byte(&mut self, mapper: &mut dyn Mapper, addr: u16, data: u8) {
         match addr {
             0x0000..=0x1fff => mapper.write(addr, data),
             0x2000..=0x3eff => {

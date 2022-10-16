@@ -22,7 +22,7 @@ pub(crate) struct CPU {
     y: u8,
     status: u8,
     sp: u8,
-    ram: [u8; 0x800],
+    pub(crate) ram: [u8; 0x800],
 }
 
 impl Default for CPU {
@@ -526,7 +526,7 @@ impl CPU {
         }
     }
 
-    fn read_byte(&self, bus: &MemoryBus, addr: u16) -> u8 {
+    pub(crate) fn read_byte(&self, bus: &MemoryBus, addr: u16) -> u8 {
         // https://www.nesdev.org/wiki/CPU_memory_map
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()],
@@ -563,7 +563,7 @@ impl CPU {
         u16::from_le_bytes([lo, hi])
     }
 
-    fn write_byte(&mut self, bus: &mut MemoryBus, addr: u16, data: u8) {
+    pub(crate) fn write_byte(&mut self, bus: &mut MemoryBus, addr: u16, data: u8) {
         // https://www.nesdev.org/wiki/CPU_memory_map
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()] = data,
