@@ -2,7 +2,6 @@ use clap::builder::Str;
 use clap::Parser;
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
 use nes::controller::ButtonState;
-use nes::snapshot::Snapshot;
 use nes::{cartridge, console::Console, controller::Button};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -119,8 +118,6 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
         .build()
         .expect("could not make a canvas");
 
-    let mut history: VecDeque<Snapshot> = VecDeque::new();
-
     canvas.set_draw_color(Color::RGB(0, 0, 0));
     canvas.clear();
     canvas.present();
@@ -139,6 +136,7 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
 
     'run_loop: loop {
         let pre_draw = std::time::Instant::now();
+
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -178,20 +176,12 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
         }
 
         if rewind {
-            match history.pop_back() {
-                Some(snapshot) => {
-                    console.restore_snapshot(snapshot, &cpu_ignore_rewind, &ppu_ignore_rewind)
-                }
-                None => {
-                    console.update_buttons(button_state);
-                    rewind = false;
-                }
-            }
+            console.rewind();
         }
 
-        console.wait_vblank();
+        let screen = console.next_screen();
 
-        for (y, row) in console.screen().pixels.iter().enumerate() {
+        for (y, row) in screen.pixels.iter().enumerate() {
             for (x, palette_color) in row.iter().enumerate() {
                 // decode the palette
                 let [_, r, g, b] = PALETTE_RGB[*palette_color as usize].to_be_bytes();
@@ -211,16 +201,11 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
             }
         }
 
-        canvas.clear();
         texture
             .update(None, &raw_texture, (SCALING * WIDTH * 3) as usize)
             .unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
-
-        if !rewind {
-            history.push_back(console.take_snapshot());
-        }
 
         // sleep for 1/60th of a second
         let elapsed = pre_draw.elapsed();
@@ -250,7 +235,6 @@ enum CLI {
 
 fn main() {
     let args = CLI::parse();
-    println!("size of snapshot = {}", std::mem::size_of::<Snapshot>());
 
     match args {
         CLI::CHRDump { rom, out } => save_png(&rom, &out),
