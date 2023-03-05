@@ -11,8 +11,8 @@ pub enum Button {
     Right = 7,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ButtonState(u8);
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ButtonState(pub u8);
 
 impl ButtonState {
     pub fn set(&mut self, button: Button) {
@@ -26,7 +26,7 @@ impl ButtonState {
 
 #[derive(Clone, Default)]
 pub(crate) struct Controller {
-    button_state: ButtonState,
+    pub(crate) button_state: ButtonState,
     strobe: bool,
 
     index: Cell<u8>,
