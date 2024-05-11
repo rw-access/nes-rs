@@ -14,7 +14,7 @@ pub(crate) struct MemoryBus {
 impl MemoryBus {
     fn new(mapper: Box<dyn Mapper>) -> Self {
         MemoryBus {
-            mapper: mapper,
+            mapper,
             ppu: PPU::default(),
             apu: APU::default(),
             controller: Controller::default(),

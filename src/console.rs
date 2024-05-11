@@ -15,23 +15,27 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
-    fn step(&mut self, screen: &mut Screen) {
+    fn step<F: Fn(f32)>(&mut self, screen: &mut Screen, process_sample: F) {
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
         for _ in 0..cycles {
+            if let Some(sample) = self.bus.apu.step() {
+                process_sample(sample);
+            }
+
             for _ in 0..3 {
                 self.bus.ppu.step(self.bus.mapper.as_mut(), screen);
             }
         }
     }
 
-    pub(crate) fn wait_vblank(&mut self, screen: &mut Screen) {
+    pub(crate) fn wait_vblank<F: Fn(f32)>(&mut self, screen: &mut Screen, process_sample: F) {
         // only return on a positive edge
         while self.bus.ppu.in_vblank {
-            self.step(screen);
+            self.step(screen, &process_sample);
         }
 
         while !self.bus.ppu.in_vblank {
-            self.step(screen);
+            self.step(screen, &process_sample);
         }
     }
 }
@@ -123,8 +127,8 @@ impl Console {
         console
     }
 
-    pub fn next_screen(&mut self) -> &Screen {
-        self.state.wait_vblank(&mut self.screen);
+    pub fn next_screen<F: Fn(f32)>(&mut self, process_sample: F) -> &Screen {
+        self.state.wait_vblank(&mut self.screen, process_sample);
 
         if !self.in_rewind {
             self.tape.push_back(self.state.clone());
