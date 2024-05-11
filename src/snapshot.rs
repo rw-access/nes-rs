@@ -156,7 +156,7 @@ impl RewindTape {
                     .controller
                     .update_buttons(next_buttons.buttons);
 
-                next_state.wait_vblank(screen);
+                next_state.wait_vblank(screen, |_| {});
                 decoded_snapshots.push((next_state, next_buttons.buttons));
 
                 if next_buttons.count > 0 {

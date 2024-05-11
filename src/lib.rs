@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate lazy_static;
+
 pub(crate) mod apu;
 pub(crate) mod bus;
 pub mod cartridge;
@@ -8,3 +11,4 @@ pub mod ines;
 mod instructions;
 pub(crate) mod ppu;
 pub mod snapshot;
+mod dsp;

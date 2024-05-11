@@ -54,7 +54,9 @@ impl CPU {
         self.x = 0;
         self.y = 0;
         self.sp = 0xfd;
-        self.status = (1 << StatusFlags::I as u8) | (1 << StatusFlags::U as u8);
+        self.status = 0;
+        self.write_status_bit(StatusFlags::I, true);
+        self.write_status_bit(StatusFlags::U, true);
         self.pc = self.read_address(bus, 0xfffc);
 
         // Disable frame IRQ, disable all audio, clear IO registers
@@ -88,23 +90,36 @@ impl CPU {
         self.set_nz(value as u8);
     }
 
-    pub(crate) fn step(
-        &mut self,
-        bus: &mut MemoryBus,
-        log: Option<&mut dyn std::io::Write>,
-    ) -> u16 {
+    fn nmi(&mut self, bus: &mut MemoryBus, log: Option<&mut dyn std::io::Write>) -> u16 {
+        if let Some(log) = log {
+            write!(log, "======== NMI ========\n").unwrap();
+        }
+
+        self.push_address(bus, self.pc);
+        self.dispatch(bus, Opcode::PHP, None);
+        self.pc = self.read_address(bus, 0xFFFA);
+        self.write_status_bit(StatusFlags::I, true);
+        self.cycles = self.cycles.wrapping_add(7);
+        7
+    }
+
+    fn irq(&mut self, bus: &mut MemoryBus, log: Option<&mut dyn std::io::Write>) -> u16 {
+        if let Some(log) = log {
+            write!(log, "======== IRQ ========\n").unwrap();
+        }
+
+        self.push_address(bus, self.pc);
+        self.dispatch(bus, Opcode::PHP, None);
+        self.pc = self.read_address(bus, 0xFFFE);
+        self.write_status_bit(StatusFlags::I, true);
+        self.cycles = self.cycles.wrapping_add(7);
+        7
+    }
+
+    pub(crate) fn step(&mut self,  bus: &mut MemoryBus, log: Option<&mut dyn std::io::Write>) -> u16 {
         // NMI takes the highest priority
         if bus.ppu.read_nmi_line() {
-            if let Some(log) = log {
-                write!(log, "======== NMI ========\n").unwrap();
-            }
-
-            self.push_address(bus, self.pc);
-            self.dispatch(bus, Opcode::PHP, None);
-            self.pc = self.read_address(bus, 0xFFFA);
-            self.write_status_bit(StatusFlags::I, true);
-            self.cycles = self.cycles.wrapping_add(7);
-            return 7;
+            return self.nmi(bus, log);
         }
 
         // Cartridge IRQs are maskable and are checked between instructions.
@@ -117,9 +132,14 @@ impl CPU {
             return 7;
         }
 
+        // APU frame IRQs are maskable and are checked between instructions.
+        if !self.check_status_bit(StatusFlags::I) && bus.apu.read_irq_line() {
+            return self.irq(bus, log);
+        }
+
         let pre_cycles = self.cycles;
 
-        // decode the instrucation @ PC
+        // decode the instruction @ PC
         let instr = self.decode(bus, self.pc);
 
         if let Some(writer) = log {
@@ -541,7 +561,7 @@ impl CPU {
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()],
             0x2000..=0x3fff => bus.ppu.read_register(bus.mapper.as_ref(), addr), // PPU
-            0x4000..=0x4013 => 0,                                                // APU
+            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),    // APU
             0x4014 => 0,                                                         // DMA
             0x4016 => bus.controller.read(),                                     // controller 1
             0x4017 => 0,                                                         // controller 2
@@ -578,13 +598,12 @@ impl CPU {
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()] = data,
             0x2000..=0x3fff => bus.ppu.write_register(bus.mapper.as_mut(), addr, data), // PPU
-            0x4000..=0x4013 => {}                                                       // APU
+            0x4000..=0x4013 | 0x4015 | 0x4017 => bus.apu.write_register(addr, data),    // APU
             0x4014 => {
                 let page = self.read_page(bus.mapper.as_ref(), data);
                 bus.ppu.write_dma(page);
             } // DMA
             0x4016 => bus.controller.write(data), // controller 1
-            0x4017 => {}                          // controller 2
             0x4018..=0x401F => {}                 // disabled test mode
             _ => bus.mapper.write(addr, data),
         };

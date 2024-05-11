@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use clap::builder::Str;
 use clap::Parser;
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
@@ -12,6 +13,7 @@ use sdl2::sys::KeyCode;
 use std::collections::VecDeque;
 use std::process::exit;
 use std::time::Duration;
+use sdl2::audio::AudioSpecDesired;
 
 const PALETTE_RGB: [u32; 64] = [
     0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00, 0x333500,
@@ -105,6 +107,7 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
+    let audio_subsystem = sdl_context.audio().unwrap();
 
     // draw the screen, for now make a function
     let window = video_subsystem
@@ -122,6 +125,21 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
     canvas.clear();
     canvas.present();
 
+    // create audio device, start it, and open buffer
+
+    let audio_device = audio_subsystem
+        .open_queue::<f32, _>(
+            None,
+            &AudioSpecDesired {
+                freq: Some(48_000),
+                channels: Some(1),
+                samples: Some(48_000 / 60 / 4), // quarter frame buffer
+            },
+        )
+        .unwrap();
+
+    audio_device.resume();
+
     let mut event_pump = sdl_context.event_pump().unwrap();
 
     let creator = canvas.texture_creator();
@@ -129,10 +147,11 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
         .create_texture_target(PixelFormatEnum::RGB24, WIDTH * SCALING, HEIGHT * SCALING)
         .unwrap();
 
-    let mut raw_texture = [0 as u8; (WIDTH * HEIGHT * SCALING * SCALING * 3) as usize];
+    let mut raw_texture = [0u8; (WIDTH * HEIGHT * SCALING * SCALING * 3) as usize];
 
     let mut rewind = false;
     let mut button_state = ButtonState::default();
+    let mut sample_counter =Cell::new(0u32);
 
     'run_loop: loop {
         let pre_draw = std::time::Instant::now();
@@ -179,7 +198,21 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
             console.rewind();
         }
 
-        let screen = console.next_screen();
+        let mut samples = [0f32; 48_000 / 60];
+        for sample in samples.iter_mut() {
+            sample_counter.set(sample_counter.get().wrapping_add(1));
+
+            // get sine wave, 440hz
+            let sin_sample = (sample_counter.get() as f32 / 60.0 * 440.0 * std::f32::consts::PI * 2.0).sin();
+           *sample = sin_sample;
+        }
+
+        // audio_device.queue(&samples);
+
+        // test sine wave
+        let screen = console.next_screen(|sample| {
+           audio_device.queue(&[sample]);
+        });
 
         for (y, row) in screen.pixels.iter().enumerate() {
             for (x, palette_color) in row.iter().enumerate() {
@@ -210,7 +243,7 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
         // sleep for 1/60th of a second
         let elapsed = pre_draw.elapsed();
         if elapsed < frame_duration {
-            std::thread::sleep(frame_duration - elapsed);
+            std::thread::sleep(frame_duration - elapsed - Duration::from_micros(1000));
         }
     }
 }
