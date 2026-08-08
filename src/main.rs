@@ -1,19 +1,22 @@
-use std::cell::Cell;
-use clap::builder::Str;
 use clap::Parser;
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
 use nes::controller::ButtonState;
-use nes::{cartridge, console::Console, controller::Button, apu::ChannelMask};
+use nes::{
+    apu::ChannelMask,
+    cartridge,
+    console::{AudioBlock, AudioQueueAction, AudioQueuePacer, Console},
+    controller::Button,
+};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::{Color, PixelFormatEnum};
-use sdl2::sys::KeyCode;
 // Construct a new RGB ImageBuffer with the specified width and height.
 
-use std::collections::VecDeque;
-use std::process::exit;
-use std::time::Duration;
 use sdl2::audio::AudioSpecDesired;
+use std::time::Duration;
+
+const AUDIO_SAMPLE_RATE: usize = 48_000;
+const AUDIO_FRAME_SAMPLES: usize = AUDIO_SAMPLE_RATE / 60;
 
 const PALETTE_RGB: [u32; 64] = [
     0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00, 0x333500,
@@ -97,8 +100,6 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
     const SCALING: u32 = 2;
     const WIDTH: u32 = 256;
     const HEIGHT: u32 = 240;
-    let frame_duration = Duration::from_secs(1) / 60;
-
     let mut rom_file = std::fs::File::open(rom_path).unwrap();
 
     let (c, m) = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
@@ -133,16 +134,19 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
             &AudioSpecDesired {
                 freq: Some(48_000),
                 channels: Some(1),
-                samples: Some(48_000 / 60 / 4), // quarter frame buffer
+                samples: Some(AUDIO_FRAME_SAMPLES as u16),
             },
         )
         .unwrap();
 
-    if audio_device.spec().freq != 48_000 {
+    if audio_device.spec().freq != AUDIO_SAMPLE_RATE as i32 {
         panic!("expected 48 KHz sample rate")
     }
 
-    audio_device.resume();
+    // Keep the device paused until several complete frame blocks are queued.
+    audio_device.pause();
+    let mut audio_pacer = AudioQueuePacer::new(AUDIO_FRAME_SAMPLES);
+    let mut audio_block = AudioBlock::with_capacity(AUDIO_FRAME_SAMPLES);
 
     let mut event_pump = sdl_context.event_pump().unwrap();
 
@@ -155,11 +159,7 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
 
     let mut rewind = false;
     let mut button_state = ButtonState::default();
-    let mut sample_counter =Cell::new(0u32);
-
     'run_loop: loop {
-        let pre_draw = std::time::Instant::now();
-
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. }
@@ -194,11 +194,11 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
                         console.update_buttons(button_state);
                     }
 
-                    console.update_channel_mask(ChannelMask{
+                    console.update_channel_mask(ChannelMask {
                         pulse1: k == Keycode::Num1,
                         pulse2: k == Keycode::Num2,
                         triangle: k == Keycode::Num3,
-                        noise: k ==  Keycode::Num4,
+                        noise: k == Keycode::Num4,
                     })
                 }
                 _ => {}
@@ -209,21 +209,32 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
             console.rewind();
         }
 
-        let mut samples = [0f32; 48_000 / 60];
-        for sample in samples.iter_mut() {
-            sample_counter.set(sample_counter.get().wrapping_add(1));
-
-            // get sine wave, 440hz
-            let sin_sample = (sample_counter.get() as f32 / 60.0 * 440.0 * std::f32::consts::PI * 2.0).sin();
-           *sample = sin_sample;
+        if console.take_audio_reset() {
+            audio_device.pause();
+            audio_device.clear();
+            audio_pacer.reset();
+            audio_block.clear();
         }
 
-        // audio_device.queue(&samples);
-
-        // test sine wave
+        audio_block.clear();
         let screen = console.next_screen(|sample| {
-           audio_device.queue(&[sample]);
+            audio_block.push(sample);
         });
+
+        if !audio_block.is_empty() && !audio_device.queue(audio_block.as_slice()) {
+            panic!("failed to queue audio block");
+        }
+
+        let queued_samples = || audio_device.size() as usize / std::mem::size_of::<f32>();
+        match audio_pacer.observe(queued_samples()) {
+            AudioQueueAction::Resume => audio_device.resume(),
+            AudioQueueAction::Pace => {
+                while queued_samples() > audio_pacer.target_samples() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            AudioQueueAction::WaitForPrefill | AudioQueueAction::Continue => {}
+        }
 
         for (y, row) in screen.pixels.iter().enumerate() {
             for (x, palette_color) in row.iter().enumerate() {
@@ -250,12 +261,6 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
             .unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
-
-        // sleep for 1/60th of a second
-        let elapsed = pre_draw.elapsed();
-        if elapsed < frame_duration {
-            std::thread::sleep(frame_duration - elapsed - Duration::from_micros(1000));
-        }
     }
 }
 
