@@ -173,6 +173,11 @@ impl Console {
         self.state.clone()
     }
 
+    /// Reads a byte through the CPU memory map without exposing mutable state.
+    pub fn read_memory(&self, address: u16) -> u8 {
+        self.state.cpu.read_byte(&self.state.bus, address)
+    }
+
     pub fn restore_snapshot(
         &mut self,
         snapshot: ConsoleState,
