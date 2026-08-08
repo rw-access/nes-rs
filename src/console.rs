@@ -245,7 +245,7 @@ impl Console {
         self.state.wait_vblank(&mut self.screen, process_sample);
 
         if !self.in_rewind {
-            // self.tape.push_back(self.state.clone());
+            self.tape.push_back(self.state.clone());
         }
 
         self.in_rewind = false;

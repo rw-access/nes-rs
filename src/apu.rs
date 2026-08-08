@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use crate::dsp::FirstOrderFilter;
 
 const LENGTH_COUNTER_TABLE: [u8; 32] = [
@@ -301,7 +303,7 @@ pub(crate) struct APU {
     on_sample_edge: bool,
     use_five_step: bool,
     enable_irq: bool,
-    pending_irq: bool,
+    pending_irq: Cell<bool>,
     on_apu_cycle: bool,
 
     first_order_filters: [FirstOrderFilter; 3],
@@ -327,7 +329,7 @@ impl Default for APU {
             on_sample_edge: false,
             use_five_step: false,
             enable_irq: false,
-            pending_irq: false,
+            pending_irq: Cell::new(false),
             on_apu_cycle: true,
             first_order_filters: [
                 FirstOrderFilter::high_pass(48_000.0, 90.0),
@@ -353,8 +355,8 @@ impl APU {
     }
 
     pub(crate) fn read_irq_line(&mut self) -> bool {
-        let irq = self.pending_irq;
-        self.pending_irq = false;
+        let irq = self.pending_irq.get();
+        self.pending_irq.set(false);
         irq
     }
 
@@ -428,7 +430,7 @@ impl APU {
                 self.clock_quarter_frame();
                 self.clock_half_frame();
                 if self.enable_irq {
-                    self.pending_irq = true;
+                    self.pending_irq.set(true);
                 }
             }
             4 => {
@@ -503,10 +505,12 @@ impl APU {
     pub(crate) fn read_register(&self, addr: u16) -> u8 {
         match addr {
             0x4015 => {
-                (self.pulses[0].length_counter > 0) as u8
+                let status = (self.pulses[0].length_counter > 0) as u8
                     | (((self.pulses[1].length_counter > 0) as u8) << 1)
                     | (((self.triangle.length_counter > 0) as u8) << 2)
-                    | (((self.noise.length_counter > 0) as u8) << 3)
+                    | (((self.noise.length_counter > 0) as u8) << 3);
+                let frame_irq = self.pending_irq.replace(false) as u8;
+                status | (frame_irq << 6)
             }
             _ => 0,
         }
@@ -609,7 +613,7 @@ impl APU {
                 self.use_five_step = (data >> 7) & 1 != 0;
                 self.enable_irq = (data >> 6) & 1 == 0;
                 if !self.enable_irq {
-                    self.pending_irq = false;
+                    self.pending_irq.set(false);
                 }
 
                 self.frame_counter_cycle = 0;
@@ -721,6 +725,22 @@ mod tests {
     }
 
     #[test]
+    fn reading_status_reports_and_clears_frame_irq() {
+        let mut apu = APU::default();
+        apu.pulses[0].length_counter = 1;
+        apu.noise.length_counter = 1;
+        apu.pending_irq.set(true);
+
+        assert_eq!(apu.read_register(0x4015), 0x49);
+        assert!(!apu.pending_irq.get());
+        assert!(!apu.read_irq_line());
+
+        apu.pending_irq.set(true);
+        assert!(apu.read_irq_line());
+        assert_eq!(apu.read_register(0x4015), 0x09);
+    }
+
+    #[test]
     fn frame_counter_follows_four_and_five_step_schedules() {
         let mut apu = APU::default();
         apu.pulses[0].volume_envelope.decay_level_counter = 15;
@@ -747,7 +767,7 @@ mod tests {
         for _ in 0..14916 {
             apu.step_frame_counter();
         }
-        assert!(apu.pending_irq); // 29829: final 4-step clock
+        assert!(apu.pending_irq.get()); // 29829: final 4-step clock
 
         let mut five_step = APU::default();
         five_step.write_register(0x4017, 0x80);
@@ -759,6 +779,6 @@ mod tests {
         five_step.step_frame_counter(); // 37281: final 5-step clock
         assert_eq!(five_step.frame_counter_cycle, 0);
         assert_eq!(five_step.frame_counter_step, 0);
-        assert!(!five_step.pending_irq);
+        assert!(!five_step.pending_irq.get());
     }
 }
