@@ -11,6 +11,12 @@ const NOISE_PERIOD_TABLE: [u16; 16] = [
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
 ];
 
+// The DMC rate table is specified in CPU cycles.  APU timers are clocked on
+// every other CPU cycle, so the unit stores these periods divided by two.
+const DMC_RATE_TABLE: [u16; 16] = [
+    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
+];
+
 lazy_static! {
     static ref PULSE_TABLE: [f32; 31] = {
         let mut table = [0.0; 31];
@@ -270,6 +276,148 @@ impl Noise {
 }
 
 #[derive(Clone)]
+struct Dmc {
+    irq_enabled: bool,
+    loop_flag: bool,
+    rate_index: u8,
+    timer: u16,
+    timer_period: u16,
+
+    output_level: u8,
+    sample_address: u16,
+    sample_length: u16,
+    current_address: u16,
+    bytes_remaining: u16,
+
+    sample_buffer: Option<u8>,
+    shift_register: u8,
+    bits_remaining: u8,
+    silence: bool,
+    irq_pending: bool,
+}
+
+impl Default for Dmc {
+    fn default() -> Self {
+        Self {
+            irq_enabled: false,
+            loop_flag: false,
+            rate_index: 0,
+            timer: 0,
+            timer_period: DMC_RATE_TABLE[0] / 2,
+            output_level: 0,
+            sample_address: 0xc000,
+            sample_length: 1,
+            current_address: 0xc000,
+            bytes_remaining: 0,
+            sample_buffer: None,
+            shift_register: 0,
+            bits_remaining: 0,
+            silence: true,
+            irq_pending: false,
+        }
+    }
+}
+
+impl Dmc {
+    fn write_control(&mut self, data: u8) {
+        self.irq_enabled = data & 0x80 != 0;
+        self.loop_flag = data & 0x40 != 0;
+        self.rate_index = data & 0x0f;
+        self.timer_period = DMC_RATE_TABLE[self.rate_index as usize] / 2;
+
+        if !self.irq_enabled {
+            self.irq_pending = false;
+        }
+    }
+
+    fn write_direct_load(&mut self, data: u8) {
+        self.output_level = data & 0x7f;
+    }
+
+    fn write_sample_address(&mut self, data: u8) {
+        self.sample_address = 0xc000 | ((data as u16) << 6);
+    }
+
+    fn write_sample_length(&mut self, data: u8) {
+        self.sample_length = ((data as u16) << 4) | 1;
+    }
+
+    fn restart(&mut self) {
+        self.current_address = self.sample_address;
+        self.bytes_remaining = self.sample_length;
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        if !enabled {
+            self.bytes_remaining = 0;
+        } else if self.bytes_remaining == 0 {
+            self.restart();
+        }
+    }
+
+    fn read_sample_byte<F: FnMut(u16) -> u8>(&mut self, read_memory: &mut F) {
+        if self.sample_buffer.is_some() || self.bytes_remaining == 0 {
+            return;
+        }
+
+        self.sample_buffer = Some(read_memory(self.current_address));
+        self.current_address = if self.current_address == 0xffff {
+            0x8000
+        } else {
+            self.current_address + 1
+        };
+        self.bytes_remaining -= 1;
+
+        if self.bytes_remaining == 0 {
+            if self.loop_flag {
+                self.restart();
+            } else if self.irq_enabled {
+                self.irq_pending = true;
+            }
+        }
+    }
+
+    fn clock_output(&mut self) {
+        if self.bits_remaining == 0 {
+            if let Some(sample) = self.sample_buffer.take() {
+                self.shift_register = sample;
+                self.bits_remaining = 8;
+                self.silence = false;
+            } else {
+                self.silence = true;
+                self.bits_remaining = 8;
+            }
+        }
+
+        if !self.silence {
+            if self.shift_register & 1 != 0 {
+                self.output_level = self.output_level.saturating_add(2).min(127);
+            } else {
+                self.output_level = self.output_level.saturating_sub(2);
+            }
+        }
+
+        self.shift_register >>= 1;
+        self.bits_remaining -= 1;
+    }
+
+    fn step_timer<F: FnMut(u16) -> u8>(&mut self, mut read_memory: F) {
+        // The reader is independent of the output timer.  This simplified DMA
+        // model performs the byte transfer during the APU step without adding
+        // CPU halt/alignment cycles; the address and end-of-sample semantics
+        // remain those of the hardware.
+        self.read_sample_byte(&mut read_memory);
+
+        if self.timer > 0 {
+            self.timer -= 1;
+        } else {
+            self.timer = self.timer_period.saturating_sub(1);
+            self.clock_output();
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ChannelMask {
     pub pulse1: bool,
     pub pulse2: bool,
@@ -293,6 +441,7 @@ pub(crate) struct APU {
     pulses: [Pulse; 2],
     triangle: Triangle,
     noise: Noise,
+    dmc: Dmc,
     channel_mask: ChannelMask,
 
     cycles_x_sample_freq: u32,
@@ -319,6 +468,7 @@ impl Default for APU {
             pulses,
             triangle: Triangle::default(),
             noise: Noise::default(),
+            dmc: Dmc::default(),
             channel_mask: ChannelMask::default(),
 
             cycles_x_sample_freq: 0,
@@ -354,10 +504,8 @@ impl APU {
         self.sample_freq = sample_freq;
     }
 
-    pub(crate) fn read_irq_line(&mut self) -> bool {
-        let irq = self.pending_irq.get();
-        self.pending_irq.set(false);
-        irq
+    pub(crate) fn irq_line(&self) -> bool {
+        self.pending_irq.get() || self.dmc.irq_pending
     }
 
     fn update_ticks(&mut self) {
@@ -375,14 +523,13 @@ impl APU {
         self.on_apu_cycle = !self.on_apu_cycle;
     }
 
-    pub(crate) fn step(&mut self) -> Option<f32> {
+    pub(crate) fn step<F: FnMut(u16) -> u8>(&mut self, read_memory: F) -> Option<f32> {
         if self.on_apu_cycle {
             // pulse + noise + DMC
             self.pulses[0].step_timer();
             self.pulses[1].step_timer();
             self.noise.step_timer();
-
-            // TODO: DMC
+            self.dmc.step_timer(read_memory);
         }
 
         self.triangle.step_timer();
@@ -486,7 +633,7 @@ impl APU {
         };
 
         let pulse_sample = PULSE_TABLE[(pulse_1 + pulse_2) as usize];
-        let tnd_sample = TND_TABLE[(3 * triangle + 2 * noise) as usize];
+        let tnd_sample = TND_TABLE[(3 * triangle + 2 * noise + self.dmc.output_level) as usize];
         pulse_sample + tnd_sample
     }
 
@@ -508,9 +655,10 @@ impl APU {
                 let status = (self.pulses[0].length_counter > 0) as u8
                     | (((self.pulses[1].length_counter > 0) as u8) << 1)
                     | (((self.triangle.length_counter > 0) as u8) << 2)
-                    | (((self.noise.length_counter > 0) as u8) << 3);
+                    | (((self.noise.length_counter > 0) as u8) << 3)
+                    | ((self.dmc.bytes_remaining > 0) as u8) << 4;
                 let frame_irq = self.pending_irq.replace(false) as u8;
-                status | (frame_irq << 6)
+                status | (frame_irq << 6) | ((self.dmc.irq_pending as u8) << 7)
             }
             _ => 0,
         }
@@ -586,12 +734,17 @@ impl APU {
                 }
                 self.noise.volume_envelope.start = true;
             }
-            0x4010 | 0x4011 | 0x4012 | 0x4013 => {}
+            0x4010 => self.dmc.write_control(data),
+            0x4011 => self.dmc.write_direct_load(data),
+            0x4012 => self.dmc.write_sample_address(data),
+            0x4013 => self.dmc.write_sample_length(data),
             0x4015 => {
                 self.pulses[0].enabled = data & 0x1 != 0;
                 self.pulses[1].enabled = (data >> 1) & 0x1 != 0;
                 self.triangle.enabled = (data >> 2) & 0x1 != 0;
                 self.noise.enabled = (data >> 3) & 0x1 != 0;
+                self.dmc.set_enabled(data & 0x10 != 0);
+                self.dmc.irq_pending = false;
 
                 if !self.pulses[0].enabled {
                     self.pulses[0].length_counter = 0;
@@ -733,11 +886,131 @@ mod tests {
 
         assert_eq!(apu.read_register(0x4015), 0x49);
         assert!(!apu.pending_irq.get());
-        assert!(!apu.read_irq_line());
+        assert!(!apu.irq_line());
 
         apu.pending_irq.set(true);
-        assert!(apu.read_irq_line());
-        assert_eq!(apu.read_register(0x4015), 0x09);
+        assert!(apu.irq_line());
+        assert!(apu.irq_line());
+        assert_eq!(apu.read_register(0x4015), 0x49);
+        assert!(!apu.irq_line());
+    }
+
+    #[test]
+    fn dmc_registers_decode_control_and_sample_parameters() {
+        let mut apu = APU::default();
+
+        apu.write_register(0x4010, 0xcf);
+        apu.write_register(0x4011, 0xff);
+        apu.write_register(0x4012, 0x12);
+        apu.write_register(0x4013, 0x02);
+
+        assert!(apu.dmc.irq_enabled);
+        assert!(apu.dmc.loop_flag);
+        assert_eq!(apu.dmc.rate_index, 0x0f);
+        assert_eq!(apu.dmc.timer_period, 27);
+        assert_eq!(apu.dmc.output_level, 127);
+        assert_eq!(apu.dmc.sample_address, 0xc480);
+        assert_eq!(apu.dmc.sample_length, 33);
+    }
+
+    #[test]
+    fn dmc_output_updates_on_timer_and_clamps_to_seven_bits() {
+        let mut dmc = Dmc::default();
+        dmc.timer_period = 2;
+        dmc.output_level = 126;
+        dmc.sample_buffer = Some(0xff);
+
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 127);
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 127);
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 127);
+
+        dmc.output_level = 1;
+        dmc.sample_buffer = Some(0x00);
+        dmc.bits_remaining = 0;
+        dmc.silence = true;
+        dmc.timer = 0;
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 0);
+    }
+
+    #[test]
+    fn dmc_rate_period_is_measured_in_apu_cycles() {
+        let mut dmc = Dmc::default();
+        dmc.write_control(0x00);
+        dmc.sample_buffer = Some(0xff);
+
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 2);
+
+        for _ in 0..(dmc.timer_period - 1) {
+            dmc.step_timer(|_| 0);
+        }
+        assert_eq!(dmc.output_level, 2);
+
+        dmc.step_timer(|_| 0);
+        assert_eq!(dmc.output_level, 4);
+    }
+
+    #[test]
+    fn dmc_reader_advances_and_wraps_memory_address() {
+        let mut dmc = Dmc::default();
+        dmc.current_address = 0xffff;
+        dmc.bytes_remaining = 2;
+        let mut addresses = Vec::new();
+
+        dmc.step_timer(|address| {
+            addresses.push(address);
+            address as u8
+        });
+        dmc.step_timer(|address| {
+            addresses.push(address);
+            address as u8
+        });
+
+        assert_eq!(addresses, [0xffff, 0x8000]);
+        assert_eq!(dmc.current_address, 0x8001);
+        assert_eq!(dmc.bytes_remaining, 0);
+    }
+
+    #[test]
+    fn dmc_enable_restart_disable_loop_and_irq_follow_status_rules() {
+        let mut apu = APU::default();
+        apu.write_register(0x4010, 0x80);
+        apu.write_register(0x4012, 0x20);
+        apu.write_register(0x4013, 0x00);
+        apu.write_register(0x4015, 0x10);
+        assert_eq!(apu.dmc.bytes_remaining, 1);
+        assert_eq!(apu.read_register(0x4015) & 0x10, 0x10);
+
+        apu.dmc.step_timer(|_| 0x80);
+        assert_eq!(apu.dmc.bytes_remaining, 0);
+        assert_eq!(apu.read_register(0x4015) & 0x80, 0x80);
+        assert!(apu.irq_line());
+        assert_eq!(apu.read_register(0x4015) & 0x80, 0x80);
+
+        apu.write_register(0x4010, 0);
+        assert!(!apu.dmc.irq_pending);
+        assert!(!apu.irq_line());
+
+        apu.write_register(0x4015, 0);
+        assert_eq!(apu.dmc.bytes_remaining, 0);
+        assert!(!apu.dmc.irq_pending);
+        assert!(!apu.irq_line());
+
+        apu.write_register(0x4010, 0xc0);
+        apu.write_register(0x4015, 0x10);
+        apu.dmc.step_timer(|_| 0x80);
+        assert_eq!(apu.dmc.bytes_remaining, 1);
+        assert!(!apu.dmc.irq_pending);
+        assert_eq!(apu.dmc.current_address, apu.dmc.sample_address);
+
+        // An active sample is not restarted by a second enable write.
+        apu.dmc.current_address = 0xc123;
+        apu.write_register(0x4015, 0x10);
+        assert_eq!(apu.dmc.current_address, 0xc123);
     }
 
     #[test]

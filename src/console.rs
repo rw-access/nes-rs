@@ -20,7 +20,12 @@ impl ConsoleState {
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
         for _ in 0..cycles {
             self.bus.mapper.clock_cpu();
-            if let Some(sample) = self.bus.apu.step() {
+            // Temporarily take the APU so its DMC memory callback can read the
+            // CPU address space without aliasing the mutable APU borrow.
+            let mut apu = std::mem::take(&mut self.bus.apu);
+            let sample = apu.step(|addr| self.cpu.read_byte(&self.bus, addr));
+            self.bus.apu = apu;
+            if let Some(sample) = sample {
                 process_sample(sample);
             }
             for _ in 0..3 {

@@ -116,7 +116,11 @@ impl CPU {
         7
     }
 
-    pub(crate) fn step(&mut self,  bus: &mut MemoryBus, log: Option<&mut dyn std::io::Write>) -> u16 {
+    pub(crate) fn step(
+        &mut self,
+        bus: &mut MemoryBus,
+        log: Option<&mut dyn std::io::Write>,
+    ) -> u16 {
         // NMI takes the highest priority
         if bus.ppu.read_nmi_line() {
             return self.nmi(bus, log);
@@ -133,7 +137,7 @@ impl CPU {
         }
 
         // APU frame IRQs are maskable and are checked between instructions.
-        if !self.check_status_bit(StatusFlags::I) && bus.apu.read_irq_line() {
+        if !self.check_status_bit(StatusFlags::I) && bus.apu.irq_line() {
             return self.irq(bus, log);
         }
 
@@ -561,7 +565,7 @@ impl CPU {
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()],
             0x2000..=0x3fff => bus.ppu.read_register(bus.mapper.as_ref(), addr), // PPU
-            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),    // APU
+            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),             // APU
             0x4014 => 0,                                                         // DMA
             0x4016 => bus.controller.read(),                                     // controller 1
             0x4017 => 0,                                                         // controller 2
