@@ -157,7 +157,17 @@ impl CPU {
             .wrapping_add(instr.extended_opcode.min_cycles as u64)
             .wrapping_add(if instr.page_boundary_hit { 1 } else { 0 });
 
+        // Memory writes occur on the final cycle of a 6502 instruction. Pass
+        // the write phase and the instruction duration to the APU so $4017's
+        // delayed reset is measured from the actual write cycle.
+        let instruction_cycles = self.cycles.wrapping_sub(pre_cycles) as u8;
+        let write_phase = bus
+            .apu
+            .phase_after_cpu_cycles(instruction_cycles.saturating_sub(1));
+        bus.apu
+            .set_register_write_timing(write_phase, instruction_cycles);
         self.dispatch(bus, instr.extended_opcode.opcode, instr.final_address);
+        bus.apu.clear_register_write_timing();
 
         self.cycles.wrapping_sub(pre_cycles) as u16
     }

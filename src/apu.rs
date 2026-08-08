@@ -448,6 +448,9 @@ pub(crate) struct APU {
     sample_freq: u32,
     frame_counter_cycle: u32,
     frame_counter_step: usize,
+    frame_counter_reset_delay: u8,
+    pending_five_step: bool,
+    register_write_timing: Option<(bool, u8)>,
 
     on_sample_edge: bool,
     use_five_step: bool,
@@ -475,6 +478,9 @@ impl Default for APU {
             sample_freq: 48_000,
             frame_counter_cycle: 0,
             frame_counter_step: 0,
+            frame_counter_reset_delay: 0,
+            pending_five_step: false,
+            register_write_timing: None,
 
             on_sample_edge: false,
             use_five_step: false,
@@ -506,6 +512,18 @@ impl APU {
 
     pub(crate) fn irq_line(&self) -> bool {
         self.pending_irq.get() || self.dmc.irq_pending
+    }
+
+    pub(crate) fn phase_after_cpu_cycles(&self, cycles: u8) -> bool {
+        self.on_apu_cycle ^ (cycles & 1 != 0)
+    }
+
+    pub(crate) fn set_register_write_timing(&mut self, write_phase: bool, instruction_cycles: u8) {
+        self.register_write_timing = Some((write_phase, instruction_cycles));
+    }
+
+    pub(crate) fn clear_register_write_timing(&mut self) {
+        self.register_write_timing = None;
     }
 
     fn update_ticks(&mut self) {
@@ -548,10 +566,25 @@ impl APU {
     }
 
     fn step_frame_counter(&mut self) {
+        if self.frame_counter_reset_delay > 0 {
+            self.frame_counter_reset_delay -= 1;
+            if self.frame_counter_reset_delay == 0 {
+                self.use_five_step = self.pending_five_step;
+                self.frame_counter_cycle = 0;
+                self.frame_counter_step = 0;
+
+                if self.use_five_step {
+                    self.clock_quarter_frame();
+                    self.clock_half_frame();
+                }
+            }
+            return;
+        }
+
         // NESdev's frame sequencer timings, expressed in CPU cycles from the
-        // reset of the sequence. The existing APU interface does not expose
-        // the exact $4017 write phase, so the sequence is reset on the write
-        // and then advanced once per CPU cycle here.
+        // reset of the sequence. The underlying sequencer advances on every
+        // other CPU clock; these are the resulting observable CPU-cycle
+        // positions of its quarter/half-frame events.
         const FOUR_STEP_CYCLES: [u32; 4] = [7457, 14913, 22371, 29829];
         const FIVE_STEP_CYCLES: [u32; 5] = [7457, 14913, 22371, 29829, 37281];
 
@@ -763,19 +796,21 @@ impl APU {
                 }
             }
             0x4017 => {
-                self.use_five_step = (data >> 7) & 1 != 0;
+                self.pending_five_step = (data >> 7) & 1 != 0;
                 self.enable_irq = (data >> 6) & 1 == 0;
                 if !self.enable_irq {
                     self.pending_irq.set(false);
                 }
 
-                self.frame_counter_cycle = 0;
-                self.frame_counter_step = 0;
-
-                if self.use_five_step {
-                    self.clock_quarter_frame();
-                    self.clock_half_frame();
-                }
+                // The restart takes effect on the next eligible odd APU
+                // phase: two or three CPU cycles after the write depending on
+                // whether the write arrived between APU phases or during one.
+                let (write_phase, instruction_cycles) = self
+                    .register_write_timing
+                    .take()
+                    .unwrap_or((self.on_apu_cycle, 0));
+                let phase_delay = if write_phase { 3 } else { 2 };
+                self.frame_counter_reset_delay = instruction_cycles + phase_delay;
             }
             _ => {}
         }
@@ -1016,11 +1051,11 @@ mod tests {
     #[test]
     fn frame_counter_follows_four_and_five_step_schedules() {
         let mut apu = APU::default();
+        apu.enable_irq = true;
         apu.pulses[0].volume_envelope.decay_level_counter = 15;
         apu.pulses[0].volume_envelope.period_or_constant_volume = 0;
         apu.pulses[0].length_counter = 3;
 
-        apu.write_register(0x4017, 0x00);
         for _ in 0..7456 {
             apu.step_frame_counter();
         }
@@ -1043,8 +1078,21 @@ mod tests {
         assert!(apu.pending_irq.get()); // 29829: final 4-step clock
 
         let mut five_step = APU::default();
+        five_step.pulses[0].volume_envelope.decay_level_counter = 1;
+        five_step.pulses[0].length_counter = 2;
         five_step.write_register(0x4017, 0x80);
         assert_eq!(five_step.frame_counter_cycle, 0);
+        assert_eq!(five_step.frame_counter_step, 0);
+        assert_eq!(five_step.pulses[0].volume_envelope.decay_level_counter, 1);
+        assert_eq!(five_step.pulses[0].length_counter, 2);
+        for _ in 0..(five_step.frame_counter_reset_delay - 1) {
+            five_step.step_frame_counter();
+        }
+        assert_eq!(five_step.pulses[0].volume_envelope.decay_level_counter, 1);
+        assert_eq!(five_step.pulses[0].length_counter, 2);
+        five_step.step_frame_counter();
+        assert_eq!(five_step.pulses[0].volume_envelope.decay_level_counter, 0);
+        assert_eq!(five_step.pulses[0].length_counter, 1);
         for _ in 0..37280 {
             five_step.step_frame_counter();
         }
@@ -1053,5 +1101,57 @@ mod tests {
         assert_eq!(five_step.frame_counter_cycle, 0);
         assert_eq!(five_step.frame_counter_step, 0);
         assert!(!five_step.pending_irq.get());
+    }
+
+    #[test]
+    fn frame_counter_write_delay_depends_on_apu_phase() {
+        let mut during_apu_phase = APU::default();
+        during_apu_phase.on_apu_cycle = true;
+        during_apu_phase.write_register(0x4017, 0x80);
+        assert_eq!(during_apu_phase.frame_counter_reset_delay, 3);
+
+        let mut between_apu_phases = APU::default();
+        between_apu_phases.on_apu_cycle = false;
+        between_apu_phases.write_register(0x4017, 0x80);
+        assert_eq!(between_apu_phases.frame_counter_reset_delay, 2);
+
+        for _ in 0..2 {
+            during_apu_phase.step_frame_counter();
+        }
+        assert_eq!(during_apu_phase.frame_counter_reset_delay, 1);
+        assert!(!during_apu_phase.use_five_step);
+
+        during_apu_phase.step_frame_counter();
+        assert_eq!(during_apu_phase.frame_counter_reset_delay, 0);
+        assert!(during_apu_phase.use_five_step);
+
+        for _ in 0..2 {
+            between_apu_phases.step_frame_counter();
+        }
+        assert_eq!(between_apu_phases.frame_counter_reset_delay, 0);
+        assert!(between_apu_phases.use_five_step);
+    }
+
+    #[test]
+    fn frame_irq_latches_until_status_read_or_inhibit() {
+        let mut apu = APU::default();
+        apu.enable_irq = true;
+
+        for _ in 0..29829 {
+            apu.step_frame_counter();
+        }
+        assert!(apu.pending_irq.get());
+        assert!(apu.irq_line());
+        assert!(apu.irq_line());
+
+        assert_eq!(apu.read_register(0x4015) & 0x40, 0x40);
+        assert!(!apu.irq_line());
+
+        apu.pending_irq.set(true);
+        apu.write_register(0x4017, 0x00);
+        assert!(apu.irq_line());
+
+        apu.write_register(0x4017, 0x40);
+        assert!(!apu.irq_line());
     }
 }
