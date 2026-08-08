@@ -10,6 +10,9 @@ Cargo.lock
 **/*.rs.bk
 
 
+/roms
+.DS_Store
+
 # Added by cargo
 
 /target
