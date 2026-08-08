@@ -7,6 +7,7 @@ use crate::{
     ppu::{Screen, PPU},
     snapshot::RewindTape,
 };
+use crate::apu::ChannelMask;
 
 #[derive(Clone)]
 pub struct ConsoleState {
@@ -104,6 +105,10 @@ impl Console {
         self.state.bus.controller.update_buttons(state);
     }
 
+    pub fn update_channel_mask(&mut self, toggle_mask: ChannelMask) {
+        self.state.bus.apu.toggle_channel_mask(toggle_mask);
+    }
+
     pub fn new(mapper: Box<dyn Mapper>) -> Self {
         const INITIAL_TAPE_STEP: usize = 60; // 1 second buffered
 
@@ -131,7 +136,7 @@ impl Console {
         self.state.wait_vblank(&mut self.screen, process_sample);
 
         if !self.in_rewind {
-            self.tape.push_back(self.state.clone());
+            // self.tape.push_back(self.state.clone());
         }
 
         self.in_rewind = false;

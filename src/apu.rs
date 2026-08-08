@@ -1,3 +1,4 @@
+use crate::cartridge::new;
 use crate::dsp::FirstOrderFilter;
 
 const LENGTH_COUNTER_TABLE: [u8; 32] = [
@@ -247,10 +248,30 @@ impl Noise {
 }
 
 #[derive(Clone)]
+pub struct ChannelMask {
+    pub pulse1: bool,
+    pub pulse2: bool,
+    pub triangle: bool,
+    pub noise: bool,
+}
+
+impl Default for ChannelMask {
+    fn default() -> Self {
+        Self{
+            pulse1: true,
+            pulse2: true,
+            triangle: true,
+            noise: true,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct APU {
     pulses: [Pulse; 2],
     triangle: Triangle,
     noise: Noise,
+    channel_mask: ChannelMask,
 
     cycles_x_frame_counter_freq: u32,
     cycles_x_sample_freq: u32,
@@ -273,6 +294,7 @@ impl Default for APU {
             pulses: [Pulse::default(), Pulse::default()],
             triangle: Triangle::default(),
             noise: Noise::default(),
+            channel_mask: ChannelMask::default(),
 
             cycles_x_frame_counter_freq: 0,
             cycles_x_sample_freq: 0,
@@ -295,6 +317,15 @@ impl Default for APU {
 }
 
 impl APU {
+    pub(crate) fn toggle_channel_mask(&mut self, toggle_mask: ChannelMask) {
+        self.channel_mask = ChannelMask{
+            pulse1: self.channel_mask.pulse1 ^ toggle_mask.pulse1,
+            pulse2: self.channel_mask.pulse2 ^ toggle_mask.pulse2,
+            triangle: self.channel_mask.triangle ^ toggle_mask.triangle,
+            noise: self.channel_mask.noise ^ toggle_mask.noise,
+        }
+    }
+
     pub(crate) fn set_sample_freq(&mut self, sample_freq: u32) {
         self.sample_freq = sample_freq;
     }
@@ -401,10 +432,9 @@ impl APU {
 
 
     fn sample(&mut self) -> f32 {
-        let pulse_sample = PULSE_TABLE[self.pulses[0].sample() as usize + self.pulses[1].sample() as usize];
-        let tnd_sample = TND_TABLE[3 * (self.triangle.sample() as usize) + 2 /* * (self.noise.sample() as usize) + 0 */];
+        let pulse_sample = PULSE_TABLE[if self.channel_mask.pulse1  { self.pulses[0].sample()} else {0} as usize + if self.channel_mask.pulse2 { self.pulses[1].sample()} else {0} as usize];
+        let tnd_sample = TND_TABLE[3 * (if self.channel_mask.triangle {self.triangle.sample()} else {0} as usize)  /* + 2 * (self.noise.sample() as usize) + 0 */];
         // let pulse_sample = 0.0;
-        let tnd_sample = 0.0;
         let mut sampled = pulse_sample + tnd_sample;
 
         // TODO: add low- and high-pass filters

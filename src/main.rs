@@ -3,7 +3,7 @@ use clap::builder::Str;
 use clap::Parser;
 use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
 use nes::controller::ButtonState;
-use nes::{cartridge, console::Console, controller::Button};
+use nes::{cartridge, console::Console, controller::Button, apu::ChannelMask};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::{Color, PixelFormatEnum};
@@ -138,6 +138,10 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
         )
         .unwrap();
 
+    if audio_device.spec().freq != 48_000 {
+        panic!("expected 48 KHz sample rate")
+    }
+
     audio_device.resume();
 
     let mut event_pump = sdl_context.event_pump().unwrap();
@@ -189,6 +193,13 @@ fn play_rom(rom_path: &str, cpu_ignore_rewind: Vec<u16>, ppu_ignore_rewind: Vec<
                         button_state.unset(button);
                         console.update_buttons(button_state);
                     }
+
+                    console.update_channel_mask(ChannelMask{
+                        pulse1: k == Keycode::Num1,
+                        pulse2: k == Keycode::Num2,
+                        triangle: k == Keycode::Num3,
+                        noise: k ==  Keycode::Num4,
+                    })
                 }
                 _ => {}
             }
