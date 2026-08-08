@@ -9,8 +9,10 @@ pub(crate) struct FirstOrderFilter {
 
 impl FirstOrderFilter {
     pub(crate) fn filter(&mut self, input: f32) -> f32 {
-        self.out_prev = (self.in_prev * self.in_prev_weight) + (self.out_prev * self.out_prev_weight) + (self.in_weight * input);
-        self.in_prev  = input;
+        self.out_prev = (self.in_prev * self.in_prev_weight)
+            + (self.out_prev * self.out_prev_weight)
+            + (self.in_weight * input);
+        self.in_prev = input;
         self.out_prev
     }
 
