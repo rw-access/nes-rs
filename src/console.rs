@@ -16,21 +16,34 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
+    fn step_hardware_cycle<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        self.bus.mapper.clock_cpu();
+        // Temporarily take the APU so its DMC memory callback can read the
+        // CPU address space without aliasing the mutable APU borrow.
+        let mut apu = std::mem::take(&mut self.bus.apu);
+        let sample = apu.step(|addr| self.cpu.read_byte(&self.bus, addr));
+        self.bus.apu = apu;
+        if let Some(sample) = sample {
+            process_sample(sample);
+        }
+        for _ in 0..3 {
+            self.bus.ppu.step(self.bus.mapper.as_mut(), screen);
+        }
+    }
+
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        if self.bus.apu.dma_active() {
+            // DMA stalls are observed between abstract CPU instructions. The
+            // current CPU core has already dispatched an instruction before
+            // this loop advances hardware cycles, so a request that becomes
+            // due mid-instruction pauses at the next instruction boundary.
+            self.step_hardware_cycle(screen, process_sample);
+            return;
+        }
+
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
         for _ in 0..cycles {
-            self.bus.mapper.clock_cpu();
-            // Temporarily take the APU so its DMC memory callback can read the
-            // CPU address space without aliasing the mutable APU borrow.
-            let mut apu = std::mem::take(&mut self.bus.apu);
-            let sample = apu.step(|addr| self.cpu.read_byte(&self.bus, addr));
-            self.bus.apu = apu;
-            if let Some(sample) = sample {
-                process_sample(sample);
-            }
-            for _ in 0..3 {
-                self.bus.ppu.step(self.bus.mapper.as_mut(), screen);
-            }
+            self.step_hardware_cycle(screen, process_sample);
         }
     }
 
@@ -260,7 +273,27 @@ impl Console {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioBlock, AudioQueueAction, AudioQueuePacer, AudioResetSignal};
+    use super::{AudioBlock, AudioQueueAction, AudioQueuePacer, AudioResetSignal, Console};
+    use crate::cartridge::{Mapper, MirroringMode};
+
+    #[derive(Clone)]
+    struct TestMapper;
+
+    impl Mapper for TestMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, _address: u16) -> u8 {
+            0xea
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
 
     #[test]
     fn audio_block_is_reused_as_one_frame_sized_buffer() {
@@ -296,5 +329,29 @@ mod tests {
         signal.mark();
         assert!(signal.take());
         assert!(!signal.take());
+    }
+
+    #[test]
+    fn dmc_dma_pauses_cpu_progress_while_hardware_cycles_continue() {
+        let console = Console::new(Box::new(TestMapper));
+        let mut state = console.snapshot();
+        let mut screen = super::Screen::default();
+        let mut process_sample = |_| {};
+
+        state.cpu.write_byte(&mut state.bus, 0x4012, 0x20);
+        state.cpu.write_byte(&mut state.bus, 0x4013, 0x00);
+        state.cpu.write_byte(&mut state.bus, 0x4015, 0x10);
+
+        for _ in 0..3 {
+            state.step_hardware_cycle(&mut screen, &mut process_sample);
+        }
+        assert!(state.bus.apu.dma_active());
+
+        let cpu_before_dma = format!("{:?}", state.cpu);
+        for _ in 0..3 {
+            state.step(&mut screen, &mut process_sample);
+            assert_eq!(format!("{:?}", state.cpu), cpu_before_dma);
+        }
+        assert!(!state.bus.apu.dma_active());
     }
 }

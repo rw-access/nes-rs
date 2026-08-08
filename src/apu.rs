@@ -275,6 +275,12 @@ impl Noise {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DmcDmaKind {
+    Load,
+    Reload,
+}
+
 #[derive(Clone)]
 struct Dmc {
     irq_enabled: bool,
@@ -294,6 +300,10 @@ struct Dmc {
     bits_remaining: u8,
     silence: bool,
     irq_pending: bool,
+
+    dma_kind: Option<DmcDmaKind>,
+    dma_cycles_remaining: u8,
+    load_dma_delay: u8,
 }
 
 impl Default for Dmc {
@@ -314,6 +324,9 @@ impl Default for Dmc {
             bits_remaining: 0,
             silence: true,
             irq_pending: false,
+            dma_kind: None,
+            dma_cycles_remaining: 0,
+            load_dma_delay: 0,
         }
     }
 }
@@ -350,8 +363,14 @@ impl Dmc {
     fn set_enabled(&mut self, enabled: bool) {
         if !enabled {
             self.bytes_remaining = 0;
+            self.load_dma_delay = 0;
+            self.dma_kind = None;
+            self.dma_cycles_remaining = 0;
         } else if self.bytes_remaining == 0 {
             self.restart();
+            if self.sample_buffer.is_none() {
+                self.load_dma_delay = 2;
+            }
         }
     }
 
@@ -374,6 +393,56 @@ impl Dmc {
             } else if self.irq_enabled {
                 self.irq_pending = true;
             }
+        }
+    }
+
+    fn dma_cycles(kind: DmcDmaKind, scheduled_on_get: bool) -> u8 {
+        match (kind, scheduled_on_get) {
+            // Load DMA normally halts on a get cycle; reload DMA normally
+            // halts on a put cycle. A phase mismatch adds/removes alignment.
+            (DmcDmaKind::Load, true) => 3,
+            (DmcDmaKind::Load, false) => 4,
+            (DmcDmaKind::Reload, true) => 3,
+            (DmcDmaKind::Reload, false) => 4,
+        }
+    }
+
+    fn schedule_dma(&mut self, kind: DmcDmaKind, scheduled_on_get: bool) {
+        if self.sample_buffer.is_some()
+            || self.bytes_remaining == 0
+            || self.dma_cycles_remaining != 0
+        {
+            return;
+        }
+
+        self.dma_kind = Some(kind);
+        self.dma_cycles_remaining = Self::dma_cycles(kind, scheduled_on_get);
+    }
+
+    fn dma_active(&self) -> bool {
+        self.dma_cycles_remaining != 0
+    }
+
+    fn step_load_schedule(&mut self, apu_phase_is_get: bool) {
+        if self.load_dma_delay == 0 {
+            return;
+        }
+
+        self.load_dma_delay -= 1;
+        if self.load_dma_delay == 0 {
+            self.schedule_dma(DmcDmaKind::Load, apu_phase_is_get);
+        }
+    }
+
+    fn step_dma<F: FnMut(u16) -> u8>(&mut self, read_memory: &mut F) {
+        if self.dma_cycles_remaining == 0 {
+            return;
+        }
+
+        self.dma_cycles_remaining -= 1;
+        if self.dma_cycles_remaining == 0 {
+            debug_assert!(self.dma_kind.take().is_some());
+            self.read_sample_byte(read_memory);
         }
     }
 
@@ -401,18 +470,23 @@ impl Dmc {
         self.bits_remaining -= 1;
     }
 
-    fn step_timer<F: FnMut(u16) -> u8>(&mut self, mut read_memory: F) {
-        // The reader is independent of the output timer.  This simplified DMA
-        // model performs the byte transfer during the APU step without adding
-        // CPU halt/alignment cycles; the address and end-of-sample semantics
-        // remain those of the hardware.
-        self.read_sample_byte(&mut read_memory);
-
+    fn step_timer(&mut self, apu_phase_is_get: bool) {
+        let output_cycle_ended = self.bits_remaining == 0;
         if self.timer > 0 {
             self.timer -= 1;
         } else {
             self.timer = self.timer_period.saturating_sub(1);
             self.clock_output();
+
+            if output_cycle_ended
+                && self.sample_buffer.is_none()
+                && self.bytes_remaining > 0
+                && self.load_dma_delay == 0
+                && !self.dma_active()
+            {
+                // Reload DMA attempts to halt on a put cycle.
+                self.schedule_dma(DmcDmaKind::Reload, !apu_phase_is_get);
+            }
         }
     }
 }
@@ -526,6 +600,10 @@ impl APU {
         self.register_write_timing = None;
     }
 
+    pub(crate) fn dma_active(&self) -> bool {
+        self.dmc.dma_active()
+    }
+
     fn update_ticks(&mut self) {
         const CPU_FREQ: u32 = 1_789_773;
 
@@ -541,13 +619,16 @@ impl APU {
         self.on_apu_cycle = !self.on_apu_cycle;
     }
 
-    pub(crate) fn step<F: FnMut(u16) -> u8>(&mut self, read_memory: F) -> Option<f32> {
+    pub(crate) fn step<F: FnMut(u16) -> u8>(&mut self, mut read_memory: F) -> Option<f32> {
+        self.dmc.step_dma(&mut read_memory);
+
         if self.on_apu_cycle {
             // pulse + noise + DMC
             self.pulses[0].step_timer();
             self.pulses[1].step_timer();
             self.noise.step_timer();
-            self.dmc.step_timer(read_memory);
+            self.dmc.step_load_schedule(self.on_apu_cycle);
+            self.dmc.step_timer(self.on_apu_cycle);
         }
 
         self.triangle.step_timer();
@@ -955,11 +1036,11 @@ mod tests {
         dmc.output_level = 126;
         dmc.sample_buffer = Some(0xff);
 
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 127);
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 127);
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 127);
 
         dmc.output_level = 1;
@@ -967,7 +1048,7 @@ mod tests {
         dmc.bits_remaining = 0;
         dmc.silence = true;
         dmc.timer = 0;
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 0);
     }
 
@@ -977,15 +1058,15 @@ mod tests {
         dmc.write_control(0x00);
         dmc.sample_buffer = Some(0xff);
 
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 2);
 
         for _ in 0..(dmc.timer_period - 1) {
-            dmc.step_timer(|_| 0);
+            dmc.step_timer(true);
         }
         assert_eq!(dmc.output_level, 2);
 
-        dmc.step_timer(|_| 0);
+        dmc.step_timer(true);
         assert_eq!(dmc.output_level, 4);
     }
 
@@ -996,11 +1077,12 @@ mod tests {
         dmc.bytes_remaining = 2;
         let mut addresses = Vec::new();
 
-        dmc.step_timer(|address| {
+        dmc.read_sample_byte(&mut |address| {
             addresses.push(address);
             address as u8
         });
-        dmc.step_timer(|address| {
+        dmc.sample_buffer = None;
+        dmc.read_sample_byte(&mut |address| {
             addresses.push(address);
             address as u8
         });
@@ -1020,7 +1102,7 @@ mod tests {
         assert_eq!(apu.dmc.bytes_remaining, 1);
         assert_eq!(apu.read_register(0x4015) & 0x10, 0x10);
 
-        apu.dmc.step_timer(|_| 0x80);
+        apu.dmc.read_sample_byte(&mut |_| 0x80);
         assert_eq!(apu.dmc.bytes_remaining, 0);
         assert_eq!(apu.read_register(0x4015) & 0x80, 0x80);
         assert!(apu.irq_line());
@@ -1037,7 +1119,7 @@ mod tests {
 
         apu.write_register(0x4010, 0xc0);
         apu.write_register(0x4015, 0x10);
-        apu.dmc.step_timer(|_| 0x80);
+        apu.dmc.read_sample_byte(&mut |_| 0x80);
         assert_eq!(apu.dmc.bytes_remaining, 1);
         assert!(!apu.dmc.irq_pending);
         assert_eq!(apu.dmc.current_address, apu.dmc.sample_address);
@@ -1046,6 +1128,92 @@ mod tests {
         apu.dmc.current_address = 0xc123;
         apu.write_register(0x4015, 0x10);
         assert_eq!(apu.dmc.current_address, 0xc123);
+    }
+
+    #[test]
+    fn dmc_load_dma_is_scheduled_after_enable_not_fetched_immediately() {
+        let mut apu = APU::default();
+        apu.write_register(0x4012, 0x20);
+        apu.write_register(0x4013, 0x00);
+        apu.write_register(0x4015, 0x10);
+
+        assert_eq!(apu.dmc.load_dma_delay, 2);
+        assert!(!apu.dma_active());
+
+        let mut reads = 0;
+        apu.step(|_| {
+            reads += 1;
+            0xa5
+        });
+        apu.step(|_| {
+            reads += 1;
+            0xa5
+        });
+        assert_eq!(reads, 0);
+        assert!(!apu.dma_active());
+
+        apu.step(|_| {
+            reads += 1;
+            0xa5
+        });
+        assert_eq!(reads, 0);
+        assert_eq!(apu.dmc.dma_kind, Some(DmcDmaKind::Load));
+        assert_eq!(apu.dmc.dma_cycles_remaining, 3);
+
+        for _ in 0..2 {
+            apu.step(|_| {
+                reads += 1;
+                0xa5
+            });
+        }
+        assert_eq!(reads, 0);
+        apu.step(|_| {
+            reads += 1;
+            0xa5
+        });
+        assert_eq!(reads, 1);
+        assert_eq!(apu.dmc.sample_buffer, Some(0xa5));
+    }
+
+    #[test]
+    fn dmc_reload_dma_is_scheduled_when_sample_buffer_is_exhausted() {
+        let mut apu = APU::default();
+        apu.dmc.sample_buffer = Some(0x5a);
+        apu.dmc.bytes_remaining = 1;
+        apu.dmc.timer = 0;
+
+        apu.step(|_| 0xa5);
+
+        assert!(apu.dmc.sample_buffer.is_none());
+        assert_eq!(apu.dmc.dma_kind, Some(DmcDmaKind::Reload));
+        assert_eq!(apu.dmc.dma_cycles_remaining, 4);
+    }
+
+    #[test]
+    fn dmc_dma_cost_changes_with_alignment_phase() {
+        assert_eq!(Dmc::dma_cycles(DmcDmaKind::Load, true), 3);
+        assert_eq!(Dmc::dma_cycles(DmcDmaKind::Load, false), 4);
+        assert_eq!(Dmc::dma_cycles(DmcDmaKind::Reload, false), 4);
+        assert_eq!(Dmc::dma_cycles(DmcDmaKind::Reload, true), 3);
+    }
+
+    #[test]
+    fn dmc_dma_does_not_start_without_data_or_when_disabled() {
+        let mut apu = APU::default();
+        apu.write_register(0x4015, 0x10);
+        apu.write_register(0x4015, 0x00);
+        for _ in 0..8 {
+            apu.step(|_| panic!("disabled DMC must not read memory"));
+        }
+        assert!(!apu.dma_active());
+
+        apu.dmc.load_dma_delay = 0;
+        apu.dmc.bytes_remaining = 0;
+        apu.dmc.sample_buffer = None;
+        for _ in 0..8 {
+            apu.step(|_| panic!("empty DMC must not read memory"));
+        }
+        assert!(!apu.dma_active());
     }
 
     #[test]
