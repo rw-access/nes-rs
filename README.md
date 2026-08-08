@@ -24,3 +24,15 @@ cargo run --bin headless_test -- \
 The runner deliberately scopes execution to mapper 0 and does not compile or
 execute ROMs automatically during `cargo test`; the existing submodule can be
 absent without affecting the normal test suite.
+
+The compatible APU ROM subset can also be run as a Rust integration test when
+the submodule is present:
+
+```text
+NES_RUN_APU_ROM_TESTS=1 cargo test --test apu_roms
+```
+
+The test uses the same library execution and result-protocol code as the CLI.
+Set `NES_TEST_ROM_ROOT` to use a different checkout of the ROM repository. The
+test is skipped when `NES_RUN_APU_ROM_TESTS` is not set to `1`, so ordinary
+`cargo test` does not require the submodule or execute ROMs.
