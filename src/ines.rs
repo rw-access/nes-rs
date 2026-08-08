@@ -35,7 +35,7 @@ impl INESHeader {
         let mut buffer: [u8; 16] = [0; 16];
         let mut ines_header = INESHeader::default();
 
-        // read exactly 10 bytes
+        // The iNES header is exactly 16 bytes.
         reader.read_exact(buffer.as_mut_slice()).ok()?;
 
         if &buffer[..4] != &MAGIC[..] {
@@ -47,14 +47,12 @@ impl INESHeader {
         ines_header.chr_banks = buffer[5];
         ines_header.mirror = (buffer[6] & 0b0001) != 0;
         ines_header.has_battery = (buffer[6] & 0b0010) != 0;
-        ines_header.has_battery = (buffer[6] & 0b0100) != 0;
         ines_header.has_trainer = (buffer[6] & 0b0100) != 0;
         ines_header.four_screen_mirror = (buffer[6] & 0b1000) != 0;
-        ines_header.mapper = buffer[6] >> 4;
         ines_header.vs_unisystem = buffer[7] & 0b0001 != 0;
         ines_header.playchoice10 = buffer[7] & 0b0010 != 0;
         ines_header.nes2 = buffer[7] & 0b1100 == 0b1000;
-        ines_header.mapper = buffer[7] >> 4;
+        ines_header.mapper = (buffer[6] >> 4) | (buffer[7] & 0xf0);
         ines_header.ram_size = buffer[8];
         ines_header.pal = buffer[9] & 0b1 != 0;
         ines_header.tv_system_prg_ram_presence = buffer[10];
@@ -71,15 +69,15 @@ impl INESHeader {
         // 5. PlayChoice INST-ROM, if present (0 or 8192 bytes)
         // 6. PlayChoice PROM, if present (16 bytes Data, 16 bytes CounterOut) (this is often missing, see PC10 ROM-Images for details)
         if self.has_trainer {
-            return None;
+            let mut trainer = [0u8; 512];
+            reader.read_exact(&mut trainer).ok()?;
         }
 
         // load PRG ROM
-        let mut prg_banks: Vec<ProgBank> = Vec::with_capacity(self.prg_banks as usize);
-        unsafe {
-            // only risk is reading uninitialized memory
-            prg_banks.set_len(self.prg_banks as usize);
+        if self.prg_banks == 0 {
+            return None;
         }
+        let mut prg_banks: Vec<ProgBank> = vec![[0u8; 0x4000]; self.prg_banks as usize];
 
         for bank in &mut prg_banks {
             reader.read_exact(bank.as_mut_slice()).ok()?;
@@ -89,11 +87,7 @@ impl INESHeader {
         let chr = if self.chr_banks == 0 {
             CHR::RAM(vec![[0u8; 8192]])
         } else {
-            let mut chr_banks: Vec<ChrBank> = Vec::with_capacity(self.chr_banks as usize);
-            unsafe {
-                // only risk is reading uninitialized memory
-                chr_banks.set_len(self.chr_banks as usize);
-            }
+            let mut chr_banks: Vec<ChrBank> = vec![[0u8; 0x2000]; self.chr_banks as usize];
 
             for bank in &mut chr_banks {
                 reader.read_exact(bank.as_mut_slice()).ok()?;
@@ -102,13 +96,14 @@ impl INESHeader {
             CHR::ROM(Rc::new(chr_banks))
         };
 
-        // PRG RAM??
-        ();
+        // iNES byte 8 is the number of 8 KiB PRG-RAM banks. A zero value
+        // historically means one bank for boards that expose PRG-RAM.
+        let sram_banks = usize::from(self.ram_size.max(1));
 
         Some(Cartridge {
             prg: Rc::new(PRG { banks: prg_banks }),
             chr,
-            sram: Vec::with_capacity(self.ram_size as usize),
+            sram: vec![[0u8; 0x2000]; sram_banks],
             mirror: match (self.four_screen_mirror, self.mirror) {
                 (true, _) => cartridge::MirroringMode::FourScreen,
                 (false, false) => cartridge::MirroringMode::Horizontal,

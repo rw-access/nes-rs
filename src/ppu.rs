@@ -226,7 +226,7 @@ pub(crate) struct PPU {
     oam: [u8; 256],
     secondary_oam: [u8; 32],
     palette_ram: [u8; 32],
-    nametables: [u8; 2048],
+    nametables: [u8; 4096],
     pending_nmi: bool,
     pending_tile: TileData,
     processed_tile: [TileData; 2],
@@ -252,7 +252,7 @@ impl Default for PPU {
             oam: [0; 256],
             secondary_oam: Default::default(),
             palette_ram: [0; 32],
-            nametables: [0; 2048],
+            nametables: [0; 4096],
             in_vblank: Default::default(),
             fine_x: Default::default(),
             pending_nmi: Default::default(),
@@ -328,7 +328,7 @@ impl PPU {
         return parsed_mask.show_background || parsed_mask.show_sprites;
     }
 
-    pub(crate) fn step(&mut self, mapper: &dyn Mapper, screen: &mut Screen) {
+    pub(crate) fn step(&mut self, mapper: &mut dyn Mapper, screen: &mut Screen) {
         // change signals on the next cycle
         match self.last_read.get() {
             Some(0x2002) => {
@@ -459,7 +459,7 @@ impl PPU {
             self.palette_ram[PPU::mirror_palette(color) as usize];
     }
 
-    fn step_visible(&mut self, mapper: &dyn Mapper, screen: &mut Screen) {
+    fn step_visible(&mut self, mapper: &mut dyn Mapper, screen: &mut Screen) {
         if !self.rendering_enabled() {
             return;
         }
@@ -476,7 +476,7 @@ impl PPU {
                 self.find_sprites_in_line();
             }
             260 => {
-                // TODO: mapper.on_scanline();
+                mapper.clock_scanline();
             }
             320 => {
                 let ppu_control = PPUControl::from(self.control_reg);
@@ -706,7 +706,7 @@ impl PPU {
             MirroringMode::Vertical => [0, 1, 0, 1],
             MirroringMode::SingleScreenLowerBank => [0, 0, 0, 0],
             MirroringMode::FourScreen => [0, 1, 2, 3],
-            MirroringMode::SingleScreenUpperBank => [0, 0, 0, 0],
+            MirroringMode::SingleScreenUpperBank => [1, 1, 1, 1],
         };
 
         let nametable_select = (addr >> 10) % 4;

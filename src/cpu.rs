@@ -107,6 +107,16 @@ impl CPU {
             return 7;
         }
 
+        // Cartridge IRQs are maskable and are checked between instructions.
+        if bus.mapper.irq_pending() && !self.check_status_bit(StatusFlags::I) {
+            self.push_address(bus, self.pc);
+            self.dispatch(bus, Opcode::PHP, None);
+            self.pc = self.read_address(bus, 0xfffe);
+            self.write_status_bit(StatusFlags::I, true);
+            self.cycles = self.cycles.wrapping_add(7);
+            return 7;
+        }
+
         let pre_cycles = self.cycles;
 
         // decode the instrucation @ PC
@@ -916,23 +926,25 @@ mod tests {
     use crate::console::Console;
     use crate::ines;
 
-    use crate::bus::MemoryBus;
-    use crate::cpu::CPU;
-
     #[test]
     fn test_debug_log() {
+        if !std::path::Path::new("tests/nestest.nes").exists() {
+            return;
+        }
+
         let mut log_file = std::fs::File::create("tests/nestest.log").unwrap();
         let mut rom_file = std::fs::File::open("tests/nestest.nes").unwrap();
         let (c, m) = ines::load(&mut rom_file).expect("failed to load cartridge");
 
-        let mut console = Console::new(cartridge::new(c, m).unwrap());
-        console.cpu.pc = 0xc000;
+        let console = Console::new(cartridge::new(c, m).unwrap());
+        let mut state = console.snapshot();
+        state.cpu.pc = 0xc000;
 
         // match offset for nestest.nes
-        cpu.cycles = 7;
+        state.cpu.cycles = 7;
 
         for _ in 0..8991 {
-            cpu.step(&mut bus, Some(&mut log_file));
+            state.cpu.step(&mut state.bus, Some(&mut log_file));
         }
     }
 }

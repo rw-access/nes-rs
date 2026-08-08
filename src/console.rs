@@ -18,6 +18,7 @@ impl ConsoleState {
     fn step(&mut self, screen: &mut Screen) {
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
         for _ in 0..cycles {
+            self.bus.mapper.clock_cpu();
             for _ in 0..3 {
                 self.bus.ppu.step(self.bus.mapper.as_mut(), screen);
             }
