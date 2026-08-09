@@ -492,6 +492,99 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    fn dma_and_midframe_register_nrom_cartridge() -> Cartridge {
+        let mut prg = vec![[0; 0x4000]];
+        let mut program = Vec::new();
+
+        // Turn rendering on while OAM is still empty. The long NOP run puts
+        // the DMA and following register writes in the visible portion of a
+        // scanline, rather than hiding them in reset/vblank setup.
+        program.extend_from_slice(&[
+            0xa9, 0x1e, // LDA #$1e: show background and sprites
+            0x8d, 0x01, 0x20, // STA $2001
+        ]);
+        program.extend(std::iter::repeat_n(0xea, 5_000)); // NOP
+
+        // Install one visible sprite in CPU page $02, then start OAM DMA.
+        // The timestamped scheduler must catch the PPU up before dispatching
+        // this write, or earlier pixels can observe the new OAM contents.
+        program.extend_from_slice(&[
+            0xa9, 120, // LDA #$78: sprite Y
+            0x8d, 0x00, 0x02, // STA $0200
+            0xa9, 1, // LDA #$01: tile 1
+            0x8d, 0x01, 0x02, // STA $0201
+            0xa9, 0, // LDA #$00: attributes
+            0x8d, 0x02, 0x02, // STA $0202
+            0xa9, 40, // LDA #$28: sprite X
+            0x8d, 0x03, 0x02, // STA $0203
+            0xa9, 0, // LDA #$00: OAMADDR
+            0x8d, 0x03, 0x20, // STA $2003
+            0xa9, 2, // LDA #$02: DMA from page $02
+            0x8d, 0x14, 0x40, // STA $4014
+        ]);
+
+        // Keep changing PPU-visible state after DMA. These writes exercise
+        // synchronization at arbitrary instruction boundaries while the
+        // renderer is active, including the scroll write toggle protocol.
+        let loop_start = program.len();
+        program.extend_from_slice(&[
+            0xa9, 0x0e, // sprites off, background on
+            0x8d, 0x01, 0x20, // STA $2001
+            0xa9, 3, // PPUSCROLL X
+            0x8d, 0x05, 0x20, // STA $2005
+            0xa9, 0, // PPUSCROLL Y
+            0x8d, 0x05, 0x20, // STA $2005
+            0xa9, 0x1e, // sprites and background on
+            0x8d, 0x01, 0x20, // STA $2001
+            0xa9, 0, // PPUSCROLL X
+            0x8d, 0x05, 0x20, // STA $2005
+            0xa9, 0, // PPUSCROLL Y
+            0x8d, 0x05, 0x20, // STA $2005
+            0x4c, 0, 0, // JMP loop (patched below)
+        ]);
+        let loop_address = 0x8000 + loop_start as u16;
+        let loop_operand = program.len() - 2;
+        let [loop_lo, loop_hi] = loop_address.to_le_bytes();
+        program[loop_operand] = loop_lo;
+        program[loop_operand + 1] = loop_hi;
+
+        prg[0][..program.len()].copy_from_slice(&program);
+        prg[0][0x3ffc] = 0x00;
+        prg[0][0x3ffd] = 0x80;
+
+        let mut chr = [0; 0x2000];
+        // Tile 1: solid low bitplane, giving the DMA-installed sprite a
+        // distinctive nonzero footprint with palette entry 1.
+        chr[0x10..0x18].fill(0xff);
+
+        Cartridge {
+            prg: Rc::new(PRG { banks: prg }),
+            chr: CHR::ROM(Rc::new(vec![chr])),
+            sram: vec![[0; 0x2000]],
+            mirror: MirroringMode::Horizontal,
+        }
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    fn initialize_dma_differential_console(console: &mut Console) {
+        // The source page and primary OAM start as $FF, so no sprite is
+        // visible until the program's mid-frame DMA installs one.
+        console.state.cpu.ram[0x200..0x300].fill(0xff);
+        let source_page: &[u8; 256] = console.state.cpu.ram[0x200..0x300].try_into().unwrap();
+        console.state.bus.ppu.write_dma(Some(source_page));
+        console
+            .state
+            .bus
+            .ppu
+            .write_byte(&mut console.state.bus.mapper, 0x3f00, 0);
+        console
+            .state
+            .bus
+            .ppu
+            .write_byte(&mut console.state.bus.mapper, 0x3f11, 1);
+    }
+
     #[test]
     fn audio_reset_signal_is_one_shot() {
         let mut signal = AudioResetSignal::default();
@@ -525,6 +618,34 @@ mod tests {
                 .flatten()
                 .any(|&pixel| pixel != 0));
         }
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[test]
+    fn timestamped_nrom_matches_cycle_stepped_dma_and_midframe_registers() {
+        let cartridge = dma_and_midframe_register_nrom_cartridge();
+        let mut timestamped = Console::new_nrom(cartridge.clone());
+        let mut cycle_stepped = Console::new(crate::cartridge::new(cartridge, 0).unwrap());
+        initialize_dma_differential_console(&mut timestamped);
+        initialize_dma_differential_console(&mut cycle_stepped);
+
+        let mut saw_nonzero_pixel = false;
+        for _ in 0..4 {
+            let timestamped_frame = timestamped.next_frame();
+            let cycle_stepped_frame = cycle_stepped.next_frame();
+
+            assert_eq!(
+                timestamped_frame.frame_number,
+                cycle_stepped_frame.frame_number
+            );
+            assert_eq!(timestamped_frame.pixels, cycle_stepped_frame.pixels);
+            saw_nonzero_pixel |= timestamped_frame
+                .pixels
+                .iter()
+                .flatten()
+                .any(|&pixel| pixel != 0);
+        }
+        assert!(saw_nonzero_pixel);
     }
 
     #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
