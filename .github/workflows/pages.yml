@@ -28,7 +28,7 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build WASM package
-        run: wasm-pack build web/nes-web --target web --release --out-dir web/nes-web/pkg
+        run: wasm-pack build web/nes-web --target web --release --out-dir pkg
 
       - name: Stage static site
         run: |
