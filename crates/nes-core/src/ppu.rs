@@ -584,25 +584,33 @@ impl PPU {
             let shift = 7 - (fine_x % 8);
             let tile_palette =
                 ((tile.pattern_high >> shift) & 1) << 1 | ((tile.pattern_low >> shift) & 1);
-            let tile_palette_offset = (tile.palette & 0x3) << 2;
             let sprite = if sprite_enabled {
                 self.sprite_pixels[x]
             } else {
                 SpritePixel::default()
             };
 
-            let (decision, color) = PPU::multiplex_colors(
-                tile_palette,
-                tile_palette_offset,
-                sprite.palette,
-                0x10 | sprite.palette_offset,
-                sprite.behind_background,
-            );
-            let zero_hit = sprite_zero_in_line
-                && sprite.position == 0
-                && decision == MultiplexerDecision::DrawSprite;
+            let sprite_drawn = if WRITE_OUTPUT {
+                let tile_palette_offset = (tile.palette & 0x3) << 2;
+                let (decision, color) = PPU::multiplex_colors(
+                    tile_palette,
+                    tile_palette_offset,
+                    sprite.palette,
+                    0x10 | sprite.palette_offset,
+                    sprite.behind_background,
+                );
+                self.write_pixel::<true>(screen, y, x, color);
+                decision == MultiplexerDecision::DrawSprite
+            } else {
+                // The headless path only needs the pixel occupancy and the
+                // sprite priority to reproduce sprite-zero-hit. Avoid
+                // constructing palette indices or looking up the palette RAM.
+                let background_nonzero = tile_palette != 0;
+                let sprite_nonzero = sprite.palette != 0;
+                sprite_nonzero && (!background_nonzero || !sprite.behind_background)
+            };
+            let zero_hit = sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
             status_reg |= (zero_hit as u8) << 6;
-            self.write_pixel::<WRITE_OUTPUT>(screen, y, x, color);
 
             self.cycle_in_scanline = tile_start + dot;
             match dot {
@@ -735,7 +743,6 @@ impl PPU {
         let fine_x = (x as u8 & 7) + self.fine_x;
         let tile = &self.processed_tile[(fine_x >= 8) as usize];
         let tile_palette = tile.color(fine_x % 8);
-        let tile_palette_offset = (tile.palette & 0x3) << 2;
 
         // Sprite pixels are prepared once per scanline, when the sprite tiles
         // are fetched, rather than scanning all eight sprites for every pixel.
@@ -745,21 +752,26 @@ impl PPU {
             SpritePixel::default()
         };
 
-        let (decision, color) = PPU::multiplex_colors(
-            tile_palette,
-            tile_palette_offset,
-            sprite.palette,
-            0x10 | sprite.palette_offset,
-            sprite.behind_background,
-        );
-        let zero_hit = self.sprite_zero_in_line
-            && sprite.position == 0
-            && decision == MultiplexerDecision::DrawSprite;
+        let sprite_drawn = if WRITE_OUTPUT {
+            let tile_palette_offset = (tile.palette & 0x3) << 2;
+            let (decision, color) = PPU::multiplex_colors(
+                tile_palette,
+                tile_palette_offset,
+                sprite.palette,
+                0x10 | sprite.palette_offset,
+                sprite.behind_background,
+            );
+            self.write_pixel::<true>(screen, y as usize, x as usize, color);
+            decision == MultiplexerDecision::DrawSprite
+        } else {
+            let background_nonzero = tile_palette != 0;
+            let sprite_nonzero = sprite.palette != 0;
+            sprite_nonzero && (!background_nonzero || !sprite.behind_background)
+        };
+        let zero_hit = self.sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
 
         // set the sprite zero hit bit
         self.status_reg |= (zero_hit as u8) << 6;
-
-        self.write_pixel::<WRITE_OUTPUT>(screen, y as usize, x as usize, color);
     }
 
     #[inline(always)]
@@ -1615,6 +1627,58 @@ mod timestamped_tests {
         assert_same_state(&rendered, &headless);
         assert_eq!(rendered_screen.pixels[0][0], 0x2a);
         assert_eq!(headless_screen.pixels, Screen::default().pixels);
+    }
+
+    #[test]
+    fn headless_pixel_fast_path_matches_sprite_zero_hit_selection() {
+        for mask in [0x08, 0x10, 0x18] {
+            for background_palette in 0..=3 {
+                for sprite_palette in 0..=3 {
+                    for behind_background in [false, true] {
+                        let mut rendered = PPU::default();
+                        rendered.mask_reg = mask;
+                        rendered.sprite_zero_in_line = true;
+                        rendered.palette_ram[0] = 0x01;
+                        rendered.palette_ram[1] = 0x12;
+                        rendered.palette_ram[2] = 0x23;
+                        rendered.palette_ram[3] = 0x34;
+                        rendered.palette_ram[0x10] = 0x45;
+                        rendered.palette_ram[0x11] = 0x56;
+                        rendered.palette_ram[0x12] = 0x67;
+                        rendered.palette_ram[0x13] = 0x78;
+                        rendered.processed_tile[0] = TileData {
+                            palette: 2,
+                            pattern_low: (background_palette & 1) * 0x80,
+                            pattern_high: ((background_palette >> 1) & 1) * 0x80,
+                            ..TileData::default()
+                        };
+                        rendered.sprite_pixels[0] = SpritePixel {
+                            palette: sprite_palette,
+                            position: 0,
+                            palette_offset: 0,
+                            behind_background,
+                        };
+                        rendered.cycle_in_scanline = 1;
+
+                        let mut headless = rendered.clone();
+                        let mut rendered_screen = Screen::default();
+                        let mut headless_screen = Screen::default();
+                        rendered.render_pixel_inner::<true>(&mut rendered_screen);
+                        headless.render_pixel_inner::<false>(&mut headless_screen);
+
+                        assert_same_state(&rendered, &headless);
+                        assert_eq!(headless_screen.pixels, Screen::default().pixels);
+
+                        let sprite_enabled = mask & 0x10 != 0;
+                        let sprite_nonzero = sprite_enabled && sprite_palette != 0;
+                        let background_nonzero = background_palette != 0;
+                        let expected_zero_hit =
+                            sprite_nonzero && (!background_nonzero || !behind_background);
+                        assert_eq!(rendered.status_reg & 0x40 != 0, expected_zero_hit);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
