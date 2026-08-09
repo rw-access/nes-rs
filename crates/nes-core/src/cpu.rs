@@ -224,76 +224,14 @@ impl TimestampedLocalCpu {
     }
 
     #[inline(always)]
-    fn supports(opcode: Opcode) -> bool {
-        matches!(
-            opcode,
-            Opcode::ADC
-                | Opcode::AND
-                | Opcode::ASL
-                | Opcode::BCC
-                | Opcode::BCS
-                | Opcode::BEQ
-                | Opcode::BIT
-                | Opcode::BMI
-                | Opcode::BNE
-                | Opcode::BPL
-                | Opcode::BVC
-                | Opcode::BVS
-                | Opcode::CLC
-                | Opcode::CLD
-                | Opcode::CLI
-                | Opcode::CLV
-                | Opcode::CMP
-                | Opcode::CPX
-                | Opcode::CPY
-                | Opcode::DEC
-                | Opcode::DEX
-                | Opcode::DEY
-                | Opcode::EOR
-                | Opcode::INC
-                | Opcode::INX
-                | Opcode::INY
-                | Opcode::JMP
-                | Opcode::JSR
-                | Opcode::LDA
-                | Opcode::LDX
-                | Opcode::LDY
-                | Opcode::LSR
-                | Opcode::NOP
-                | Opcode::ORA
-                | Opcode::PHA
-                | Opcode::PHP
-                | Opcode::PLA
-                | Opcode::PLP
-                | Opcode::ROL
-                | Opcode::ROR
-                | Opcode::SBC
-                | Opcode::SEC
-                | Opcode::SED
-                | Opcode::SEI
-                | Opcode::STA
-                | Opcode::STX
-                | Opcode::STY
-                | Opcode::TAX
-                | Opcode::TAY
-                | Opcode::TSX
-                | Opcode::TXA
-                | Opcode::TXS
-                | Opcode::TYA
-        )
-    }
-
-    #[inline(always)]
     fn execute(
         &mut self,
         ram: &mut [u8; 0x800],
         bus: &mut MemoryBus,
         decoded: CompactDecodedInstruction,
     ) -> bool {
-        if !Self::supports(decoded.opcode) {
-            return false;
-        }
-
+        let previous_pc = self.pc;
+        let previous_cycles = self.cycles;
         self.pc = self.pc.wrapping_add(decoded.width as u16);
         self.cycles = self
             .cycles
@@ -502,7 +440,14 @@ impl TimestampedLocalCpu {
                 self.a = self.y;
                 self.set_nz(self.a);
             }
-            _ => unreachable!("supported timestamped opcode/addressing pair"),
+            _ => {
+                // Leave the local CPU untouched so the exact dispatcher can
+                // execute unsupported opcodes without double-counting the
+                // instruction width or cycles.
+                self.pc = previous_pc;
+                self.cycles = previous_cycles;
+                return false;
+            }
         }
 
         true
