@@ -530,23 +530,8 @@ fn is_control_flow_opcode(opcode: Opcode) -> bool {
 
 #[cfg(feature = "timestamped-scheduler")]
 #[inline]
-fn is_timestamped_block_terminator(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::BCC
-            | Opcode::BCS
-            | Opcode::BEQ
-            | Opcode::BMI
-            | Opcode::BNE
-            | Opcode::BPL
-            | Opcode::BVC
-            | Opcode::BVS
-            | Opcode::JMP
-            | Opcode::JSR
-            | Opcode::RTI
-            | Opcode::RTS
-            | Opcode::BRK
-    )
+fn is_timestamped_block_hard_terminator(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::RTI | Opcode::RTS | Opcode::BRK)
 }
 
 impl CPU {
@@ -849,7 +834,8 @@ impl CPU {
             }
 
             let elapsed_master_ticks = local.cycles.wrapping_sub(start_cycles).saturating_mul(3);
-            if elapsed_master_ticks >= master_tick_budget || is_timestamped_block_terminator(opcode)
+            if elapsed_master_ticks >= master_tick_budget
+                || is_timestamped_block_hard_terminator(opcode)
             {
                 break;
             }
@@ -2455,6 +2441,45 @@ mod tests {
             block_bus.ppu.last_read.get(),
             reference_bus.ppu.last_read.get()
         );
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamped_block_continues_through_safe_control_flow() {
+        let program = [
+            0xa9, 0x00, // LDA #$00; set Z
+            0xf0, 0x02, // BEQ $8006
+            0xea, // skipped NOP
+            0xea, // skipped padding
+            0x4c, 0x09, 0x80, // JMP $8009
+            0x20, 0x0f, 0x80, // JSR $800F
+            0xea, // return target
+            0xea, 0x00, // BRK (not reached in this block)
+            0xa2, 0x03, // LDX #$03
+            0x60, // RTS
+        ];
+        let mut block_cpu = super::CPU::default();
+        let mut block_bus = preflight_bus(&program);
+        let mut reference_cpu = super::CPU::default();
+        let mut reference_bus = preflight_bus(&program);
+        block_cpu.pc = 0x8000;
+        reference_cpu.pc = 0x8000;
+
+        let (block_cycles, barrier) = block_cpu.run_timestamped_block(&mut block_bus, u64::MAX);
+        while reference_cpu.pc != 0x8011 {
+            reference_cpu.step(&mut reference_bus, None);
+        }
+
+        assert!(barrier);
+        assert_eq!(block_cycles, reference_cpu.cycles as u16);
+        assert_eq!(block_cpu.pc, reference_cpu.pc);
+        assert_eq!(block_cpu.a, reference_cpu.a);
+        assert_eq!(block_cpu.x, reference_cpu.x);
+        assert_eq!(block_cpu.y, reference_cpu.y);
+        assert_eq!(block_cpu.status, reference_cpu.status);
+        assert_eq!(block_cpu.sp, reference_cpu.sp);
+        assert_eq!(block_cpu.cycles, reference_cpu.cycles);
+        assert_eq!(block_cpu.ram, reference_cpu.ram);
     }
 
     #[cfg(feature = "timestamped-scheduler")]
