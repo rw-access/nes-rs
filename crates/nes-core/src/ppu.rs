@@ -12,6 +12,26 @@ struct PPUControl {
     enable_nmi: bool,
 }
 
+#[cfg(test)]
+mod scroll_tests {
+    use super::PPU;
+
+    #[test]
+    fn coarse_x_wrap_toggles_horizontal_nametable_bit() {
+        let mut ppu = PPU::default();
+        ppu.scanline = 0;
+        ppu.cycle_in_scanline = 8;
+
+        ppu.v = 0x001f;
+        ppu.update_vram_addr();
+        assert_eq!(ppu.v, 0x0400);
+
+        ppu.v = 0x041f;
+        ppu.update_vram_addr();
+        assert_eq!(ppu.v, 0x0000);
+    }
+}
+
 impl From<u8> for PPUControl {
     fn from(raw: u8) -> Self {
         PPUControl {
@@ -1396,7 +1416,7 @@ impl PPU {
                 // (every 8 dots across the scanline until 256). Across the scanline the effective coarse X scroll coordinate
                 // is incremented repeatedly, which will also wrap to the next nametable appropriately
                 self.v = if self.v & 0x1f == 31 {
-                    (self.v & !0x041f) ^ 0x0400
+                    (self.v & !0x001f) ^ 0x0400
                 } else {
                     self.v + 1
                 };
