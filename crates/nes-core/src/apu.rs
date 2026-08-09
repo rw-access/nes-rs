@@ -44,7 +44,7 @@ const DUTY_TABLE: [u8; 4] = [
     0b10011111, // 75%
 ];
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SweepUnit {
     enabled: bool,
     negate: bool,
@@ -55,7 +55,7 @@ struct SweepUnit {
     delay: u8,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VolumeEnvelope {
     start: bool,
     loop_or_disabled: bool,
@@ -92,7 +92,7 @@ impl VolumeEnvelope {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Pulse {
     sweep: SweepUnit,
     volume_envelope: VolumeEnvelope,
@@ -166,7 +166,7 @@ impl Pulse {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Triangle {
     timer: u16, // 11 bits
     timer_period: u16,
@@ -222,7 +222,7 @@ impl Triangle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Noise {
     volume_envelope: VolumeEnvelope,
     length_counter: u16,
@@ -248,14 +248,19 @@ impl Default for Noise {
 }
 
 impl Noise {
+    #[inline]
+    fn clock_shift(&mut self) {
+        let tap = if self.mode { 6 } else { 1 };
+        let feedback = (self.shift_register ^ (self.shift_register >> tap)) & 1;
+        self.shift_register = (self.shift_register >> 1) | (feedback << 14);
+    }
+
     fn step_timer(&mut self) {
         if self.timer > 0 {
             self.timer -= 1;
         } else {
             self.timer = self.period;
-            let tap = if self.mode { 6 } else { 1 };
-            let feedback = (self.shift_register ^ (self.shift_register >> tap)) & 1;
-            self.shift_register = (self.shift_register >> 1) | (feedback << 14);
+            self.clock_shift();
         }
     }
 
@@ -275,13 +280,28 @@ impl Noise {
     }
 }
 
+#[inline]
+fn advance_periodic_timer(timer: &mut u16, reload: u16, ticks: u64) -> u64 {
+    if ticks <= *timer as u64 {
+        *timer -= ticks as u16;
+        return 0;
+    }
+
+    let remaining = ticks - (*timer as u64 + 1);
+    let period = reload as u64 + 1;
+    let events = 1 + remaining / period;
+    let remainder = remaining % period;
+    *timer = reload - remainder as u16;
+    events
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DmcDmaKind {
     Load,
     Reload,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Dmc {
     irq_enabled: bool,
     loop_flag: bool,
@@ -491,7 +511,7 @@ impl Dmc {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelMask {
     pub pulse1: bool,
     pub pulse2: bool,
@@ -635,6 +655,172 @@ impl APU {
     }
 
     #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn can_batch_timestamped(&self) -> bool {
+        self.dmc.bytes_remaining == 0
+            && self.dmc.sample_buffer.is_none()
+            && self.dmc.dma_kind.is_none()
+            && !self.dmc.dma_active()
+            && self.dmc.load_dma_delay == 0
+            && !self.dmc.irq_pending
+            && self.sample_freq <= 1_789_773
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn cycles_to_sample_edge(&self) -> u64 {
+        const CPU_FREQ: u64 = 1_789_773;
+        if self.sample_freq == 0 {
+            return u64::MAX;
+        }
+
+        (CPU_FREQ - self.cycles_x_sample_freq as u64 + self.sample_freq as u64 - 1)
+            / self.sample_freq as u64
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn cycles_to_frame_event(&self) -> u64 {
+        if self.frame_counter_reset_delay != 0 {
+            return self.frame_counter_reset_delay as u64;
+        }
+
+        let event_cycle: u32 = match (self.use_five_step, self.frame_counter_step) {
+            (_, 0) => 7457,
+            (_, 1) => 14913,
+            (_, 2) => 22371,
+            (_, 3) if self.use_five_step => 37281,
+            (_, 3) => 29829,
+            (_, 4) => 37281,
+            _ => unreachable!(),
+        };
+        u64::from(event_cycle.saturating_sub(self.frame_counter_cycle).max(1))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn advance_timestamped_batched<G>(&mut self, cycles: u64, process_sample: &mut G)
+    where
+        G: FnMut(f32),
+    {
+        let mut remaining = cycles;
+        while remaining != 0 {
+            let segment = if self.on_sample_edge {
+                1
+            } else {
+                remaining
+                    .min(self.cycles_to_sample_edge())
+                    .min(self.cycles_to_frame_event())
+            };
+            if let Some(sample) = self.advance_timestamped_segment(segment) {
+                process_sample(sample);
+            }
+            remaining -= segment;
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn advance_timestamped_segment(&mut self, cycles: u64) -> Option<f32> {
+        debug_assert!(cycles != 0);
+
+        let apu_ticks = if self.on_apu_cycle {
+            cycles.div_ceil(2)
+        } else {
+            cycles / 2
+        };
+
+        let pulse_1_events = advance_periodic_timer(
+            &mut self.pulses[0].timer,
+            self.pulses[0].timer_period,
+            apu_ticks,
+        );
+        self.pulses[0].duty_offset = (self.pulses[0].duty_offset as u64 + pulse_1_events) as u8 % 8;
+
+        let pulse_2_events = advance_periodic_timer(
+            &mut self.pulses[1].timer,
+            self.pulses[1].timer_period,
+            apu_ticks,
+        );
+        self.pulses[1].duty_offset = (self.pulses[1].duty_offset as u64 + pulse_2_events) as u8 % 8;
+
+        let noise_events =
+            advance_periodic_timer(&mut self.noise.timer, self.noise.period, apu_ticks);
+        for _ in 0..noise_events {
+            self.noise.clock_shift();
+        }
+
+        let triangle_events =
+            advance_periodic_timer(&mut self.triangle.timer, self.triangle.timer_period, cycles);
+        if self.triangle.length_counter > 0 && self.triangle.linear_counter_offset > 0 {
+            self.triangle.phase = (self.triangle.phase as u64 + triangle_events) as u16 % 32;
+        }
+
+        let dmc_events = advance_periodic_timer(
+            &mut self.dmc.timer,
+            self.dmc.timer_period.saturating_sub(1),
+            apu_ticks,
+        );
+        for _ in 0..dmc_events {
+            self.dmc.clock_output();
+        }
+
+        self.advance_frame_counter_segment(cycles);
+
+        let sample = if self.on_sample_edge {
+            Some(self.sample())
+        } else {
+            None
+        };
+
+        const CPU_FREQ: u64 = 1_789_773;
+        let sample_clock = self.cycles_x_sample_freq as u64 + self.sample_freq as u64 * cycles;
+        let on_sample_edge = sample_clock >= CPU_FREQ;
+        self.cycles_x_sample_freq = if on_sample_edge {
+            (sample_clock - CPU_FREQ) as u32
+        } else {
+            sample_clock as u32
+        };
+        self.on_sample_edge = on_sample_edge;
+
+        if cycles & 1 != 0 {
+            self.on_apu_cycle = !self.on_apu_cycle;
+        }
+
+        sample
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn advance_frame_counter_segment(&mut self, cycles: u64) {
+        if self.frame_counter_reset_delay != 0 {
+            debug_assert!(cycles <= self.frame_counter_reset_delay as u64);
+            if cycles == self.frame_counter_reset_delay as u64 {
+                self.frame_counter_reset_delay = 1;
+                self.step_frame_counter();
+            } else {
+                self.frame_counter_reset_delay -= cycles as u8;
+            }
+            return;
+        }
+
+        let event_cycle = match (self.use_five_step, self.frame_counter_step) {
+            (_, 0) => 7457,
+            (_, 1) => 14913,
+            (_, 2) => 22371,
+            (_, 3) if self.use_five_step => 37281,
+            (_, 3) => 29829,
+            (_, 4) => 37281,
+            _ => unreachable!(),
+        };
+        let to_event = u64::from(event_cycle - self.frame_counter_cycle);
+        debug_assert!(cycles <= to_event);
+        if cycles == to_event {
+            self.frame_counter_cycle = event_cycle - 1;
+            self.step_frame_counter();
+        } else {
+            self.frame_counter_cycle += cycles as u32;
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
     pub(crate) fn advance_cpu_cycles<F, G>(
         &mut self,
         cycles: u64,
@@ -644,6 +830,11 @@ impl APU {
         F: FnMut(u16) -> u8,
         G: FnMut(f32),
     {
+        if self.can_batch_timestamped() {
+            self.advance_timestamped_batched(cycles, &mut process_sample);
+            return;
+        }
+
         for _ in 0..cycles {
             if let Some(sample) = self.step(&mut read_memory) {
                 process_sample(sample);
@@ -948,6 +1139,104 @@ impl APU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamped_batched_quiet_advance_matches_exact_steps() {
+        fn configured(start_on_apu_cycle: bool) -> APU {
+            let mut apu = APU::default();
+            apu.on_apu_cycle = start_on_apu_cycle;
+            apu.enable_irq = true;
+            apu.frame_counter_cycle = 7_430;
+            apu.frame_counter_step = 0;
+
+            apu.pulses[0].timer = 2;
+            apu.pulses[0].timer_period = 5;
+            apu.pulses[0].duty_offset = 3;
+            apu.pulses[0].enabled = true;
+            apu.pulses[0].length_counter = 20;
+            apu.pulses[0].volume_envelope.use_constant_volume = true;
+            apu.pulses[0].volume_envelope.period_or_constant_volume = 9;
+            apu.pulses[1].timer = 1;
+            apu.pulses[1].timer_period = 7;
+            apu.pulses[1].duty_offset = 6;
+            apu.pulses[1].enabled = true;
+            apu.pulses[1].length_counter = 20;
+            apu.pulses[1].volume_envelope.use_constant_volume = true;
+            apu.pulses[1].volume_envelope.period_or_constant_volume = 7;
+            apu.triangle.timer = 3;
+            apu.triangle.timer_period = 4;
+            apu.triangle.enabled = true;
+            apu.triangle.length_counter = 20;
+            apu.triangle.linear_counter_offset = 20;
+            apu.triangle.length_enabled = true;
+            apu.noise.timer = 2;
+            apu.noise.period = 5;
+            apu.noise.shift_register = 0x4001;
+            apu.noise.enabled = true;
+            apu.noise.length_counter = 20;
+            apu.noise.volume_envelope.use_constant_volume = true;
+            apu.noise.volume_envelope.period_or_constant_volume = 5;
+            apu.dmc.timer = 3;
+            apu.dmc.timer_period = 7;
+            apu.dmc.bits_remaining = 3;
+            apu.dmc.shift_register = 0b1010_0101;
+            apu.dmc.silence = true;
+            apu
+        }
+
+        for &start_on_apu_cycle in &[false, true] {
+            for &cycles in &[1_u64, 2, 3, 37, 38, 39, 100, 7457, 7458] {
+                let mut exact = configured(start_on_apu_cycle);
+                let mut batched = exact.clone();
+                let mut exact_samples = Vec::new();
+                let mut batched_samples = Vec::new();
+
+                for _ in 0..cycles {
+                    if let Some(sample) = exact.step(|_| panic!("quiet DMC must not read memory")) {
+                        exact_samples.push(sample.to_bits());
+                    }
+                }
+                batched.advance_cpu_cycles(
+                    cycles,
+                    |_| panic!("quiet DMC must not read memory"),
+                    |sample| batched_samples.push(sample.to_bits()),
+                );
+
+                assert_eq!(
+                    batched_samples, exact_samples,
+                    "sample mismatch phase={start_on_apu_cycle} cycles={cycles}"
+                );
+                assert_eq!(batched.pulses, exact.pulses);
+                assert_eq!(batched.triangle, exact.triangle);
+                assert_eq!(batched.noise, exact.noise);
+                assert_eq!(batched.dmc, exact.dmc);
+                assert_eq!(batched.channel_mask, exact.channel_mask);
+                assert_eq!(batched.cycles_x_sample_freq, exact.cycles_x_sample_freq);
+                assert_eq!(batched.sample_freq, exact.sample_freq);
+                assert_eq!(batched.frame_counter_cycle, exact.frame_counter_cycle);
+                assert_eq!(batched.frame_counter_step, exact.frame_counter_step);
+                assert_eq!(
+                    batched.frame_counter_reset_delay,
+                    exact.frame_counter_reset_delay
+                );
+                assert_eq!(batched.pending_five_step, exact.pending_five_step);
+                assert_eq!(batched.register_write_timing, exact.register_write_timing);
+                assert_eq!(batched.on_sample_edge, exact.on_sample_edge);
+                assert_eq!(batched.use_five_step, exact.use_five_step);
+                assert_eq!(batched.enable_irq, exact.enable_irq);
+                assert_eq!(batched.pending_irq.get(), exact.pending_irq.get());
+                assert_eq!(batched.on_apu_cycle, exact.on_apu_cycle);
+
+                let mut exact_sample = exact.clone();
+                let mut batched_sample = batched.clone();
+                assert_eq!(
+                    batched_sample.sample().to_bits(),
+                    exact_sample.sample().to_bits()
+                );
+            }
+        }
+    }
 
     #[test]
     fn pulse_sweep_uses_channel_specific_negate_math() {
