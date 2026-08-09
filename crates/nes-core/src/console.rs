@@ -232,6 +232,11 @@ impl ConsoleState {
                 screen,
                 process_sample,
             );
+            #[cfg(feature = "timestamped-scheduler")]
+            {
+                self.scheduler_master_ticks += 3;
+                self.ppu_master_ticks = self.scheduler_master_ticks;
+            }
             return;
         }
 
@@ -748,6 +753,29 @@ mod tests {
     }
 
     #[cfg(feature = "timestamped-scheduler")]
+    fn dmc_nrom_cartridge() -> Cartridge {
+        let mut cartridge = patterned_nrom_cartridge();
+        let prg = Rc::get_mut(&mut cartridge.prg).unwrap();
+        prg.banks[0].fill(0xea);
+        let program = [
+            0xa9, 0x00, // DMC control: no IRQ, fastest-free rate is unnecessary here
+            0x8d, 0x10, 0x40, // STA $4010
+            0xa9, 0x00, // DMC sample address: $c000
+            0x8d, 0x12, 0x40, // STA $4012
+            0xa9, 0x00, // one-byte DMC sample
+            0x8d, 0x13, 0x40, // STA $4013
+            0xa9, 0x10, // enable DMC
+            0x8d, 0x15, 0x40, // STA $4015
+            0x4c, 0x15, 0x80, // loop over NOPs while DMA and output progress
+        ];
+        prg.banks[0][..program.len()].copy_from_slice(&program);
+        prg.banks[0][0x15] = 0xea;
+        prg.banks[0][0x3ffc] = 0x00;
+        prg.banks[0][0x3ffd] = 0x80;
+        cartridge
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
     fn initialize_dma_differential_console(console: &mut Console) {
         // The source page and primary OAM start as $FF, so no sprite is
         // visible until the program's mid-frame DMA installs one.
@@ -1043,5 +1071,43 @@ mod tests {
             assert_eq!(format!("{:?}", state.cpu), cpu_before_dma);
         }
         assert!(!state.bus.apu.dma_active());
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamped_nrom_preserves_timeline_across_dmc_dma_fallback() {
+        let cartridge = dmc_nrom_cartridge();
+        let mut timestamped = Console::new_nrom(cartridge.clone());
+        let mut cycle_stepped = Console::new(crate::cartridge::new(cartridge, 0).unwrap());
+
+        for _ in 0..3 {
+            let timestamped_frame = timestamped.next_frame();
+            let cycle_stepped_frame = cycle_stepped.next_frame();
+            assert_eq!(
+                timestamped_frame.frame_number,
+                cycle_stepped_frame.frame_number
+            );
+            assert_eq!(timestamped_frame.pixels, cycle_stepped_frame.pixels);
+            assert_eq!(
+                timestamped_frame.audio_samples,
+                cycle_stepped_frame.audio_samples
+            );
+            assert_eq!(
+                timestamped.state.cpu.architectural_state(),
+                cycle_stepped.state.cpu.architectural_state()
+            );
+            assert_eq!(
+                timestamped.state.scheduler_master_ticks,
+                cycle_stepped.state.scheduler_master_ticks
+            );
+            assert_eq!(
+                timestamped.state.ppu_master_ticks,
+                cycle_stepped.state.ppu_master_ticks
+            );
+            assert_eq!(
+                timestamped.state.bus.ppu.timing_position(),
+                cycle_stepped.state.bus.ppu.timing_position()
+            );
+        }
     }
 }

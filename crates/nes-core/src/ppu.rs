@@ -281,6 +281,11 @@ enum MultiplexerDecision {
 }
 
 impl PPU {
+    #[cfg(test)]
+    pub(crate) fn timing_position(&self) -> (u16, u16) {
+        (self.scanline, self.cycle_in_scanline)
+    }
+
     fn can_batch_three_idle_ticks(&self) -> bool {
         if self.cycle_in_scanline > 337 {
             return false;

@@ -86,7 +86,7 @@ impl Default for CPU {
     }
 }
 
-#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+#[cfg(feature = "timestamped-scheduler")]
 #[derive(Clone, Copy, Debug)]
 struct TimestampedLocalCpu {
     cycles: u64,
@@ -98,7 +98,7 @@ struct TimestampedLocalCpu {
     sp: u8,
 }
 
-#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+#[cfg(feature = "timestamped-scheduler")]
 impl TimestampedLocalCpu {
     #[inline(always)]
     fn from_cpu(cpu: &CPU) -> Self {
@@ -550,6 +550,20 @@ fn is_timestamped_block_terminator(opcode: Opcode) -> bool {
 }
 
 impl CPU {
+    #[cfg(test)]
+    pub(crate) fn architectural_state(&self) -> (u64, u16, u8, u8, u8, u8, u8, [u8; 0x800]) {
+        (
+            self.cycles,
+            self.pc,
+            self.a,
+            self.x,
+            self.y,
+            self.status,
+            self.sp,
+            self.ram,
+        )
+    }
+
     /// Conservatively determine whether the next CPU instruction may touch a
     /// PPU register or leave the cartridge-backed instruction stream.
     ///
@@ -717,7 +731,7 @@ impl CPU {
         Some(decoded)
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
     fn timestamped_static_instruction_local(
         cache: &mut [TimestampedStaticInstruction; 256],
@@ -781,63 +795,13 @@ impl CPU {
         may_access
     }
 
-    /// Run a bounded sequence of side-effect-safe instructions without
-    /// returning through the scheduler for every instruction. The first
-    /// instruction that may observe or modify PPU state is decoded and held
-    /// in `timestamped_decoded`; the caller must catch the PPU up before
-    /// calling `step_timestamped` to execute it.
-    ///
-    /// This is deliberately not a general CPU block cache. The block is
-    /// capped, stops at control flow, and falls back before any instruction
-    /// whose decode could touch an I/O address or leave cartridge space.
-    #[cfg(all(feature = "timestamped-scheduler", not(feature = "apu-disabled")))]
-    pub(crate) fn run_timestamped_block(
-        &mut self,
-        bus: &mut MemoryBus,
-        master_tick_budget: u64,
-    ) -> (u16, bool) {
-        const MAX_INSTRUCTIONS: usize = 32;
-        let start_cycles = self.cycles;
-
-        self.timestamped_decoded = None;
-        for _ in 0..MAX_INSTRUCTIONS {
-            // A PPU event can only become pending after the scheduler catches
-            // up, but keep this check here so a block never runs past an
-            // already-visible interrupt boundary.
-            if bus.ppu.nmi_pending()
-                || (bus.mapper.irq_pending() && !self.check_status_bit(StatusFlags::I))
-                || (!self.check_status_bit(StatusFlags::I) && bus.apu.irq_line())
-            {
-                self.step(bus, None);
-                break;
-            }
-
-            let Some((addr, decoded, may_access_ppu)) = self.decode_timestamped(bus) else {
-                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
-            };
-
-            if may_access_ppu {
-                self.timestamped_decoded = Some((addr, decoded));
-                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
-            }
-
-            let opcode = decoded.opcode;
-            self.execute_compact_decoded(bus, decoded);
-
-            let elapsed_master_ticks = self.cycles.wrapping_sub(start_cycles).saturating_mul(3);
-            if elapsed_master_ticks >= master_tick_budget || is_timestamped_block_terminator(opcode)
-            {
-                break;
-            }
-        }
-
-        (self.cycles.wrapping_sub(start_cycles) as u16, false)
-    }
-
-    /// The gated NROM/APU-disabled runner keeps architectural registers in
+    /// Run a bounded sequence of side-effect-safe instructions while keeping
+    /// architectural registers in locals. It still commits at every
+    /// scheduler barrier and uses the exact dispatcher for unsupported
+    /// opcodes.
     /// locals across the burst. It still commits at every scheduler barrier
     /// and uses the exact dispatcher for unsupported opcodes.
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     pub(crate) fn run_timestamped_block(
         &mut self,
         bus: &mut MemoryBus,
@@ -852,6 +816,7 @@ impl CPU {
         for _ in 0..MAX_INSTRUCTIONS {
             if bus.ppu.nmi_pending()
                 || (bus.mapper.irq_pending() && !local.check_status_bit(StatusFlags::I))
+                || (!local.check_status_bit(StatusFlags::I) && bus.apu.irq_line())
             {
                 local.write_back(self);
                 self.step(bus, None);
@@ -894,7 +859,7 @@ impl CPU {
         (self.cycles.wrapping_sub(start_cycles) as u16, false)
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     fn decode_timestamped_local(
         static_cache: &mut [TimestampedStaticInstruction; 256],
         bus: &MemoryBus,
@@ -1066,7 +1031,7 @@ impl CPU {
         }
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
     fn preflight_read_byte_local(bus: &MemoryBus, ram: &[u8; 0x800], address: u16) -> Option<u8> {
         match address {
@@ -1076,7 +1041,7 @@ impl CPU {
         }
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
     fn preflight_zero_page_indirect_local(
         bus: &MemoryBus,
@@ -1089,7 +1054,7 @@ impl CPU {
         Some(u16::from_le_bytes([lo, hi]))
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
     fn preflight_indirect_local(bus: &MemoryBus, ram: &[u8; 0x800], pointer: u16) -> Option<u16> {
         Self::preflight_zero_page_indirect_local(bus, ram, pointer)

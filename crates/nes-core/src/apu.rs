@@ -617,11 +617,8 @@ impl APU {
         if self.dmc.irq_pending || self.pending_irq.get() {
             return Some(1);
         }
-        if !self.enable_irq {
+        if !self.enable_irq || self.use_five_step || self.frame_counter_reset_delay != 0 {
             return None;
-        }
-        if self.frame_counter_reset_delay != 0 {
-            return Some(1);
         }
 
         let event_cycle: u32 = match (self.use_five_step, self.frame_counter_step) {
