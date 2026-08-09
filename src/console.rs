@@ -45,6 +45,11 @@ pub struct ConsoleState {
 }
 
 impl ConsoleState {
+    #[cfg(test)]
+    pub(crate) fn frame_number(&self) -> u64 {
+        self.frame_number
+    }
+
     fn step_hardware_cycle<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
         self.bus.mapper.clock_cpu();
         // Temporarily take the APU so its DMC memory callback can read the
@@ -89,6 +94,10 @@ impl ConsoleState {
         while !self.bus.ppu.in_vblank {
             self.step(screen, &mut process_sample);
         }
+    }
+
+    pub(crate) fn advance_frame_number(&mut self) {
+        self.frame_number += 1;
     }
 }
 
@@ -195,6 +204,8 @@ pub struct Console {
     screen: Screen,
     audio_samples: Vec<f32>,
     in_rewind: bool,
+    rewind_history_active: bool,
+    rewind_exhausted: bool,
     audio_reset: AudioResetSignal,
 }
 
@@ -268,15 +279,26 @@ impl Console {
     fn reset_timeline(&mut self) {
         self.tape = RewindTape::new(Self::INITIAL_TAPE_STEP);
         self.in_rewind = false;
+        self.rewind_history_active = false;
+        self.rewind_exhausted = false;
         self.audio_samples.clear();
         self.audio_reset.mark();
     }
 
-    pub fn rewind(&mut self) {
+    pub fn rewind(&mut self) -> bool {
         if let Some(prev_state) = self.tape.pop_back(&mut self.screen) {
             self.state = prev_state;
             self.in_rewind = true;
+            self.rewind_history_active = true;
+            self.rewind_exhausted = false;
             self.audio_reset.mark();
+            true
+        } else if self.rewind_history_active {
+            self.in_rewind = true;
+            self.rewind_exhausted = true;
+            false
+        } else {
+            false
         }
     }
 
@@ -313,6 +335,8 @@ impl Console {
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
             tape: RewindTape::new(Self::INITIAL_TAPE_STEP),
             in_rewind: false,
+            rewind_history_active: false,
+            rewind_exhausted: false,
             audio_reset: AudioResetSignal::default(),
         };
 
@@ -325,6 +349,19 @@ impl Console {
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
         let audio_discontinuity = self.audio_reset.take();
         self.audio_samples.clear();
+
+        if self.rewind_exhausted {
+            self.in_rewind = false;
+            self.rewind_exhausted = false;
+            return FrameOutput {
+                frame_number: self.state.frame_number,
+                pixels: &self.screen.pixels,
+                audio_samples: &self.audio_samples,
+                audio_sample_rate: AUDIO_SAMPLE_RATE,
+                audio_discontinuity,
+            };
+        }
+
         {
             let state = &mut self.state;
             let screen = &mut self.screen;
@@ -334,6 +371,7 @@ impl Console {
 
         if !self.in_rewind {
             self.tape.push_back(self.state.clone());
+            self.rewind_history_active = false;
         }
 
         self.in_rewind = false;
@@ -437,6 +475,40 @@ mod tests {
         let rewound = console.next_frame();
         assert!(rewound.audio_discontinuity);
         assert!(!rewound.audio_samples.is_empty());
+    }
+
+    #[test]
+    fn rewind_frame_numbers_cross_checkpoints_one_at_a_time() {
+        let mut console = Console::new(Box::new(TestMapper));
+        for _ in 0..180 {
+            let _ = console.next_frame();
+        }
+
+        for expected in (1..=180).rev() {
+            assert!(console.rewind());
+            let frame = console.next_frame();
+            assert_eq!(frame.frame_number, expected);
+        }
+    }
+
+    #[test]
+    fn rewind_holds_at_the_oldest_available_frame() {
+        let mut console = Console::new(Box::new(TestMapper));
+        for _ in 0..3 {
+            let _ = console.next_frame();
+        }
+
+        for _ in 0..3 {
+            console.rewind();
+            let _ = console.next_frame();
+        }
+
+        console.rewind();
+        let held = console.next_frame();
+        assert!(held.audio_samples.is_empty());
+
+        let resumed = console.next_frame();
+        assert!(!resumed.audio_samples.is_empty());
     }
 
     #[test]

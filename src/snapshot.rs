@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{
-    bus::MemoryBus, console::ConsoleState, controller::ButtonState, cpu::CPU, ppu::Screen,
-};
+use crate::{console::ConsoleState, controller::ButtonState, ppu::Screen};
 
 #[derive(Clone)]
 struct ButtonSequence {
@@ -125,57 +123,160 @@ impl RewindTape {
         self.frames += 1;
     }
 
-    /// Pop the most recent Snapshot from the end of the tape, using one NES frame evaluation
-    /// to expand out RLE buttons to the next snapshot
-    pub(crate) fn pop_back(&mut self, screen: &mut Screen) -> Option<ConsoleState> {
-        let (latest_snapshot, _) = self.snapshot_cache.pop()?;
+    /// Put the next stored checkpoint into the one-frame-ahead decoder.
+    ///
+    /// The checkpoint is intentionally not expanded here.  Its base state and
+    /// RLE stream become the previous checkpoint, and `pop_back` advances that
+    /// decoder by one frame for each frame it removes from the current cache.
+    fn prepare_stored_checkpoint(&mut self) -> bool {
+        let Some(mut checkpoint) = self.stored_checkpoints.pop() else {
+            return false;
+        };
+
+        let buttons = checkpoint.base_state.bus.controller.button_state;
         let (decoded_snapshots, buttons_rle) = &mut self.previous_checkpoint;
+        decoded_snapshots.clear();
+        buttons_rle.clear();
+        decoded_snapshots.push((checkpoint.base_state, buttons));
+        std::mem::swap(buttons_rle, &mut checkpoint.buttons_rle);
 
-        // Pull the decoded previous checkpoint into the cache, if the snapshot cache is empty
-        if self.snapshot_cache.is_empty() && !decoded_snapshots.is_empty() {
-            // The previous checkpoint contains fully decoded snapshots
-            // Avoid wasted allocations by keeping existing allocated buffers intact
-            std::mem::swap(decoded_snapshots, &mut self.snapshot_cache);
-            buttons_rle.truncate(0);
+        true
+    }
 
-            self.cache_size -= 1;
+    fn decode_one_previous_frame(&mut self, screen: &mut Screen) {
+        let (decoded_snapshots, buttons_rle) = &mut self.previous_checkpoint;
+        let (Some((prev_state, _)), Some(next_buttons)) =
+            (decoded_snapshots.last(), buttons_rle.front_mut())
+        else {
+            return;
+        };
 
-            // Extend the buffers as necessary and initialize with a single (snapshot, buttons)
-            decoded_snapshots.truncate(0);
+        let mut next_state = prev_state.clone();
+        next_state
+            .bus
+            .controller
+            .update_buttons(next_buttons.buttons);
+        next_state.wait_vblank(screen, |_| {});
+        next_state.advance_frame_number();
+        decoded_snapshots.push((next_state, next_buttons.buttons));
+
+        if next_buttons.count > 1 {
+            next_buttons.count -= 1;
+        } else {
+            buttons_rle.pop_front();
+        }
+    }
+
+    /// Pop the most recent snapshot from the end of the tape, using NES frame
+    /// evaluation to expand RLE buttons as needed.
+    pub(crate) fn pop_back(&mut self, screen: &mut Screen) -> Option<ConsoleState> {
+        // Refill the cache before trying to pop. Previously this happened only
+        // after `pop()` had already returned None, making stored checkpoints
+        // unreachable at exactly the boundary where they were needed.
+        if self.snapshot_cache.is_empty() {
+            if !self.previous_checkpoint.0.is_empty() {
+                // The previous checkpoint should already be fully decoded by
+                // the one-frame-ahead work below. Finish any remaining RLE
+                // here as a correctness guard rather than dropping frames at
+                // the boundary.
+                while !self.previous_checkpoint.1.is_empty() {
+                    self.decode_one_previous_frame(screen);
+                }
+
+                std::mem::swap(&mut self.previous_checkpoint.0, &mut self.snapshot_cache);
+                self.previous_checkpoint.1.truncate(0);
+
+                self.cache_size = self.cache_size.saturating_sub(1);
+
+                self.previous_checkpoint.0.truncate(0);
+            } else if !self.prepare_stored_checkpoint() {
+                return None;
+            }
         }
 
-        // Move data further "right", restoring one when the current checkpoint is fully emptied
-        // Decompress RLE and evaluate a frame
-        match (decoded_snapshots.last(), buttons_rle.front_mut()) {
-            (Some((prev_state, _)), Some(next_buttons)) => {
-                // convert another expanded snapshot to an RLE button press
-                // pack the buton onto the current sequence, preserving and building RLE
-                let mut next_state = prev_state.clone();
-                next_state
-                    .bus
-                    .controller
-                    .update_buttons(next_buttons.buttons);
+        let (latest_snapshot, _) = self.snapshot_cache.pop()?;
 
-                next_state.wait_vblank(screen, |_| {});
-                decoded_snapshots.push((next_state, next_buttons.buttons));
-
-                if next_buttons.count > 0 {
-                    next_buttons.count -= 1;
-                } else {
-                    buttons_rle.pop_front();
-                }
-            }
-            _ => {
-                if let Some(mut checkpoint) = self.stored_checkpoints.pop() {
-                    let buttons = checkpoint.base_state.bus.controller.button_state;
-                    decoded_snapshots.truncate(0);
-                    std::mem::swap(buttons_rle, &mut checkpoint.buttons_rle);
-                    decoded_snapshots.push((checkpoint.base_state, buttons));
-                }
-            }
+        // When the previous checkpoint has been fully consumed, begin the next
+        // one before decoding. This keeps its expansion overlapped with the
+        // frames being popped instead of doing a whole-checkpoint replay at the
+        // boundary.
+        if self.previous_checkpoint.0.is_empty() && self.previous_checkpoint.1.is_empty() {
+            self.prepare_stored_checkpoint();
         }
+        self.decode_one_previous_frame(screen);
 
         self.frames -= 1;
         Some(latest_snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RewindTape, Screen};
+    use crate::{
+        cartridge::{Mapper, MirroringMode},
+        console::Console,
+        controller::ButtonState,
+    };
+
+    #[derive(Clone)]
+    struct TestMapper;
+
+    impl Mapper for TestMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, _address: u16) -> u8 {
+            0xea
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
+
+    #[test]
+    fn rewind_tape_crosses_checkpoints_without_extra_frames() {
+        let mut source = Console::new(Box::new(TestMapper));
+        let mut states = Vec::new();
+        let mut expected_buttons = Vec::new();
+        let mut expected_frame_numbers = Vec::new();
+        for frame in 0..24 {
+            let buttons = if frame % 3 == 0 { 0x01 } else { 0x00 };
+            source.update_buttons(ButtonState::from_bits(buttons));
+            let _ = source.next_frame();
+            states.push(source.snapshot());
+            expected_buttons.push(buttons);
+            expected_frame_numbers.push(source.snapshot().frame_number());
+        }
+
+        let expected_frames = states.len();
+        let mut tape = RewindTape::new(1);
+        for state in states {
+            tape.push_back(state);
+        }
+
+        let mut screen = Screen::default();
+        let mut popped_frames = 0;
+        let mut popped_buttons = Vec::new();
+        let mut popped_frame_numbers = Vec::new();
+        while let Some(state) = tape.pop_back(&mut screen) {
+            popped_frames += 1;
+            popped_buttons.push(state.bus.controller.button_state.bits());
+            popped_frame_numbers.push(state.frame_number());
+            assert!(
+                popped_frames <= expected_frames,
+                "RLE decoder produced an extra rewind frame"
+            );
+        }
+
+        assert_eq!(popped_frames, expected_frames);
+        expected_buttons.reverse();
+        assert_eq!(popped_buttons, expected_buttons);
+        expected_frame_numbers.reverse();
+        assert_eq!(popped_frame_numbers, expected_frame_numbers);
     }
 }

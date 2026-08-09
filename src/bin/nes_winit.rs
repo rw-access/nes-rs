@@ -186,7 +186,9 @@ impl App {
         } else {
             self.buttons.unset(button);
         }
-        self.console.update_buttons(self.buttons);
+        if !self.rewinding {
+            self.console.update_buttons(self.buttons);
+        }
     }
 
     fn advance_frame(&mut self) {
@@ -283,6 +285,9 @@ impl App {
 
         if code == KeyCode::KeyI {
             self.rewinding = pressed;
+            if !pressed {
+                self.console.update_buttons(self.buttons);
+            }
             return;
         }
 

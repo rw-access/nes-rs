@@ -171,7 +171,9 @@ mod sdl2_frontend {
 
                         if let Some(button) = get_button(k) {
                             button_state.set(button);
-                            console.update_buttons(button_state);
+                            if !rewind {
+                                console.update_buttons(button_state);
+                            }
                         }
                     }
                     Event::KeyUp {
@@ -184,7 +186,9 @@ mod sdl2_frontend {
 
                         if let Some(button) = get_button(k) {
                             button_state.unset(button);
-                            console.update_buttons(button_state);
+                            if !rewind {
+                                console.update_buttons(button_state);
+                            }
                         }
 
                         console.update_channel_mask(ChannelMask {
@@ -200,7 +204,6 @@ mod sdl2_frontend {
 
             if rewind {
                 console.rewind();
-                console.update_buttons(button_state);
             }
 
             audio_block.clear();

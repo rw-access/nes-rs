@@ -165,12 +165,8 @@ impl NesWeb {
         self.controller_bits
     }
 
-    pub fn rewind(&mut self) {
-        self.console.rewind();
-        self.console
-            .update_buttons(nes::controller::ButtonState::from_bits(
-                self.controller_bits,
-            ));
+    pub fn rewind(&mut self) -> bool {
+        self.console.rewind()
     }
 
     pub fn save_snapshot(&self) -> Snapshot {

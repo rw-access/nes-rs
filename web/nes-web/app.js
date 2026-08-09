@@ -78,6 +78,8 @@ let heldButtons = 0;
 let previousTime = 0;
 let accumulator = 0;
 let rewinding = false;
+let rewindFrames = 0;
+let rewindStartedAt = 0;
 
 class AudioScheduler {
   constructor() {
@@ -149,7 +151,7 @@ const audio = new AudioScheduler();
 function setStatus(message) { status.textContent = message; }
 
 function updateButtons() {
-  if (emulator) emulator.set_controller(heldButtons);
+  if (emulator && !rewinding) emulator.set_controller(heldButtons);
 }
 
 function press(name) {
@@ -165,6 +167,8 @@ function release(name) {
 function startRewind() {
   if (!emulator || rewinding) return;
   rewinding = true;
+  rewindFrames = 0;
+  rewindStartedAt = performance.now();
   audio.flush();
   accumulator = 0;
   setStatus("Rewinding…");
@@ -174,6 +178,7 @@ function startRewind() {
 function stopRewind() {
   if (!rewinding) return;
   rewinding = false;
+  updateButtons();
   previousTime = performance.now();
   accumulator = 0;
   reportDebug("rewind-stop");
@@ -181,8 +186,19 @@ function stopRewind() {
 
 function rewindFrame() {
   if (!emulator) return null;
-  emulator.rewind();
-  return drawFrame(false);
+  const available = emulator.rewind();
+  const metadata = drawFrame(false);
+  rewindFrames += 1;
+  if (debugEnabled && (rewindFrames === 1 || rewindFrames % 30 === 0 || !available)) {
+    reportDebug("rewind-frame", {
+      available,
+      rewind_frames: rewindFrames,
+      elapsed_ms: performance.now() - rewindStartedAt,
+      frame_number: metadata ? String(metadata.frame_number) : null,
+      audio_samples: metadata?.audio_samples ?? null,
+    });
+  }
+  return metadata;
 }
 
 function drawFrame(scheduleAudio = true) {
@@ -211,7 +227,12 @@ function tick(now) {
     previousTime = now;
 
     if (emulator && rewinding) {
-      rewindFrame();
+      let frames = 0;
+      while (emulator && accumulator >= FRAME_MS && frames < 4) {
+        rewindFrame();
+        accumulator -= FRAME_MS;
+        frames += 1;
+      }
     } else {
       let frames = 0;
       while (emulator && accumulator >= FRAME_MS && frames < 4) {
@@ -347,5 +368,5 @@ for (const button of document.querySelectorAll("[data-button]")) {
   }
 }
 
-await init();
+await init("./pkg/nes_web_bg.wasm?v=10");
 requestAnimationFrame(tick);
