@@ -489,6 +489,44 @@ impl PPU {
                 continue;
             }
 
+            // CPU-visible synchronization can leave the PPU partway through
+            // a visible line.  The old path handled these dots through the
+            // full dispatcher, even though dots 1-256 contain only the
+            // pixel/fetch pipeline and the regular VRAM increments.  Process
+            // that contiguous range directly, stopping before sprite
+            // evaluation at dot 257.  The range runner preserves the exact
+            // rendered and headless pipelines; only the dispatcher is
+            // removed.
+            if self.rendering_enabled()
+                && (0..=239).contains(&self.scanline)
+                && (1..=256).contains(&self.cycle_in_scanline)
+            {
+                let remaining = target_master_ticks - master_ticks;
+                let start_cycle = self.cycle_in_scanline;
+                let end_cycle =
+                    start_cycle.saturating_add(remaining.min((257 - start_cycle) as u64) as u16);
+                self.catch_up_visible_range(end_cycle, mapper, screen);
+                master_ticks += (end_cycle - start_cycle) as u64;
+                continue;
+            }
+
+            // Dots 321-336 fetch the first two tiles for the next line. They
+            // have no visible pixels or mapper clock edge, but their fetch
+            // phases and VRAM increments are CPU-visible through later PPU
+            // reads, so batch only this exact contiguous window.
+            if self.rendering_enabled()
+                && (0..=239).contains(&self.scanline)
+                && (321..=336).contains(&self.cycle_in_scanline)
+            {
+                let remaining = target_master_ticks - master_ticks;
+                let start_cycle = self.cycle_in_scanline;
+                let end_cycle =
+                    start_cycle.saturating_add(remaining.min((337 - start_cycle) as u64) as u16);
+                self.catch_up_prefetch_range(end_cycle, mapper);
+                master_ticks += (end_cycle - start_cycle) as u64;
+                continue;
+            }
+
             let idle = self.idle_ticks_until_boundary();
             if idle != 0 {
                 let ticks = idle.min(target_master_ticks - master_ticks);
@@ -647,6 +685,134 @@ impl PPU {
             }
         }
         self.status_reg = status_reg;
+    }
+
+    /// Process a partial visible-line range beginning at the current dot.
+    ///
+    /// `end_cycle` is exclusive and is never allowed past dot 257.  Keeping
+    /// the current tile pipeline in place is important: a range may begin at
+    /// any fetch phase after a CPU-visible synchronization point, not just at
+    /// the first dot of an eight-dot tile group.
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_range<M: Mapper + ?Sized>(
+        &mut self,
+        end_cycle: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        debug_assert!(self.rendering_enabled());
+        debug_assert!((0..=239).contains(&self.scanline));
+        debug_assert!((1..=257).contains(&self.cycle_in_scanline));
+        debug_assert!(end_cycle >= self.cycle_in_scanline);
+        debug_assert!(end_cycle <= 257);
+
+        let write_output = !cfg!(feature = "headless-render-disabled");
+        if write_output {
+            self.catch_up_visible_range_inner::<true, M>(end_cycle, mapper, screen);
+        } else {
+            self.catch_up_visible_range_inner::<false, M>(end_cycle, mapper, screen);
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_range_inner<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(
+        &mut self,
+        end_cycle: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        let direct_chr = !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
+        let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
+        let skip_pixels = !WRITE_OUTPUT && !self.sprite_zero_in_line;
+        let y = self.scanline as usize;
+        let fine_x = self.fine_x;
+        let sprite_enabled = self.mask_reg & 0x10 != 0;
+        let sprite_zero_in_line = self.sprite_zero_in_line;
+        let mut status_reg = self.status_reg;
+        let mut cycle = self.cycle_in_scanline;
+
+        while cycle < end_cycle {
+            self.cycle_in_scanline = cycle;
+
+            if !skip_pixels {
+                let x = (cycle - 1) as usize;
+                let fine_x = (x as u8 & 7) + fine_x;
+                let tile = self.processed_tile[(fine_x >= 8) as usize];
+                let tile_palette = tile.color(fine_x % 8);
+                let sprite = if sprite_enabled {
+                    self.sprite_pixels[x]
+                } else {
+                    SpritePixel::default()
+                };
+
+                let sprite_drawn = if WRITE_OUTPUT {
+                    let tile_palette_offset = (tile.palette & 0x3) << 2;
+                    let (decision, color) = PPU::multiplex_colors(
+                        tile_palette,
+                        tile_palette_offset,
+                        sprite.palette,
+                        0x10 | sprite.palette_offset,
+                        sprite.behind_background,
+                    );
+                    self.write_pixel::<true>(screen, y, x, color);
+                    decision == MultiplexerDecision::DrawSprite
+                } else {
+                    let background_nonzero = tile_palette != 0;
+                    let sprite_nonzero = sprite.palette != 0;
+                    sprite_nonzero && (!background_nonzero || !sprite.behind_background)
+                };
+                let zero_hit = sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
+                status_reg |= (zero_hit as u8) << 6;
+            }
+
+            match cycle & 7 {
+                0 => {
+                    self.processed_tile = [self.processed_tile[1], self.pending_tile];
+                    self.update_vram_addr();
+                }
+                1 if !skip_background_fetches => self.fetch_background_nametable(mapper),
+                3 if !skip_background_fetches => self.fetch_background_attribute(mapper),
+                5 if !skip_background_fetches => self.fetch_background_pattern_low(mapper),
+                7 if !skip_background_fetches => self.fetch_background_pattern_high(mapper),
+                _ => {}
+            }
+            cycle += 1;
+        }
+
+        self.status_reg = status_reg;
+        self.cycle_in_scanline = end_cycle;
+    }
+
+    /// Batch the two-tile prefetch window on a visible line without crossing
+    /// its event boundary. This is the same phase sequence as
+    /// `fetch_background_tile`, expressed without the generic dispatcher.
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_prefetch_range<M: Mapper + ?Sized>(&mut self, end_cycle: u16, mapper: &M) {
+        debug_assert!(self.rendering_enabled());
+        debug_assert!((321..=336).contains(&self.cycle_in_scanline));
+        debug_assert!(end_cycle >= self.cycle_in_scanline);
+        debug_assert!(end_cycle <= 337);
+
+        let mut cycle = self.cycle_in_scanline;
+        while cycle < end_cycle {
+            self.cycle_in_scanline = cycle;
+            match cycle & 7 {
+                0 => {
+                    self.processed_tile = [self.processed_tile[1], self.pending_tile];
+                    self.update_vram_addr();
+                }
+                1 => self.fetch_background_nametable(mapper),
+                3 => self.fetch_background_attribute(mapper),
+                5 => self.fetch_background_pattern_low(mapper),
+                7 => self.fetch_background_pattern_high(mapper),
+                _ => {}
+            }
+            cycle += 1;
+        }
+        self.cycle_in_scanline = end_cycle;
     }
 
     #[cfg(feature = "timestamped-scheduler")]
@@ -1567,6 +1733,150 @@ mod timestamped_tests {
         assert_eq!(caught_up.frame, 1);
         assert_eq!(caught_up.scanline, 0);
         assert_eq!(caught_up.cycle_in_scanline, 3);
+    }
+
+    #[test]
+    fn catch_up_partial_visible_ranges_match_exact_dispatch() {
+        let mut base = PPU::default();
+        base.control_reg = 0x1d;
+        base.mask_reg = 0x1e;
+        base.v = 0x0417;
+        base.t = 0x0417;
+        base.fine_x = 5;
+        for (index, value) in base.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(29).rotate_left(1);
+        }
+        for (index, value) in base.palette_ram.iter_mut().enumerate() {
+            *value = 0x40 | (index as u8).wrapping_mul(3);
+        }
+        base.oam.fill(0xff);
+        base.oam[0..4].copy_from_slice(&[0, 0x00, 0x00, 0x00]);
+        base.oam[4..8].copy_from_slice(&[3, 0x07, 0x20, 0x04]);
+
+        // Exercise starts in every fetch phase, including the middle of a
+        // tile group, and finish both inside a group and exactly at sprite
+        // evaluation. The mapper deliberately has no direct CHR page so the
+        // test compares every internal tile byte in both feature builds.
+        for start in [1_u16, 2, 5, 7, 8, 9, 63, 127, 255] {
+            let mut positioned = base.clone();
+            let mut mapper = VariedMapper;
+            let mut screen = Screen::default();
+            for _ in 0..start {
+                positioned.step(&mut mapper, &mut screen);
+            }
+
+            for delta in [1_u64, 2, 3, 7, 16, (257 - start) as u64] {
+                let mut exact = positioned.clone();
+                let mut caught_up = positioned.clone();
+                let mut exact_mapper = VariedMapper;
+                let mut caught_up_mapper = VariedMapper;
+                let mut exact_screen = screen.clone();
+                let mut caught_up_screen = screen.clone();
+
+                for _ in 0..delta {
+                    exact.step(&mut exact_mapper, &mut exact_screen);
+                }
+                caught_up.catch_up_to(0, delta, &mut caught_up_mapper, &mut caught_up_screen);
+
+                assert_same_state(&exact, &caught_up);
+                assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+            }
+        }
+    }
+
+    #[test]
+    fn catch_up_partial_direct_chr_respects_sprite_zero_fetch_contract() {
+        for sprite_zero_in_line in [false, true] {
+            let mut base = PPU::default();
+            base.control_reg = 0x1d;
+            base.mask_reg = 0x1e;
+            base.v = 0x0417;
+            base.t = 0x0417;
+            base.fine_x = 3;
+            base.cycle_in_scanline = 5;
+            base.sprite_zero_in_line = sprite_zero_in_line;
+            base.pending_tile = TileData {
+                nametable_index: 0x12,
+                palette: 2,
+                pattern_low: 0x5a,
+                pattern_high: 0xa5,
+            };
+            base.processed_tile = [base.pending_tile, TileData::default()];
+            if sprite_zero_in_line {
+                base.sprite_pixels[4] = SpritePixel {
+                    palette: 1,
+                    position: 0,
+                    palette_offset: 0,
+                    behind_background: false,
+                };
+            }
+            for (index, value) in base.nametables.iter_mut().enumerate() {
+                *value = (index as u8).wrapping_mul(11).rotate_left(1);
+            }
+
+            let mut exact = base.clone();
+            let mut caught_up = base;
+            let mut exact_mapper = DirectChrMapper::patterned();
+            let mut caught_up_mapper = DirectChrMapper::patterned();
+            let mut exact_screen = Screen::default();
+            let mut caught_up_screen = Screen::default();
+
+            for _ in 0..12 {
+                exact.step(&mut exact_mapper, &mut exact_screen);
+            }
+            caught_up.catch_up_to(0, 12, &mut caught_up_mapper, &mut caught_up_screen);
+
+            if sprite_zero_in_line {
+                // Direct CHR must not suppress fetches when sprite-zero
+                // selection remains observable on this line.
+                assert_same_state(&exact, &caught_up);
+            } else {
+                // Aggressive headless mode intentionally leaves skipped tile
+                // bytes stale, but all CPU-visible state must still match.
+                assert_same_observable_state(&exact, &caught_up);
+            }
+            assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+        }
+    }
+
+    #[test]
+    fn catch_up_partial_prefetch_range_matches_exact_dispatch() {
+        let mut positioned = PPU::default();
+        positioned.control_reg = 0x1d;
+        positioned.mask_reg = 0x1e;
+        positioned.v = 0x0417;
+        positioned.t = 0x0417;
+        positioned.fine_x = 5;
+        for (index, value) in positioned.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(17).rotate_left(2);
+        }
+        positioned.oam.fill(0xff);
+        positioned.oam[0..4].copy_from_slice(&[0, 0x03, 0x01, 0x08]);
+
+        let mut setup_mapper = VariedMapper;
+        let mut setup_screen = Screen::default();
+        for _ in 0..321 {
+            positioned.step(&mut setup_mapper, &mut setup_screen);
+        }
+
+        // The final case crosses the exact 337-340 tail, proving that the
+        // range runner stops before the next scanline's eventful boundary.
+        for delta in [1_u64, 2, 3, 7, 8, 16, 20] {
+            let mut exact = positioned.clone();
+            let mut caught_up = positioned.clone();
+            let mut exact_mapper = VariedMapper;
+            let mut caught_up_mapper = VariedMapper;
+            let mut exact_screen = setup_screen.clone();
+            let mut caught_up_screen = setup_screen.clone();
+
+            for _ in 0..delta {
+                exact.step(&mut exact_mapper, &mut exact_screen);
+            }
+            caught_up.catch_up_to(0, delta, &mut caught_up_mapper, &mut caught_up_screen);
+
+            assert_same_state(&exact, &caught_up);
+            assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+        }
     }
 
     #[test]
