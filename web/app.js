@@ -209,7 +209,7 @@ function drawFrame(scheduleAudio = true) {
   const rgba = emulator.rgba_buffer();
   image.data.set(rgba);
   context.putImageData(image, 0, 0);
-  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number} · ${metadata.audio_samples} audio samples`);
+  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number}`);
   if (scheduleAudio) {
     try {
       audio.schedule(emulator.audio_buffer().subarray(0, metadata.audio_samples), metadata.audio_sample_rate, metadata.audio_discontinuity);
