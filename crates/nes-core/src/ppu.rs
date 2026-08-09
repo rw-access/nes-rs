@@ -261,6 +261,54 @@ enum MultiplexerDecision {
 }
 
 impl PPU {
+    fn can_batch_three_idle_ticks(&self) -> bool {
+        if self.cycle_in_scanline > 337 {
+            return false;
+        }
+
+        match self.scanline {
+            240 | 242..=260 => true,
+            241 => self.cycle_in_scanline >= 2,
+            0..=239 => {
+                if !self.rendering_enabled() {
+                    true
+                } else {
+                    matches!(self.cycle_in_scanline, 261..=317 | 337)
+                }
+            }
+            261 => {
+                if !self.rendering_enabled() {
+                    self.cycle_in_scanline >= 2
+                } else {
+                    matches!(self.cycle_in_scanline, 258..=277 | 305..=325 | 337)
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn step_cpu_cycle<M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        if self.can_batch_three_idle_ticks() {
+            if self.last_read.get().is_some() {
+                // Apply the deferred CPU-visible read effect on the first
+                // tick, then advance the two remaining idle ticks directly.
+                self.step(mapper, screen);
+                self.cycle_in_scanline += 2;
+            } else {
+                self.cycle_in_scanline += 3;
+            }
+            return;
+        }
+
+        self.step(mapper, screen);
+        self.step(mapper, screen);
+        self.step(mapper, screen);
+    }
+
     pub(crate) fn reset(&mut self) {
         self.cycle_in_scanline = 0;
         self.scanline = 0;

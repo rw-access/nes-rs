@@ -68,9 +68,7 @@ impl ConsoleState {
                 process_sample(sample);
             }
         }
-        for _ in 0..3 {
-            self.bus.ppu.step(&mut self.bus.mapper, screen);
-        }
+        self.bus.ppu.step_cpu_cycle(&mut self.bus.mapper, screen);
     }
 
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
