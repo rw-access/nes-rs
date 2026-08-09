@@ -1,0 +1,17 @@
+[package]
+name = "nes-render"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+headless-cli = ["dep:clap"]
+
+[dependencies]
+nes-core = { path = "../nes-core" }
+clap = { version = "4.0.15", features = ["derive"], optional = true }
+
+[[bin]]
+name = "headless_test"
+path = "src/bin/headless_test.rs"
+required-features = ["headless-cli"]

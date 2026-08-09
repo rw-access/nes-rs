@@ -1,6 +1,6 @@
 //! Headless iNES test-ROM execution and the Blargg result protocol.
 
-use crate::{cartridge, console::Console, ines};
+use nes_core::{cartridge, console::Console, ines};
 use std::{
     fs::File,
     io,

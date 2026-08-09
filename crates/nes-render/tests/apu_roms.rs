@@ -1,4 +1,4 @@
-use nes::headless::{run_rom, Status};
+use nes_render::headless::{run_rom, Status};
 use std::{env, path::PathBuf};
 
 const ROMS: &[&str] = &[
@@ -17,7 +17,9 @@ fn compatible_apu_roms() {
 
     let root = env::var_os("NES_TEST_ROM_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/nes-test-roms"));
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/nes-test-roms")
+        });
 
     for relative_path in ROMS {
         let path = root.join(relative_path);

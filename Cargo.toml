@@ -1,31 +1,8 @@
-[package]
-name = "nes"
-version = "0.1.0"
-edition = "2021"
-
-[features]
-default = []
-headless-cli = ["dep:clap"]
-sdl2-frontend = ["dep:clap", "dep:image", "dep:sdl2"]
-winit-frontend = ["dep:cpal", "dep:softbuffer", "dep:winit"]
-
-[dependencies]
-sdl2 = { version = "0.32.1", features = ["use-pkgconfig"], optional = true }
-image = { version = "0.24.0", optional = true }
-arrayvec = "0.7.2"
-dyn-clone = "1.0.9"
-clap = { version = "4.0.15", features = ["derive"], optional = true }
-lazy_static = "1.4.0"
-cpal = { version = "0.16.0", optional = true }
-softbuffer = { version = "0.4.8", optional = true }
-winit = { version = "0.30.13", optional = true }
-
-[[bin]]
-name = "nes-winit"
-path = "src/bin/nes_winit.rs"
-required-features = ["winit-frontend"]
-
-[[bin]]
-name = "headless_test"
-path = "src/bin/headless_test.rs"
-required-features = ["headless-cli"]
+[workspace]
+resolver = "2"
+members = [
+    "crates/nes-core",
+    "crates/nes-play",
+    "crates/nes-render",
+    "crates/nes-wasm",
+]

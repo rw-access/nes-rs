@@ -1,5 +1,5 @@
 use clap::Parser;
-use nes::headless::{run_rom, Status};
+use nes_render::headless::{run_rom, Status, TestResult};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Debug, Parser, PartialEq, Eq)]
@@ -17,7 +17,7 @@ struct Arguments {
     roms: Vec<PathBuf>,
 }
 
-fn print_result(result: &nes::headless::TestResult, frame_limit: u64) -> bool {
+fn print_result(result: &TestResult, frame_limit: u64) -> bool {
     println!("{} ({} frames)", result.path.display(), result.frames);
     if !result.signature_valid {
         println!("  no test signature at $6001-$6003 (expected DE B0 61)");

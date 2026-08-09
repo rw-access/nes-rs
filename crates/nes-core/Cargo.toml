@@ -1,0 +1,9 @@
+[package]
+name = "nes-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrayvec = "0.7.2"
+dyn-clone = "1.0.9"
+lazy_static = "1.4.0"

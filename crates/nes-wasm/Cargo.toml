@@ -1,5 +1,5 @@
 [package]
-name = "nes-web"
+name = "nes-wasm"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-js-sys = "0.3"
-nes = { path = "../.." }
-wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
+js-sys = "0.3"
+nes-core = { path = "../nes-core" }
+wasm-bindgen = "0.2"

@@ -2,8 +2,8 @@
 mod sdl2_frontend {
     use clap::Parser;
     use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
-    use nes::controller::ButtonState;
-    use nes::{
+    use nes_core::controller::ButtonState;
+    use nes_core::{
         apu::ChannelMask, cartridge, console::Console, controller::Button, video::NES_PALETTE_RGB,
     };
     use sdl2::event::Event;
@@ -117,7 +117,7 @@ mod sdl2_frontend {
         let mut rom_file = std::fs::File::open(rom_path).unwrap();
         let mut bmp_file = std::fs::File::create(bmp_path).unwrap();
 
-        let (c, _) = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
+        let (c, _) = nes_core::ines::load(&mut rom_file).expect("failed to load cartridge");
 
         let num_tiles = c.chr.get_banks().len() * TILES_PER_BANK;
         let tiles_x = 32 as usize;
@@ -171,7 +171,7 @@ mod sdl2_frontend {
         const HEIGHT: u32 = 240;
         let mut rom_file = std::fs::File::open(rom_path).unwrap();
 
-        let (c, m) = nes::ines::load(&mut rom_file).expect("failed to load cartridge");
+        let (c, m) = nes_core::ines::load(&mut rom_file).expect("failed to load cartridge");
         let mapper = cartridge::new(c, m).unwrap();
         let mut console = Console::new(mapper);
 

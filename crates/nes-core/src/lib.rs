@@ -8,7 +8,6 @@ pub mod console;
 pub mod controller;
 pub mod cpu;
 mod dsp;
-pub mod headless;
 pub mod ines;
 mod instructions;
 pub(crate) mod ppu;

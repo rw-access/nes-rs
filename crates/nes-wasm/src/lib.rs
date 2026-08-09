@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use js_sys::{Float32Array, Uint8Array};
-use nes::{cartridge, ines, Console, VideoBuffer, AUDIO_SAMPLE_RATE};
+use nes_core::{cartridge, ines, Console, VideoBuffer, AUDIO_SAMPLE_RATE};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -72,7 +72,7 @@ impl FrameMetadata {
 /// An opaque, cloneable point-in-time state for save/restore UI controls.
 #[wasm_bindgen]
 pub struct Snapshot {
-    state: nes::ConsoleState,
+    state: nes_core::ConsoleState,
     controller_bits: u8,
 }
 
@@ -89,14 +89,14 @@ impl NesWeb {
             console: Console::new(mapper),
             video: VideoBuffer::new(),
             audio: Vec::with_capacity((AUDIO_SAMPLE_RATE / 55) as usize + 8),
-            rgba_js: Uint8Array::new_with_length(nes::video::FRAME_RGBA_BYTES as u32),
+            rgba_js: Uint8Array::new_with_length(nes_core::video::FRAME_RGBA_BYTES as u32),
             audio_js: Float32Array::new_with_length(4096),
             controller_bits: 0,
             audio_discontinuity_pending: false,
             last_frame: FrameMetadata {
                 frame_number: 0,
-                width: nes::video::FRAME_WIDTH as u32,
-                height: nes::video::FRAME_HEIGHT as u32,
+                width: nes_core::video::FRAME_WIDTH as u32,
+                height: nes_core::video::FRAME_HEIGHT as u32,
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_samples: 0,
                 audio_discontinuity: false,
@@ -130,8 +130,8 @@ impl NesWeb {
         }
         self.last_frame = FrameMetadata {
             frame_number: frame.frame_number,
-            width: nes::video::FRAME_WIDTH as u32,
-            height: nes::video::FRAME_HEIGHT as u32,
+            width: nes_core::video::FRAME_WIDTH as u32,
+            height: nes_core::video::FRAME_HEIGHT as u32,
             audio_sample_rate: frame.audio_sample_rate,
             audio_samples: self.audio.len(),
             audio_discontinuity: frame.audio_discontinuity || self.audio_discontinuity_pending,
@@ -158,7 +158,7 @@ impl NesWeb {
     pub fn set_controller(&mut self, bits: u8) {
         self.controller_bits = bits;
         self.console
-            .update_buttons(nes::controller::ButtonState::from_bits(bits));
+            .update_buttons(nes_core::controller::ButtonState::from_bits(bits));
     }
 
     pub fn controller_bits(&self) -> u8 {
@@ -181,18 +181,18 @@ impl NesWeb {
             .restore_snapshot_and_reset_timeline(snapshot.state.clone());
         self.controller_bits = snapshot.controller_bits;
         self.console
-            .update_buttons(nes::controller::ButtonState::from_bits(
+            .update_buttons(nes_core::controller::ButtonState::from_bits(
                 self.controller_bits,
             ));
         self.audio_discontinuity_pending = true;
     }
 
     pub fn width(&self) -> u32 {
-        nes::video::FRAME_WIDTH as u32
+        nes_core::video::FRAME_WIDTH as u32
     }
 
     pub fn height(&self) -> u32 {
-        nes::video::FRAME_HEIGHT as u32
+        nes_core::video::FRAME_HEIGHT as u32
     }
 
     pub fn audio_sample_rate(&self) -> u32 {

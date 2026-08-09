@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
-use nes::apu::ChannelMask;
-use nes::cartridge;
-use nes::console::Console;
-use nes::controller::{Button, ButtonState};
-use nes::ines;
-use nes::video::{FRAME_HEIGHT, FRAME_WIDTH, NES_PALETTE_RGB};
+use nes_core::apu::ChannelMask;
+use nes_core::cartridge;
+use nes_core::console::Console;
+use nes_core::controller::{Button, ButtonState};
+use nes_core::ines;
+use nes_core::video::{FRAME_HEIGHT, FRAME_WIDTH, NES_PALETTE_RGB};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
@@ -461,7 +461,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::button_for_key;
-    use nes::controller::Button;
+    use nes_core::controller::Button;
     use winit::keyboard::KeyCode;
 
     #[test]

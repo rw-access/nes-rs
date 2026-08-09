@@ -1,4 +1,6 @@
-import init, { NesWeb } from "./pkg/nes_web.js";
+import init, * as wasm from "./pkg/nes_wasm.js";
+
+const NesWeb = wasm.NesWasm ?? wasm.NesWeb;
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
 const debugEndpoint = debugEnabled ? new URL("__debug", document.baseURI).href : null;
@@ -368,5 +370,5 @@ for (const button of document.querySelectorAll("[data-button]")) {
   }
 }
 
-await init("./pkg/nes_web_bg.wasm?v=10");
+await init("./pkg/nes_wasm_bg.wasm?v=10");
 requestAnimationFrame(tick);

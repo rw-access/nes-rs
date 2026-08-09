@@ -28,13 +28,13 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build WASM package
-        run: wasm-pack build web/nes-web --target web --release --out-dir pkg
+        run: wasm-pack build crates/nes-wasm --target web --release --out-dir ../../web/pkg
 
       - name: Stage static site
         run: |
           mkdir -p _site/pkg
-          cp web/nes-web/index.html web/nes-web/app.js web/nes-web/style.css _site/
-          cp -R web/nes-web/pkg/. _site/pkg/
+          cp web/index.html web/app.js web/style.css _site/
+          cp -R web/pkg/. _site/pkg/
           touch _site/.nojekyll
 
       - name: Configure GitHub Pages
