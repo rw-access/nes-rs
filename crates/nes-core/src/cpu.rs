@@ -728,7 +728,10 @@ impl CPU {
             } // DMA
             0x4016 => bus.controller.write(data),                                   // controller 1
             0x4018..=0x401F => {} // disabled test mode
-            _ => bus.mapper.write(addr, data),
+            _ => {
+                bus.mapper.write(addr, data);
+                bus.ppu.refresh_nametable_mirroring(&bus.mapper);
+            }
         };
     }
 

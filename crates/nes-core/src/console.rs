@@ -329,7 +329,7 @@ mod tests {
     use super::{AudioResetSignal, Console};
     use crate::cartridge::{Cartridge, Mapper, MirroringMode, CHR, PRG};
     use crate::video::{VideoBuffer, FRAME_HEIGHT, FRAME_WIDTH};
-    use std::rc::Rc;
+    use std::{cell::Cell, rc::Rc};
 
     #[derive(Clone)]
     struct TestMapper;
@@ -344,6 +344,31 @@ mod tests {
         }
 
         fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
+
+    #[derive(Clone)]
+    struct MirrorChangingMapper {
+        mode: Rc<Cell<MirroringMode>>,
+    }
+
+    impl Mapper for MirrorChangingMapper {
+        fn mirror(&self) -> MirroringMode {
+            self.mode.get()
+        }
+
+        fn read(&self, _address: u16) -> u8 {
+            0xea
+        }
+
+        fn write(&mut self, address: u16, _data: u8) {
+            if address == 0x8000 {
+                self.mode.set(MirroringMode::Vertical);
+            }
+        }
 
         fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
             None
@@ -410,6 +435,44 @@ mod tests {
                 .flatten()
                 .any(|&pixel| pixel != 0));
         }
+    }
+
+    #[test]
+    fn nametable_mirroring_cache_refreshes_after_mapper_write() {
+        let mode = Rc::new(Cell::new(MirroringMode::Horizontal));
+        let mut console = Console::new(Box::new(MirrorChangingMapper { mode }));
+
+        console
+            .state
+            .bus
+            .ppu
+            .write_byte(&mut console.state.bus.mapper, 0x2000, 0x11);
+        console
+            .state
+            .cpu
+            .write_byte(&mut console.state.bus, 0x8000, 0);
+        console
+            .state
+            .bus
+            .ppu
+            .write_byte(&mut console.state.bus.mapper, 0x2800, 0x22);
+
+        assert_eq!(
+            console
+                .state
+                .bus
+                .ppu
+                .read_byte(&console.state.bus.mapper, 0x2000),
+            0x22
+        );
+        assert_eq!(
+            console
+                .state
+                .bus
+                .ppu
+                .read_byte(&console.state.bus.mapper, 0x2400),
+            0
+        );
     }
 
     #[cfg(all(not(feature = "apu-disabled"), not(feature = "rewind-disabled")))]

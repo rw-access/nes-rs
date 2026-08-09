@@ -13,11 +13,13 @@ pub(crate) struct MemoryBus {
 
 impl MemoryBus {
     pub(crate) fn new(mapper: MapperInstance) -> Self {
-        MemoryBus {
+        let mut bus = MemoryBus {
             mapper,
             ppu: PPU::default(),
             apu: APU::default(),
             controller: Controller::default(),
-        }
+        };
+        bus.ppu.refresh_nametable_mirroring(&bus.mapper);
+        bus
     }
 }
