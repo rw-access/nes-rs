@@ -9,7 +9,7 @@ use crate::{
     video::VideoBuffer,
 };
 
-#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+#[cfg(feature = "timestamped-scheduler")]
 use crate::cartridge::NROM;
 
 pub use crate::video::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -53,9 +53,9 @@ pub struct ConsoleState {
     pub(crate) bus: MemoryBus,
     pub(crate) cpu: CPU,
     frame_number: u64,
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     scheduler_master_ticks: u64,
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     ppu_master_ticks: u64,
 }
 
@@ -101,7 +101,7 @@ impl ConsoleState {
             .step_cpu_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(&mut self.bus.mapper, screen);
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     fn step_timestamped_nrom<F: FnMut(f32)>(
         &mut self,
         screen: &mut Screen,
@@ -110,7 +110,7 @@ impl ConsoleState {
         self.step_timestamped_nrom_with_mode::<true, false, F>(screen, process_sample);
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     fn step_timestamped_nrom_with_mode<
         const WRITE_OUTPUT: bool,
         const AGGRESSIVE: bool,
@@ -121,11 +121,26 @@ impl ConsoleState {
         process_sample: &mut F,
     ) {
         let current_master_ticks = self.scheduler_master_ticks;
-        let deadline = self.ppu_master_ticks + self.bus.ppu.next_scheduler_event_in_ticks();
+        let ppu_deadline = self.ppu_master_ticks + self.bus.ppu.next_scheduler_event_in_ticks();
+        let apu_deadline = {
+            #[cfg(not(feature = "apu-disabled"))]
+            {
+                self.bus
+                    .apu
+                    .next_irq_in_cpu_cycles()
+                    .map_or(u64::MAX, |cycles| current_master_ticks + cycles * 3)
+            }
+            #[cfg(feature = "apu-disabled")]
+            {
+                u64::MAX
+            }
+        };
+        let deadline = ppu_deadline.min(apu_deadline);
         let (cycles, ppu_barrier) = self
             .cpu
             .run_timestamped_block(&mut self.bus, deadline.saturating_sub(current_master_ticks));
         let target_master_ticks = current_master_ticks + cycles as u64 * 3;
+        self.advance_apu_timestamped(cycles as u64, process_sample);
 
         if ppu_barrier {
             // The block has either retained a decoded PPU/DMA instruction or
@@ -141,6 +156,7 @@ impl ConsoleState {
 
             let barrier_cycles = self.cpu.step_timestamped(&mut self.bus);
             let barrier_target = target_master_ticks + barrier_cycles as u64 * 3;
+            self.advance_apu_timestamped(barrier_cycles as u64, process_sample);
             self.scheduler_master_ticks = self
                 .catch_up_timestamped_nrom::<WRITE_OUTPUT, AGGRESSIVE>(
                     self.ppu_master_ticks,
@@ -159,11 +175,24 @@ impl ConsoleState {
         } else {
             self.scheduler_master_ticks = target_master_ticks;
         }
-
-        let _ = process_sample;
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline(always)]
+    fn advance_apu_timestamped<F: FnMut(f32)>(&mut self, cycles: u64, process_sample: &mut F) {
+        #[cfg(not(feature = "apu-disabled"))]
+        {
+            let apu = &mut self.bus.apu;
+            let mapper = &self.bus.mapper;
+            apu.advance_cpu_cycles(cycles, |addr| mapper.read(addr), process_sample);
+        }
+        #[cfg(feature = "apu-disabled")]
+        {
+            let _ = (cycles, process_sample);
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
     fn catch_up_timestamped_nrom<const WRITE_OUTPUT: bool, const AGGRESSIVE: bool>(
         &mut self,
@@ -206,8 +235,8 @@ impl ConsoleState {
             return;
         }
 
-        #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
-        if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) {
+        #[cfg(feature = "timestamped-scheduler")]
+        if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) && self.timestamped_nrom_safe() {
             self.step_timestamped_nrom_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
                 screen,
                 process_sample,
@@ -217,7 +246,7 @@ impl ConsoleState {
 
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
 
-        #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+        #[cfg(feature = "timestamped-scheduler")]
         {
             for _ in 0..cycles {
                 self.step_hardware_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
@@ -229,12 +258,25 @@ impl ConsoleState {
             self.ppu_master_ticks = self.scheduler_master_ticks;
         }
 
-        #[cfg(not(all(feature = "timestamped-scheduler", feature = "apu-disabled")))]
+        #[cfg(not(feature = "timestamped-scheduler"))]
         for _ in 0..cycles {
             self.step_hardware_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
                 screen,
                 process_sample,
             );
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline(always)]
+    fn timestamped_nrom_safe(&self) -> bool {
+        #[cfg(feature = "apu-disabled")]
+        {
+            true
+        }
+        #[cfg(not(feature = "apu-disabled"))]
+        {
+            self.bus.apu.timestamped_safe()
         }
     }
 
@@ -407,9 +449,9 @@ impl Console {
                 bus: MemoryBus::new(mapper),
                 cpu: CPU::default(),
                 frame_number: 0,
-                #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+                #[cfg(feature = "timestamped-scheduler")]
                 scheduler_master_ticks: 0,
-                #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+                #[cfg(feature = "timestamped-scheduler")]
                 ppu_master_ticks: 0,
             },
             screen: Screen::default(),
@@ -623,7 +665,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     fn dma_and_midframe_register_nrom_cartridge() -> Cartridge {
         let mut prg = vec![[0; 0x4000]];
         let mut program = Vec::new();
@@ -634,6 +676,14 @@ mod tests {
         program.extend_from_slice(&[
             0xa9, 0x1e, // LDA #$1e: show background and sprites
             0x8d, 0x01, 0x20, // STA $2001
+            0xa9, 0x0f, // enable the four tone/noise channels
+            0x8d, 0x15, 0x40, // STA $4015
+            0xa9, 0x30, // pulse 1: constant-volume duty setup
+            0x8d, 0x00, 0x40, // STA $4000
+            0xa9, 0x08, // pulse 1: timer low byte
+            0x8d, 0x02, 0x40, // STA $4002
+            0xa9, 0x00, // pulse 1: timer high and length counter
+            0x8d, 0x03, 0x40, // STA $4003
         ]);
         program.extend(std::iter::repeat_n(0xea, 5_000)); // NOP
 
@@ -697,7 +747,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     fn initialize_dma_differential_console(console: &mut Console) {
         // The source page and primary OAM start as $FF, so no sprite is
         // visible until the program's mid-frame DMA installs one.
@@ -795,7 +845,7 @@ mod tests {
         assert!(rendered_pixels_nonzero);
     }
 
-    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[cfg(feature = "timestamped-scheduler")]
     #[test]
     fn timestamped_nrom_matches_cycle_stepped_dma_and_midframe_registers() {
         let cartridge = dma_and_midframe_register_nrom_cartridge();
@@ -815,6 +865,10 @@ mod tests {
                 cycle_stepped_frame.frame_number
             );
             assert_eq!(timestamped_frame.pixels, cycle_stepped_frame.pixels);
+            assert_eq!(
+                timestamped_frame.audio_samples,
+                cycle_stepped_frame.audio_samples
+            );
             #[cfg(not(feature = "headless-render-disabled"))]
             {
                 saw_nonzero_pixel |= timestamped_frame

@@ -604,6 +604,56 @@ impl APU {
         self.dmc.dma_active()
     }
 
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn timestamped_safe(&self) -> bool {
+        self.dmc.bytes_remaining == 0
+            && !self.dmc.dma_active()
+            && self.dmc.load_dma_delay == 0
+            && !self.dmc.irq_pending
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn next_irq_in_cpu_cycles(&self) -> Option<u64> {
+        if self.dmc.irq_pending || self.pending_irq.get() {
+            return Some(1);
+        }
+        if !self.enable_irq {
+            return None;
+        }
+        if self.frame_counter_reset_delay != 0 {
+            return Some(1);
+        }
+
+        let event_cycle: u32 = match (self.use_five_step, self.frame_counter_step) {
+            (_, 0) => 7457,
+            (_, 1) => 14913,
+            (_, 2) => 22371,
+            (_, 3) => 29829,
+            (true, 4) => 37281,
+            _ => unreachable!(),
+        };
+        Some(u64::from(
+            event_cycle.saturating_sub(self.frame_counter_cycle).max(1),
+        ))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn advance_cpu_cycles<F, G>(
+        &mut self,
+        cycles: u64,
+        mut read_memory: F,
+        mut process_sample: G,
+    ) where
+        F: FnMut(u16) -> u8,
+        G: FnMut(f32),
+    {
+        for _ in 0..cycles {
+            if let Some(sample) = self.step(&mut read_memory) {
+                process_sample(sample);
+            }
+        }
+    }
+
     fn update_ticks(&mut self) {
         const CPU_FREQ: u32 = 1_789_773;
 

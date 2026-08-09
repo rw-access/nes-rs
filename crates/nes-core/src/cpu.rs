@@ -464,7 +464,15 @@ fn crosses_page_boundary(a: u16, b: u16) -> bool {
 #[cfg(feature = "timestamped-scheduler")]
 #[inline]
 fn is_ppu_register_address(address: u16) -> bool {
-    (0x2000..=0x3fff).contains(&address) || address == 0x4014
+    let ppu_register = (0x2000..=0x3fff).contains(&address) || address == 0x4014;
+    #[cfg(feature = "apu-disabled")]
+    {
+        ppu_register
+    }
+    #[cfg(not(feature = "apu-disabled"))]
+    {
+        ppu_register || (0x4000..=0x4017).contains(&address)
+    }
 }
 
 #[cfg(feature = "timestamped-scheduler")]
@@ -798,6 +806,7 @@ impl CPU {
             // already-visible interrupt boundary.
             if bus.ppu.nmi_pending()
                 || (bus.mapper.irq_pending() && !self.check_status_bit(StatusFlags::I))
+                || (!self.check_status_bit(StatusFlags::I) && bus.apu.irq_line())
             {
                 self.step(bus, None);
                 break;
