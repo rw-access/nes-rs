@@ -335,6 +335,15 @@ impl PPU {
 
         self.last_read.set(None);
 
+        // Scanlines 242-260 are entirely idle after the vblank edge. Keep
+        // advancing dots, but avoid re-entering the full visible/vblank
+        // dispatch for every PPU cycle. The read-latch transition above must
+        // still run first because CPU-visible PPU reads can occur in vblank.
+        if (242..=260).contains(&self.scanline) {
+            self.update_cycle();
+            return;
+        }
+
         match self.scanline {
             0..=239 => self.step_visible(mapper, screen),
             240 => self.step_post_render(mapper),
