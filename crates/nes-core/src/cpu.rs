@@ -25,6 +25,8 @@ pub(crate) struct CPU {
     pub(crate) ram: [u8; 0x800],
     #[cfg(feature = "timestamped-scheduler")]
     timestamped_decoded: Option<(u16, CompactDecodedInstruction)>,
+    #[cfg(feature = "timestamped-scheduler")]
+    timestamped_static_cache: [TimestampedStaticInstruction; 256],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +38,33 @@ struct CompactDecodedInstruction {
     width: u8,
     min_cycles: u8,
     page_boundary_hit: bool,
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[derive(Clone, Copy, Debug)]
+struct TimestampedStaticInstruction {
+    pc: u16,
+    opcode: Opcode,
+    addressing_mode: AddressingMode,
+    operand: [u8; 2],
+    min_cycles: u8,
+    page_boundary_penalty: bool,
+    valid: bool,
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+impl Default for TimestampedStaticInstruction {
+    fn default() -> Self {
+        Self {
+            pc: 0,
+            opcode: Opcode::NOP,
+            addressing_mode: AddressingMode::Implied,
+            operand: [0; 2],
+            min_cycles: 2,
+            page_boundary_penalty: false,
+            valid: false,
+        }
+    }
 }
 
 impl Default for CPU {
@@ -51,6 +80,8 @@ impl Default for CPU {
             ram: [0; 0x800],
             #[cfg(feature = "timestamped-scheduler")]
             timestamped_decoded: None,
+            #[cfg(feature = "timestamped-scheduler")]
+            timestamped_static_cache: [TimestampedStaticInstruction::default(); 256],
         }
     }
 }
@@ -243,31 +274,71 @@ impl CPU {
     /// the ordinary CPU step after the scheduler catches the PPU up.
     #[cfg(feature = "timestamped-scheduler")]
     fn decode_timestamped(
-        &self,
+        &mut self,
         bus: &MemoryBus,
     ) -> Option<(u16, CompactDecodedInstruction, bool)> {
         let addr = self.pc;
-        if !is_cartridge_address(addr) {
-            return None;
-        }
+        let static_instruction = self.timestamped_static_instruction(bus, addr)?;
 
-        let opcode = self.read_code_byte(bus, addr);
-        let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
-        let width = instruction_width(extended_opcode.opcode, extended_opcode.addressing_mode);
-        if (1..width).any(|offset| !is_cartridge_address(addr.wrapping_add(offset))) {
-            return None;
-        }
-
-        if matches!(extended_opcode.addressing_mode, AddressingMode::Indirect) {
-            let pointer = self.read_code_address(bus, addr.wrapping_add(1));
+        if matches!(static_instruction.addressing_mode, AddressingMode::Indirect) {
+            let pointer = u16::from_le_bytes(static_instruction.operand);
             if self.preflight_indirect(bus, pointer).is_none() {
                 return None;
             }
         }
 
-        let decoded = self.decode_compact_opcode(bus, addr, opcode);
+        let decoded = self.decode_compact_static(bus, addr, static_instruction);
         let may_access = self.decoded_instruction_may_access_ppu(addr, &decoded);
         Some((addr, decoded, may_access))
+    }
+
+    /// Cache only immutable NROM instruction bytes and opcode metadata. The
+    /// effective address remains decoded against live registers/RAM below, so
+    /// indexed and indirect instructions retain their normal semantics.
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn timestamped_static_instruction(
+        &mut self,
+        bus: &MemoryBus,
+        addr: u16,
+    ) -> Option<TimestampedStaticInstruction> {
+        if !is_cartridge_address(addr) {
+            return None;
+        }
+
+        let slot = (addr & 0x00ff) as usize;
+        let cached = self.timestamped_static_cache[slot];
+        if cached.valid && cached.pc == addr {
+            return Some(cached);
+        }
+
+        let raw_opcode = self.read_code_byte(bus, addr);
+        let extended_opcode = &EXTENDED_OPCODES[raw_opcode as usize];
+        let width = instruction_width(extended_opcode.opcode, extended_opcode.addressing_mode);
+        if (1..width).any(|offset| !is_cartridge_address(addr.wrapping_add(offset))) {
+            return None;
+        }
+
+        let mut operand = [0; 2];
+        for (index, byte) in operand
+            .iter_mut()
+            .enumerate()
+            .take(width.saturating_sub(1) as usize)
+        {
+            *byte = self.read_code_byte(bus, addr.wrapping_add(index as u16 + 1));
+        }
+
+        let decoded = TimestampedStaticInstruction {
+            pc: addr,
+            opcode: extended_opcode.opcode,
+            addressing_mode: extended_opcode.addressing_mode,
+            operand,
+            min_cycles: extended_opcode.min_cycles,
+            page_boundary_penalty: extended_opcode.page_boundary_penalty,
+            valid: true,
+        };
+        self.timestamped_static_cache[slot] = decoded;
+        Some(decoded)
     }
 
     #[cfg(feature = "timestamped-scheduler")]
@@ -1347,104 +1418,140 @@ impl CPU {
         addr: u16,
         opcode: u8,
     ) -> CompactDecodedInstruction {
-        let operand_addr = addr.wrapping_add(1);
         let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
-        let (width, final_address, base_address, page_boundary_hit) =
-            match extended_opcode.addressing_mode {
-                AddressingMode::Absolute => (
+        self.decode_compact_with_metadata(
+            bus,
+            addr,
+            extended_opcode.opcode,
+            extended_opcode.addressing_mode,
+            extended_opcode.min_cycles,
+            extended_opcode.page_boundary_penalty,
+            None,
+        )
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn decode_compact_static(
+        &self,
+        bus: &MemoryBus,
+        addr: u16,
+        instruction: TimestampedStaticInstruction,
+    ) -> CompactDecodedInstruction {
+        self.decode_compact_with_metadata(
+            bus,
+            addr,
+            instruction.opcode,
+            instruction.addressing_mode,
+            instruction.min_cycles,
+            instruction.page_boundary_penalty,
+            Some(instruction.operand),
+        )
+    }
+
+    #[inline]
+    fn decode_compact_with_metadata(
+        &self,
+        bus: &MemoryBus,
+        addr: u16,
+        opcode: Opcode,
+        addressing_mode: AddressingMode,
+        min_cycles: u8,
+        page_boundary_penalty: bool,
+        cached_operand: Option<[u8; 2]>,
+    ) -> CompactDecodedInstruction {
+        let operand_addr = addr.wrapping_add(1);
+        let read_operand_byte = |offset: usize| {
+            cached_operand
+                .map(|operand| operand[offset])
+                .unwrap_or_else(|| {
+                    self.read_code_byte(bus, operand_addr.wrapping_add(offset as u16))
+                })
+        };
+        let read_operand_address =
+            || u16::from_le_bytes([read_operand_byte(0), read_operand_byte(1)]);
+        let (width, final_address, base_address, page_boundary_hit) = match addressing_mode {
+            AddressingMode::Absolute => (3, Some(read_operand_address()), None, false),
+            AddressingMode::Implied | AddressingMode::Accumulator => (1, None, None, false),
+            AddressingMode::AbsoluteIndexedX => {
+                let indirect = read_operand_address();
+                let address = indirect.wrapping_add(self.x as u16);
+                (
                     3,
-                    Some(self.read_code_address(bus, operand_addr)),
-                    None,
-                    false,
-                ),
-                AddressingMode::Implied | AddressingMode::Accumulator => (1, None, None, false),
-                AddressingMode::AbsoluteIndexedX => {
-                    let indirect = self.read_code_address(bus, operand_addr);
-                    let address = indirect.wrapping_add(self.x as u16);
-                    (
-                        3,
-                        Some(address),
-                        Some(indirect),
-                        extended_opcode.page_boundary_penalty
-                            && crosses_page_boundary(indirect, address),
-                    )
-                }
-                AddressingMode::AbsoluteIndexedY => {
-                    let indirect = self.read_code_address(bus, operand_addr);
-                    let address = indirect.wrapping_add(self.y as u16);
-                    (
-                        3,
-                        Some(address),
-                        Some(indirect),
-                        extended_opcode.page_boundary_penalty
-                            && crosses_page_boundary(indirect, address),
-                    )
-                }
-                AddressingMode::Immediate => (2, Some(operand_addr), None, false),
-                AddressingMode::IndexedIndirect => {
-                    let offset = self.read_code_byte(bus, operand_addr);
-                    let indirect = offset.wrapping_add(self.x) as u16;
-                    (
-                        2,
-                        Some(self.read_address_indirect(bus, indirect)),
-                        Some(indirect),
-                        false,
-                    )
-                }
-                AddressingMode::Indirect => {
-                    let indirect = self.read_code_address(bus, operand_addr);
-                    (
-                        3,
-                        Some(self.read_address_indirect(bus, indirect)),
-                        Some(indirect),
-                        false,
-                    )
-                }
-                AddressingMode::IndirectIndexed => {
-                    let offset = self.read_code_byte(bus, operand_addr);
-                    let indirect = self.read_address_indirect(bus, offset as u16);
-                    let address = indirect.wrapping_add(self.y as u16);
-                    (
-                        2,
-                        Some(address),
-                        Some(indirect),
-                        extended_opcode.page_boundary_penalty
-                            && crosses_page_boundary(indirect, address),
-                    )
-                }
-                AddressingMode::Relative => {
-                    let offset = self.read_code_byte(bus, operand_addr);
-                    let next_pc = addr.wrapping_add(2);
-                    let address = if offset >= 0x80 {
-                        next_pc.wrapping_sub(0x100 - offset as u16)
-                    } else {
-                        next_pc.wrapping_add(offset as u16)
-                    };
-                    (2, Some(address), None, false)
-                }
-                AddressingMode::ZeroPage => (
+                    Some(address),
+                    Some(indirect),
+                    page_boundary_penalty && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::AbsoluteIndexedY => {
+                let indirect = read_operand_address();
+                let address = indirect.wrapping_add(self.y as u16);
+                (
+                    3,
+                    Some(address),
+                    Some(indirect),
+                    page_boundary_penalty && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::Immediate => (2, Some(operand_addr), None, false),
+            AddressingMode::IndexedIndirect => {
+                let offset = read_operand_byte(0);
+                let indirect = offset.wrapping_add(self.x) as u16;
+                (
                     2,
-                    Some(self.read_code_byte(bus, operand_addr) as u16),
-                    None,
+                    Some(self.read_address_indirect(bus, indirect)),
+                    Some(indirect),
                     false,
-                ),
-                AddressingMode::ZeroPageIndexedX => {
-                    let offset = self.read_code_byte(bus, operand_addr);
-                    (2, Some(offset.wrapping_add(self.x) as u16), None, false)
-                }
-                AddressingMode::ZeroPageIndexedY => {
-                    let offset = self.read_code_byte(bus, operand_addr);
-                    (2, Some(offset.wrapping_add(self.y) as u16), None, false)
-                }
-            };
+                )
+            }
+            AddressingMode::Indirect => {
+                let indirect = read_operand_address();
+                (
+                    3,
+                    Some(self.read_address_indirect(bus, indirect)),
+                    Some(indirect),
+                    false,
+                )
+            }
+            AddressingMode::IndirectIndexed => {
+                let offset = read_operand_byte(0);
+                let indirect = self.read_address_indirect(bus, offset as u16);
+                let address = indirect.wrapping_add(self.y as u16);
+                (
+                    2,
+                    Some(address),
+                    Some(indirect),
+                    page_boundary_penalty && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::Relative => {
+                let offset = read_operand_byte(0);
+                let next_pc = addr.wrapping_add(2);
+                let address = if offset >= 0x80 {
+                    next_pc.wrapping_sub(0x100 - offset as u16)
+                } else {
+                    next_pc.wrapping_add(offset as u16)
+                };
+                (2, Some(address), None, false)
+            }
+            AddressingMode::ZeroPage => (2, Some(read_operand_byte(0) as u16), None, false),
+            AddressingMode::ZeroPageIndexedX => {
+                let offset = read_operand_byte(0);
+                (2, Some(offset.wrapping_add(self.x) as u16), None, false)
+            }
+            AddressingMode::ZeroPageIndexedY => {
+                let offset = read_operand_byte(0);
+                (2, Some(offset.wrapping_add(self.y) as u16), None, false)
+            }
+        };
 
         CompactDecodedInstruction {
-            opcode: extended_opcode.opcode,
-            addressing_mode: extended_opcode.addressing_mode,
+            opcode,
+            addressing_mode,
             final_address,
             base_address,
             width,
-            min_cycles: extended_opcode.min_cycles,
+            min_cycles,
             page_boundary_hit,
         }
     }
@@ -1766,6 +1873,70 @@ mod tests {
         assert_eq!(block_cpu.sp, reference_cpu.sp);
         assert_eq!(block_cpu.cycles, reference_cpu.cycles);
         assert_eq!(block_cpu.ram, reference_cpu.ram);
+        assert_eq!(
+            block_bus.ppu.last_read.get(),
+            reference_bus.ppu.last_read.get()
+        );
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamped_cached_decode_matches_reference_across_addressing_modes() {
+        let program = [
+            0xa9, 0x10, // LDA #$10
+            0x85, 0x00, // STA $00
+            0xa2, 0x01, // LDX #$01
+            0x9d, 0xff, 0x00, // STA $00ff,X
+            0xa0, 0x01, // LDY #$01
+            0xa1, 0x10, // LDA ($10,X)
+            0x69, 0x01, // ADC #$01
+            0x81, 0x10, // STA ($10,X)
+            0xb1, 0x20, // LDA ($20),Y
+            0xc9, 0x11, // CMP #$11
+            0x48, // PHA
+            0x68, // PLA
+            0xe8, // INX
+            0x88, // DEY
+            0xea, // NOP
+            0xad, 0x00, 0x20, // LDA $2000
+        ];
+        let mut block_cpu = super::CPU::default();
+        let mut block_bus = preflight_bus(&program);
+        let mut reference_cpu = super::CPU::default();
+        let mut reference_bus = preflight_bus(&program);
+        block_cpu.pc = 0x8000;
+        reference_cpu.pc = 0x8000;
+
+        for cpu in [&mut block_cpu, &mut reference_cpu] {
+            cpu.ram[0x11] = 0x00;
+            cpu.ram[0x12] = 0x02;
+            cpu.ram[0x20] = 0xff;
+            cpu.ram[0x21] = 0x01;
+            cpu.ram[0x200] = 0x10;
+        }
+
+        let (safe_cycles, ppu_barrier) = block_cpu.run_timestamped_block(&mut block_bus, u64::MAX);
+        assert!(ppu_barrier);
+        for _ in 0..15 {
+            reference_cpu.step(&mut reference_bus, None);
+        }
+
+        assert_eq!(safe_cycles, reference_cpu.cycles as u16);
+        assert_eq!(block_cpu.pc, reference_cpu.pc);
+        assert_eq!(block_cpu.a, reference_cpu.a);
+        assert_eq!(block_cpu.x, reference_cpu.x);
+        assert_eq!(block_cpu.y, reference_cpu.y);
+        assert_eq!(block_cpu.status, reference_cpu.status);
+        assert_eq!(block_cpu.sp, reference_cpu.sp);
+        assert_eq!(block_cpu.ram, reference_cpu.ram);
+
+        let barrier_cycles = block_cpu.step_timestamped(&mut block_bus);
+        let reference_cycles = reference_cpu.step(&mut reference_bus, None);
+        assert_eq!(barrier_cycles, reference_cycles);
+        assert_eq!(block_cpu.pc, reference_cpu.pc);
+        assert_eq!(block_cpu.a, reference_cpu.a);
+        assert_eq!(block_cpu.status, reference_cpu.status);
+        assert_eq!(block_cpu.cycles, reference_cpu.cycles);
         assert_eq!(
             block_bus.ppu.last_read.get(),
             reference_bus.ppu.last_read.get()
