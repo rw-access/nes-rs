@@ -518,13 +518,24 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        self.catch_up_visible_scanline_inner::<{ !cfg!(feature = "headless-render-disabled") }, M>(
+            mapper, screen,
+        );
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn catch_up_visible_scanline_inner<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
         debug_assert!(self.rendering_enabled());
         debug_assert!((0..=239).contains(&self.scanline));
         debug_assert_eq!(self.cycle_in_scanline, 0);
         debug_assert!(self.last_read.get().is_none());
 
         for tile_start in (1..=256).step_by(8) {
-            self.catch_up_visible_tile(tile_start, mapper, screen);
+            self.catch_up_visible_tile::<WRITE_OUTPUT, M>(tile_start, mapper, screen);
         }
 
         self.cycle_in_scanline = 257;
@@ -552,7 +563,7 @@ impl PPU {
     /// phases exactly as it does on the cycle-stepped path.
     #[cfg(feature = "timestamped-scheduler")]
     #[inline]
-    fn catch_up_visible_tile<M: Mapper + ?Sized>(
+    fn catch_up_visible_tile<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(
         &mut self,
         tile_start: u16,
         mapper: &mut M,
@@ -591,7 +602,7 @@ impl PPU {
                 && sprite.position == 0
                 && decision == MultiplexerDecision::DrawSprite;
             status_reg |= (zero_hit as u8) << 6;
-            screen.pixels[y][x] = self.palette_ram[PPU::mirror_palette(color) as usize];
+            self.write_pixel::<WRITE_OUTPUT>(screen, y, x, color);
 
             self.cycle_in_scanline = tile_start + dot;
             match dot {
@@ -712,6 +723,11 @@ impl PPU {
     }
 
     fn render_pixel(&mut self, screen: &mut Screen) {
+        self.render_pixel_inner::<{ !cfg!(feature = "headless-render-disabled") }>(screen);
+    }
+
+    #[inline(always)]
+    fn render_pixel_inner<const WRITE_OUTPUT: bool>(&mut self, screen: &mut Screen) {
         let x = self.cycle_in_scanline - 1;
         let y = self.scanline;
 
@@ -743,8 +759,20 @@ impl PPU {
         // set the sprite zero hit bit
         self.status_reg |= (zero_hit as u8) << 6;
 
-        screen.pixels[y as usize][x as usize] =
-            self.palette_ram[PPU::mirror_palette(color) as usize];
+        self.write_pixel::<WRITE_OUTPUT>(screen, y as usize, x as usize, color);
+    }
+
+    #[inline(always)]
+    fn write_pixel<const WRITE_OUTPUT: bool>(
+        &self,
+        screen: &mut Screen,
+        y: usize,
+        x: usize,
+        color: u8,
+    ) {
+        if WRITE_OUTPUT {
+            screen.pixels[y][x] = self.palette_ram[PPU::mirror_palette(color) as usize];
+        }
     }
 
     fn step_visible<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
@@ -1268,7 +1296,7 @@ impl PPU {
 
 #[cfg(all(test, feature = "timestamped-scheduler"))]
 mod timestamped_tests {
-    use super::{Screen, PPU};
+    use super::{Screen, SpritePixel, TileData, PPU};
     use crate::cartridge::{Mapper, MirroringMode};
 
     #[derive(Clone)]
@@ -1470,6 +1498,7 @@ mod timestamped_tests {
 
         assert_same_state(&exact, &caught_up);
         assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+        #[cfg(not(feature = "headless-render-disabled"))]
         assert!(exact_screen
             .pixels
             .iter()
@@ -1549,6 +1578,85 @@ mod timestamped_tests {
             assert_same_state(&exact, &caught_up);
             assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
         }
+    }
+
+    #[test]
+    fn render_sinks_preserve_pixel_selection_and_ppu_state() {
+        let mut rendered = PPU::default();
+        rendered.mask_reg = 0x18;
+        rendered.palette_ram[0] = 0x12;
+        rendered.palette_ram[1] = 0x2a;
+        rendered.palette_ram[0x11] = 0x2a;
+        rendered.palette_ram[0x10] = 0x2a;
+        rendered.processed_tile = [
+            TileData {
+                palette: 1,
+                pattern_low: 0xff,
+                pattern_high: 0,
+                ..TileData::default()
+            },
+            TileData::default(),
+        ];
+        rendered.sprite_zero_in_line = true;
+        rendered.sprite_pixels[0] = SpritePixel {
+            palette: 1,
+            position: 0,
+            palette_offset: 0,
+            behind_background: false,
+        };
+        rendered.cycle_in_scanline = 1;
+
+        let mut headless = rendered.clone();
+        let mut rendered_screen = Screen::default();
+        let mut headless_screen = Screen::default();
+        rendered.render_pixel_inner::<true>(&mut rendered_screen);
+        headless.render_pixel_inner::<false>(&mut headless_screen);
+
+        assert_same_state(&rendered, &headless);
+        assert_eq!(rendered_screen.pixels[0][0], 0x2a);
+        assert_eq!(headless_screen.pixels, Screen::default().pixels);
+    }
+
+    #[test]
+    fn timestamped_render_sinks_preserve_scanline_state_and_timing() {
+        let mut rendered = PPU::default();
+        rendered.control_reg = 0x1d;
+        rendered.mask_reg = 0x1e;
+        rendered.v = 0x0417;
+        rendered.t = 0x0417;
+        rendered.fine_x = 5;
+        for (index, value) in rendered.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(29).rotate_left(1);
+        }
+        for (index, value) in rendered.palette_ram.iter_mut().enumerate() {
+            *value = 0x40 | (index as u8).wrapping_mul(3);
+        }
+        rendered.oam.fill(0xff);
+        rendered.oam[0..4].copy_from_slice(&[0, 0x00, 0x00, 0x00]);
+        rendered.oam[4..8].copy_from_slice(&[3, 0x07, 0x20, 0x04]);
+
+        let mut headless = rendered.clone();
+        let mut rendered_mapper = VariedMapper;
+        let mut headless_mapper = VariedMapper;
+        let mut rendered_screen = Screen::default();
+        let mut headless_screen = Screen::default();
+
+        rendered
+            .catch_up_visible_scanline_inner::<true, _>(&mut rendered_mapper, &mut rendered_screen);
+        headless.catch_up_visible_scanline_inner::<false, _>(
+            &mut headless_mapper,
+            &mut headless_screen,
+        );
+
+        assert_same_state(&rendered, &headless);
+        assert_eq!(rendered.scanline, 1);
+        assert_eq!(rendered.cycle_in_scanline, 0);
+        assert!(rendered_screen
+            .pixels
+            .iter()
+            .flatten()
+            .any(|&pixel| pixel != 0));
+        assert_eq!(headless_screen.pixels, Screen::default().pixels);
     }
 
     #[test]

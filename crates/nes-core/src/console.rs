@@ -612,6 +612,7 @@ mod tests {
                 static_frame.audio_discontinuity,
                 boxed_frame.audio_discontinuity
             );
+            #[cfg(not(feature = "headless-render-disabled"))]
             assert!(static_frame
                 .pixels
                 .iter()
@@ -629,6 +630,7 @@ mod tests {
         initialize_dma_differential_console(&mut timestamped);
         initialize_dma_differential_console(&mut cycle_stepped);
 
+        #[cfg(not(feature = "headless-render-disabled"))]
         let mut saw_nonzero_pixel = false;
         for _ in 0..4 {
             let timestamped_frame = timestamped.next_frame();
@@ -639,12 +641,16 @@ mod tests {
                 cycle_stepped_frame.frame_number
             );
             assert_eq!(timestamped_frame.pixels, cycle_stepped_frame.pixels);
-            saw_nonzero_pixel |= timestamped_frame
-                .pixels
-                .iter()
-                .flatten()
-                .any(|&pixel| pixel != 0);
+            #[cfg(not(feature = "headless-render-disabled"))]
+            {
+                saw_nonzero_pixel |= timestamped_frame
+                    .pixels
+                    .iter()
+                    .flatten()
+                    .any(|&pixel| pixel != 0);
+            }
         }
+        #[cfg(not(feature = "headless-render-disabled"))]
         assert!(saw_nonzero_pixel);
     }
 

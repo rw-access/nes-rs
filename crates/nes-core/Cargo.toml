@@ -8,6 +8,7 @@ default = []
 apu-disabled = []
 rewind-disabled = []
 timestamped-scheduler = []
+headless-render-disabled = []
 
 [dependencies]
 arrayvec = "0.7.2"
