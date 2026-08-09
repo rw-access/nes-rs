@@ -891,16 +891,17 @@ impl CPU {
     ) -> (u16, bool) {
         const MAX_INSTRUCTIONS: usize = 32;
         let start_cycles = self.cycles;
+        self.timestamped_decoded = None;
+
         let mut local = TimestampedLocalCpu::from_cpu(self);
 
-        self.timestamped_decoded = None;
         for _ in 0..MAX_INSTRUCTIONS {
             if bus.ppu.nmi_pending()
                 || (bus.mapper.irq_pending() && !local.check_status_bit(StatusFlags::I))
             {
                 local.write_back(self);
                 self.step(bus, None);
-                break;
+                return (self.cycles.wrapping_sub(start_cycles) as u16, false);
             }
 
             let Some((addr, decoded, may_access_ppu)) = Self::decode_timestamped_local(
@@ -2702,5 +2703,33 @@ mod tests {
         assert_eq!(cpu.step_timestamped(&mut bus), 5);
         assert_eq!(cpu.a, 0);
         assert_eq!(bus.ppu.last_read.get(), Some(0x2000));
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[test]
+    fn timestamped_local_runner_checks_nmi_at_instruction_boundary() {
+        let mut cpu = super::CPU::default();
+        let mut bus = preflight_bus(&[0xea]); // NOP
+        cpu.pc = 0x8000;
+        bus.ppu.in_vblank = true;
+        bus.ppu.write_register(&mut bus.mapper, 0x2000, 0x80);
+
+        let mut reference_cpu = super::CPU::default();
+        let mut reference_bus = preflight_bus(&[0xea]);
+        reference_cpu.pc = 0x8000;
+        reference_bus.ppu.in_vblank = true;
+        reference_bus
+            .ppu
+            .write_register(&mut reference_bus.mapper, 0x2000, 0x80);
+
+        let expected_cycles = reference_cpu.step(&mut reference_bus, None);
+        let (cycles, ppu_barrier) = cpu.run_timestamped_block(&mut bus, u64::MAX);
+        assert_eq!(cycles, expected_cycles);
+        assert!(!ppu_barrier);
+        assert_eq!(cpu.pc, reference_cpu.pc);
+        assert_eq!(cpu.sp, reference_cpu.sp);
+        assert_eq!(cpu.status, reference_cpu.status);
+        assert_eq!(cpu.cycles, reference_cpu.cycles);
+        assert_eq!(cpu.ram, reference_cpu.ram);
     }
 }
