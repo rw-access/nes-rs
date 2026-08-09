@@ -438,6 +438,27 @@ impl PPU {
         ticks_to_next_frame + VBLANK_EVENT - next_frame_start + 1
     }
 
+    /// Return the next PPU state transition that the timestamped console
+    /// runner must expose to its frame loop. While in vblank this is the
+    /// pre-render dot that clears vblank; otherwise it is the next vblank
+    /// entry/NMI edge.
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn next_scheduler_event_in_ticks(&self) -> u64 {
+        if !self.in_vblank {
+            return self.next_vblank_in_ticks();
+        }
+
+        const PRE_RENDER_CLEAR: u64 = 261 * 341 + 1;
+        let current = self.scanline as u64 * 341 + self.cycle_in_scanline as u64;
+        if current <= PRE_RENDER_CLEAR {
+            PRE_RENDER_CLEAR - current + 1
+        } else {
+            // This state is not normally observable, but keep the deadline
+            // finite if a caller starts from a manually constructed PPU.
+            1
+        }
+    }
+
     /// Catch the PPU up to an absolute master-clock timestamp. The exact
     /// stepping path remains the authority at all eventful boundaries; only
     /// intervals with no rendering, mapper, or interrupt work are arithmetic.
@@ -970,6 +991,10 @@ impl PPU {
         status
     }
 
+    pub(crate) fn nmi_pending(&self) -> bool {
+        self.pending_nmi
+    }
+
     pub(crate) fn read_register<M: Mapper + ?Sized>(&self, mapper: &M, addr: u16) -> u8 {
         // change statuses signals on the next step()
         // The eight PPU registers repeat throughout $2000-$3FFF.
@@ -1125,6 +1150,29 @@ mod timestamped_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct PatternMapper;
+
+    impl Mapper for PatternMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, address: u16) -> u8 {
+            match address {
+                0x0000..=0x0007 => 0xff,
+                0x0008..=0x000f => 0,
+                _ => 0,
+            }
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
+
     fn assert_same_state(exact: &PPU, caught_up: &PPU) {
         assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
         assert_eq!(exact.scanline, caught_up.scanline);
@@ -1234,5 +1282,95 @@ mod timestamped_tests {
         assert_eq!(caught_up.frame, 1);
         assert_eq!(caught_up.scanline, 0);
         assert_eq!(caught_up.cycle_in_scanline, 3);
+    }
+
+    #[test]
+    fn catch_up_matches_rendered_pixels() {
+        let mut exact = PPU::default();
+        exact.mask_reg = 0x08;
+        exact.palette_ram[0] = 0x09;
+        exact.palette_ram[1] = 0x2a;
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = PatternMapper;
+        let mut caught_up_mapper = PatternMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+        let ticks = 240 * 341;
+
+        for _ in 0..ticks {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(0, ticks, &mut caught_up_mapper, &mut caught_up_screen);
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+        assert!(exact_screen
+            .pixels
+            .iter()
+            .flatten()
+            .any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn next_vblank_in_ticks_handles_vblank_entry_boundary() {
+        let mut ppu = PPU::default();
+
+        ppu.scanline = 240;
+        ppu.cycle_in_scanline = 340;
+        assert_eq!(ppu.next_vblank_in_ticks(), 3);
+
+        ppu.scanline = 241;
+        ppu.cycle_in_scanline = 0;
+        assert_eq!(ppu.next_vblank_in_ticks(), 2);
+
+        ppu.cycle_in_scanline = 1;
+        assert_eq!(ppu.next_vblank_in_ticks(), 1);
+    }
+
+    #[test]
+    fn next_vblank_in_ticks_handles_pre_render_dot_one_and_rollover() {
+        let mut ppu = PPU::default();
+        ppu.mask_reg = 0x18;
+        ppu.scanline = 261;
+
+        ppu.cycle_in_scanline = 0;
+        assert_eq!(ppu.next_vblank_in_ticks(), 82523);
+
+        ppu.cycle_in_scanline = 1;
+        assert_eq!(ppu.next_vblank_in_ticks(), 82522);
+
+        ppu.cycle_in_scanline = 340;
+        assert_eq!(ppu.next_vblank_in_ticks(), 82183);
+    }
+
+    #[test]
+    fn next_vblank_in_ticks_accounts_for_odd_frame_skip() {
+        let mut ppu = PPU::default();
+        ppu.mask_reg = 0x18;
+        ppu.scanline = 261;
+        ppu.cycle_in_scanline = 340;
+
+        ppu.frame = 0;
+        assert_eq!(ppu.next_vblank_in_ticks(), 82183);
+
+        ppu.frame = 1;
+        assert_eq!(ppu.next_vblank_in_ticks(), 82184);
+    }
+
+    #[test]
+    fn next_scheduler_event_exposes_vblank_exit() {
+        let mut ppu = PPU::default();
+        ppu.in_vblank = true;
+        ppu.scanline = 241;
+        ppu.cycle_in_scanline = 7;
+
+        assert_eq!(
+            ppu.next_scheduler_event_in_ticks(),
+            (261 * 341 + 1) - (241 * 341 + 7) + 1
+        );
+
+        ppu.scanline = 261;
+        ppu.cycle_in_scanline = 1;
+        assert_eq!(ppu.next_scheduler_event_in_ticks(), 1);
     }
 }

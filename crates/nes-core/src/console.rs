@@ -83,8 +83,8 @@ impl ConsoleState {
     ) {
         loop {
             let current_master_ticks = self.scheduler_master_ticks;
-            let deadline = self.ppu_master_ticks + self.bus.ppu.next_vblank_in_ticks();
-            let may_access_ppu = self.cpu.next_instruction_may_access_ppu(&self.bus);
+            let deadline = self.ppu_master_ticks + self.bus.ppu.next_scheduler_event_in_ticks();
+            let may_access_ppu = self.cpu.prepare_timestamped(&self.bus);
 
             if may_access_ppu {
                 self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
@@ -96,7 +96,7 @@ impl ConsoleState {
                 self.ppu_master_ticks = self.scheduler_master_ticks;
             }
 
-            let cycles = self.cpu.step(&mut self.bus, None);
+            let cycles = self.cpu.step_timestamped(&mut self.bus);
             let target_master_ticks = current_master_ticks + cycles as u64 * 3;
 
             if may_access_ppu || target_master_ticks >= deadline {
