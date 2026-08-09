@@ -5,20 +5,29 @@ fn main() {
     let mut args = env::args_os().skip(1);
     let frames: u64 = args
         .next()
-        .expect("usage: perf_bench FRAMES ROM [--video-off] [--input TRANSCRIPT]")
+        .expect("usage: perf_bench FRAMES ROM [--video-off] [--input TRANSCRIPT] [--warmup N]")
         .to_string_lossy()
         .parse()
         .expect("FRAMES must be an integer");
     let path = PathBuf::from(args.next().expect("usage: perf_bench FRAMES ROM"));
     let mut video_off = false;
     let mut input_path = None;
+    let mut warmup_frames = 0;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--video-off" => video_off = true,
             "--input" => {
                 input_path = Some(PathBuf::from(args.next().expect(
-                    "usage: perf_bench FRAMES ROM [--video-off] [--input TRANSCRIPT]",
+                    "usage: perf_bench FRAMES ROM [--video-off] [--input TRANSCRIPT] [--warmup N]",
                 )));
+            }
+            "--warmup" => {
+                warmup_frames = args
+                    .next()
+                    .expect("missing warmup frame count")
+                    .to_string_lossy()
+                    .parse()
+                    .expect("WARMUP must be an integer");
             }
             _ => panic!("unknown argument: {arg:?}"),
         }
@@ -36,8 +45,18 @@ fn main() {
         console.set_video_output(VideoOutput::Disabled);
     }
 
+    for frame_number in 1..=warmup_frames {
+        if let Some(input) = &input {
+            console.update_buttons(ButtonState::from_bits(
+                *input.get(&frame_number).unwrap_or(&0),
+            ));
+        }
+        black_box(console.next_frame().frame_number);
+    }
+
     let start = Instant::now();
-    for frame_number in 1..=frames {
+    for offset in 1..=frames {
+        let frame_number = warmup_frames + offset;
         if let Some(input) = &input {
             console.update_buttons(ButtonState::from_bits(
                 *input.get(&frame_number).unwrap_or(&0),
