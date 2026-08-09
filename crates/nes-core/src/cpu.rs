@@ -86,6 +86,429 @@ impl Default for CPU {
     }
 }
 
+#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+#[derive(Clone, Copy, Debug)]
+struct TimestampedLocalCpu {
+    cycles: u64,
+    pc: u16,
+    a: u8,
+    x: u8,
+    y: u8,
+    status: u8,
+    sp: u8,
+}
+
+#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+impl TimestampedLocalCpu {
+    #[inline(always)]
+    fn from_cpu(cpu: &CPU) -> Self {
+        Self {
+            cycles: cpu.cycles,
+            pc: cpu.pc,
+            a: cpu.a,
+            x: cpu.x,
+            y: cpu.y,
+            status: cpu.status,
+            sp: cpu.sp,
+        }
+    }
+
+    #[inline(always)]
+    fn write_back(self, cpu: &mut CPU) {
+        cpu.cycles = self.cycles;
+        cpu.pc = self.pc;
+        cpu.a = self.a;
+        cpu.x = self.x;
+        cpu.y = self.y;
+        cpu.status = self.status;
+        cpu.sp = self.sp;
+    }
+
+    #[inline(always)]
+    fn check_status_bit(&self, bit: StatusFlags) -> bool {
+        self.status & (1 << bit as u8) != 0
+    }
+
+    #[inline(always)]
+    fn write_status_bit(&mut self, bit: StatusFlags, value: bool) {
+        let mask = 1 << bit as u8;
+        self.status = (self.status & !mask) | if value { mask } else { 0 };
+    }
+
+    #[inline(always)]
+    fn set_nz(&mut self, value: u8) {
+        self.write_status_bit(StatusFlags::N, value >= 0x80);
+        self.write_status_bit(StatusFlags::Z, value == 0);
+    }
+
+    #[inline(always)]
+    fn set_cnz(&mut self, value: u16) {
+        self.write_status_bit(StatusFlags::C, value & 0x100 != 0);
+        self.set_nz(value as u8);
+    }
+
+    #[inline(always)]
+    fn branch_on_flag(&mut self, flag: StatusFlags, branch_status: bool, new_pc: u16) {
+        if self.check_status_bit(flag) == branch_status {
+            self.cycles = self
+                .cycles
+                .wrapping_add(1)
+                .wrapping_add(crosses_page_boundary(self.pc, new_pc) as u64);
+            self.pc = new_pc;
+        }
+    }
+
+    #[inline(always)]
+    fn read_byte(ram: &[u8; 0x800], bus: &MemoryBus, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x1fff => ram[addr as usize % ram.len()],
+            0x2000..=0x3fff => bus.ppu.read_register(&bus.mapper, addr),
+            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),
+            0x4014 => 0,
+            0x4016 => bus.controller.read(),
+            0x4017 => 0,
+            0x4018..=0x401f => 0,
+            _ => bus.mapper.read(addr),
+        }
+    }
+
+    #[inline(always)]
+    fn read_dma_page<'a>(
+        ram: &'a [u8; 0x800],
+        bus: &'a MemoryBus,
+        page: u8,
+    ) -> Option<&'a [u8; 256]> {
+        match page {
+            0x00..=0x1f => Some((&ram[(page as usize) << 8..][..256]).try_into().unwrap()),
+            0x20..=0x7f => None,
+            _ => bus.mapper.read_page(page),
+        }
+    }
+
+    #[inline(always)]
+    fn write_byte(ram: &mut [u8; 0x800], bus: &mut MemoryBus, addr: u16, data: u8) {
+        match addr {
+            0x0000..=0x1fff => ram[addr as usize % ram.len()] = data,
+            0x2000..=0x3fff => bus.ppu.write_register(&mut bus.mapper, addr, data),
+            0x4000..=0x4013 | 0x4015 | 0x4017 => bus.apu.write_register(addr, data),
+            0x4014 => {
+                let page = Self::read_dma_page(ram, bus, data).copied();
+                bus.ppu.write_dma(page.as_ref());
+            }
+            0x4016 => bus.controller.write(data),
+            0x4018..=0x401f => {}
+            _ => {
+                bus.mapper.write(addr, data);
+                bus.ppu.refresh_nametable_mirroring(&bus.mapper);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn push_byte(&mut self, ram: &mut [u8; 0x800], bus: &mut MemoryBus, data: u8) {
+        Self::write_byte(ram, bus, 0x0100 | self.sp as u16, data);
+        self.sp = self.sp.wrapping_sub(1);
+    }
+
+    #[inline(always)]
+    fn pull_byte(&mut self, ram: &[u8; 0x800], bus: &MemoryBus) -> u8 {
+        self.sp = self.sp.wrapping_add(1);
+        Self::read_byte(ram, bus, 0x0100 | self.sp as u16)
+    }
+
+    #[inline(always)]
+    fn push_address(&mut self, ram: &mut [u8; 0x800], bus: &mut MemoryBus, addr: u16) {
+        let [lo, hi] = addr.to_le_bytes();
+        self.push_byte(ram, bus, hi);
+        self.push_byte(ram, bus, lo);
+    }
+
+    #[inline(always)]
+    fn supports(opcode: Opcode) -> bool {
+        matches!(
+            opcode,
+            Opcode::ADC
+                | Opcode::AND
+                | Opcode::ASL
+                | Opcode::BCC
+                | Opcode::BCS
+                | Opcode::BEQ
+                | Opcode::BIT
+                | Opcode::BMI
+                | Opcode::BNE
+                | Opcode::BPL
+                | Opcode::BVC
+                | Opcode::BVS
+                | Opcode::CLC
+                | Opcode::CLD
+                | Opcode::CLI
+                | Opcode::CLV
+                | Opcode::CMP
+                | Opcode::CPX
+                | Opcode::CPY
+                | Opcode::DEC
+                | Opcode::DEX
+                | Opcode::DEY
+                | Opcode::EOR
+                | Opcode::INC
+                | Opcode::INX
+                | Opcode::INY
+                | Opcode::JMP
+                | Opcode::JSR
+                | Opcode::LDA
+                | Opcode::LDX
+                | Opcode::LDY
+                | Opcode::LSR
+                | Opcode::NOP
+                | Opcode::ORA
+                | Opcode::PHA
+                | Opcode::PHP
+                | Opcode::PLA
+                | Opcode::PLP
+                | Opcode::ROL
+                | Opcode::ROR
+                | Opcode::SBC
+                | Opcode::SEC
+                | Opcode::SED
+                | Opcode::SEI
+                | Opcode::STA
+                | Opcode::STX
+                | Opcode::STY
+                | Opcode::TAX
+                | Opcode::TAY
+                | Opcode::TSX
+                | Opcode::TXA
+                | Opcode::TXS
+                | Opcode::TYA
+        )
+    }
+
+    #[inline(always)]
+    fn execute(
+        &mut self,
+        ram: &mut [u8; 0x800],
+        bus: &mut MemoryBus,
+        decoded: CompactDecodedInstruction,
+    ) -> bool {
+        if !Self::supports(decoded.opcode) {
+            return false;
+        }
+
+        self.pc = self.pc.wrapping_add(decoded.width as u16);
+        self.cycles = self
+            .cycles
+            .wrapping_add(decoded.min_cycles as u64)
+            .wrapping_add(decoded.page_boundary_hit as u64);
+
+        let addr = decoded.final_address;
+        match (decoded.opcode, addr) {
+            (Opcode::ADC, Some(addr)) => {
+                let a = self.a as u16;
+                let b = Self::read_byte(ram, bus, addr) as u16;
+                let sum = a + b + self.check_status_bit(StatusFlags::C) as u16;
+                self.a = sum as u8;
+                self.write_status_bit(StatusFlags::V, ((a ^ sum) & (b ^ sum) & 0x80) != 0);
+                self.set_cnz(sum);
+            }
+            (Opcode::AND, Some(addr)) => {
+                self.a &= Self::read_byte(ram, bus, addr);
+                self.set_nz(self.a);
+            }
+            (Opcode::ASL, None) => {
+                let wide = (self.a as u16) << 1;
+                self.a = wide as u8;
+                self.set_cnz(wide);
+            }
+            (Opcode::ASL, Some(addr)) => {
+                let wide = (Self::read_byte(ram, bus, addr) as u16) << 1;
+                Self::write_byte(ram, bus, addr, wide as u8);
+                self.set_cnz(wide);
+            }
+            (Opcode::BCC, Some(addr)) => self.branch_on_flag(StatusFlags::C, false, addr),
+            (Opcode::BCS, Some(addr)) => self.branch_on_flag(StatusFlags::C, true, addr),
+            (Opcode::BEQ, Some(addr)) => self.branch_on_flag(StatusFlags::Z, true, addr),
+            (Opcode::BIT, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr);
+                self.write_status_bit(StatusFlags::Z, self.a & value == 0);
+                self.write_status_bit(StatusFlags::V, value & 0x40 != 0);
+                self.write_status_bit(StatusFlags::N, value & 0x80 != 0);
+            }
+            (Opcode::BMI, Some(addr)) => self.branch_on_flag(StatusFlags::N, true, addr),
+            (Opcode::BNE, Some(addr)) => self.branch_on_flag(StatusFlags::Z, false, addr),
+            (Opcode::BPL, Some(addr)) => self.branch_on_flag(StatusFlags::N, false, addr),
+            (Opcode::BVC, Some(addr)) => self.branch_on_flag(StatusFlags::V, false, addr),
+            (Opcode::BVS, Some(addr)) => self.branch_on_flag(StatusFlags::V, true, addr),
+            (Opcode::CLC, None) => self.write_status_bit(StatusFlags::C, false),
+            (Opcode::CLD, None) => self.write_status_bit(StatusFlags::D, false),
+            (Opcode::CLI, None) => self.write_status_bit(StatusFlags::I, false),
+            (Opcode::CLV, None) => self.write_status_bit(StatusFlags::V, false),
+            (Opcode::CMP, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.a.wrapping_sub(value));
+                self.write_status_bit(StatusFlags::C, self.a >= value);
+            }
+            (Opcode::CPX, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.x.wrapping_sub(value));
+                self.write_status_bit(StatusFlags::C, self.x >= value);
+            }
+            (Opcode::CPY, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.y.wrapping_sub(value));
+                self.write_status_bit(StatusFlags::C, self.y >= value);
+            }
+            (Opcode::DEC, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr).wrapping_sub(1);
+                Self::write_byte(ram, bus, addr, value);
+                self.set_nz(value);
+            }
+            (Opcode::DEX, None) => {
+                self.x = self.x.wrapping_sub(1);
+                self.set_nz(self.x);
+            }
+            (Opcode::DEY, None) => {
+                self.y = self.y.wrapping_sub(1);
+                self.set_nz(self.y);
+            }
+            (Opcode::EOR, Some(addr)) => {
+                self.a ^= Self::read_byte(ram, bus, addr);
+                self.set_nz(self.a);
+            }
+            (Opcode::INC, Some(addr)) => {
+                let value = Self::read_byte(ram, bus, addr).wrapping_add(1);
+                Self::write_byte(ram, bus, addr, value);
+                self.set_nz(value);
+            }
+            (Opcode::INX, None) => {
+                self.x = self.x.wrapping_add(1);
+                self.set_nz(self.x);
+            }
+            (Opcode::INY, None) => {
+                self.y = self.y.wrapping_add(1);
+                self.set_nz(self.y);
+            }
+            (Opcode::JMP, Some(addr)) => self.pc = addr,
+            (Opcode::JSR, Some(addr)) => {
+                self.push_address(ram, bus, self.pc.wrapping_sub(1));
+                self.pc = addr;
+            }
+            (Opcode::LDA, Some(addr)) => {
+                self.a = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.a);
+            }
+            (Opcode::LDX, Some(addr)) => {
+                self.x = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.x);
+            }
+            (Opcode::LDY, Some(addr)) => {
+                self.y = Self::read_byte(ram, bus, addr);
+                self.set_nz(self.y);
+            }
+            (Opcode::LSR, None) => {
+                let mut wide = self.a as u16;
+                wide = wide >> 1 | ((wide & 1) << 8);
+                self.a = wide as u8;
+                self.set_cnz(wide);
+            }
+            (Opcode::LSR, Some(addr)) => {
+                let mut wide = Self::read_byte(ram, bus, addr) as u16;
+                wide = wide >> 1 | ((wide & 1) << 8);
+                Self::write_byte(ram, bus, addr, wide as u8);
+                self.set_cnz(wide);
+            }
+            (Opcode::NOP, _) => {}
+            (Opcode::ORA, Some(addr)) => {
+                self.a |= Self::read_byte(ram, bus, addr);
+                self.set_nz(self.a);
+            }
+            (Opcode::PHA, None) => self.push_byte(ram, bus, self.a),
+            (Opcode::PHP, None) => {
+                self.push_byte(ram, bus, self.status | 1 << StatusFlags::B as u8)
+            }
+            (Opcode::PLA, None) => {
+                self.a = self.pull_byte(ram, bus);
+                self.set_nz(self.a);
+            }
+            (Opcode::PLP, None) => {
+                self.status = self.pull_byte(ram, bus);
+                self.write_status_bit(StatusFlags::U, true);
+                self.write_status_bit(StatusFlags::B, false);
+            }
+            (Opcode::ROL, None) => {
+                let wide = (self.a as u16) << 1 | self.check_status_bit(StatusFlags::C) as u16;
+                self.a = wide as u8;
+                self.set_cnz(wide);
+            }
+            (Opcode::ROL, Some(addr)) => {
+                let wide = (Self::read_byte(ram, bus, addr) as u16) << 1
+                    | self.check_status_bit(StatusFlags::C) as u16;
+                Self::write_byte(ram, bus, addr, wide as u8);
+                self.set_cnz(wide);
+            }
+            (Opcode::ROR, None) => {
+                let mut wide = self.a as u16;
+                wide |= (self.check_status_bit(StatusFlags::C) as u16) << 8;
+                wide |= (wide & 1) << 9;
+                wide >>= 1;
+                self.a = wide as u8;
+                self.set_cnz(wide);
+            }
+            (Opcode::ROR, Some(addr)) => {
+                let mut wide = Self::read_byte(ram, bus, addr) as u16;
+                wide |= (self.check_status_bit(StatusFlags::C) as u16) << 8;
+                wide |= (wide & 1) << 9;
+                wide >>= 1;
+                Self::write_byte(ram, bus, addr, wide as u8);
+                self.set_cnz(wide);
+            }
+            (Opcode::SBC, Some(addr)) => {
+                let a = self.a as u16;
+                let value = Self::read_byte(ram, bus, addr) as u16;
+                let result = a
+                    .wrapping_sub(value)
+                    .wrapping_sub(!self.check_status_bit(StatusFlags::C) as u16);
+                self.a = result as u8;
+                self.set_nz(self.a);
+                self.write_status_bit(
+                    StatusFlags::V,
+                    (((a ^ result) & (!value ^ result)) & 0x80) != 0,
+                );
+                self.write_status_bit(StatusFlags::C, result & 0x100 == 0);
+            }
+            (Opcode::SEC, None) => self.write_status_bit(StatusFlags::C, true),
+            (Opcode::SED, None) => self.write_status_bit(StatusFlags::D, true),
+            (Opcode::SEI, None) => self.write_status_bit(StatusFlags::I, true),
+            (Opcode::STA, Some(addr)) => Self::write_byte(ram, bus, addr, self.a),
+            (Opcode::STX, Some(addr)) => Self::write_byte(ram, bus, addr, self.x),
+            (Opcode::STY, Some(addr)) => Self::write_byte(ram, bus, addr, self.y),
+            (Opcode::TAX, None) => {
+                self.x = self.a;
+                self.set_nz(self.x);
+            }
+            (Opcode::TAY, None) => {
+                self.y = self.a;
+                self.set_nz(self.y);
+            }
+            (Opcode::TSX, None) => {
+                self.x = self.sp;
+                self.set_nz(self.x);
+            }
+            (Opcode::TXA, None) => {
+                self.a = self.x;
+                self.set_nz(self.a);
+            }
+            (Opcode::TXS, None) => self.sp = self.x,
+            (Opcode::TYA, None) => {
+                self.a = self.y;
+                self.set_nz(self.a);
+            }
+            _ => unreachable!("supported timestamped opcode/addressing pair"),
+        }
+
+        true
+    }
+}
+
 fn crosses_page_boundary(a: u16, b: u16) -> bool {
     let [_, a_page] = a.to_le_bytes();
     let [_, b_page] = b.to_le_bytes();
@@ -288,7 +711,7 @@ impl CPU {
         }
 
         let decoded = self.decode_compact_static(bus, addr, static_instruction);
-        let may_access = self.decoded_instruction_may_access_ppu(addr, &decoded);
+        let may_access = Self::decoded_instruction_may_access_ppu(addr, &decoded);
         Some((addr, decoded, may_access))
     }
 
@@ -341,6 +764,58 @@ impl CPU {
         Some(decoded)
     }
 
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[inline(always)]
+    fn timestamped_static_instruction_local(
+        cache: &mut [TimestampedStaticInstruction; 256],
+        bus: &MemoryBus,
+        addr: u16,
+    ) -> Option<TimestampedStaticInstruction> {
+        if !is_cartridge_address(addr) {
+            return None;
+        }
+
+        let slot = (addr & 0x00ff) as usize;
+        let cached = cache[slot];
+        if cached.valid && cached.pc == addr {
+            return Some(cached);
+        }
+
+        let read_code_byte = |address: u16| {
+            bus.mapper.read_page((address >> 8) as u8).map_or_else(
+                || bus.mapper.read(address),
+                |page| page[(address & 0xff) as usize],
+            )
+        };
+        let raw_opcode = read_code_byte(addr);
+        let extended_opcode = &EXTENDED_OPCODES[raw_opcode as usize];
+        let width = instruction_width(extended_opcode.opcode, extended_opcode.addressing_mode);
+        if (1..width).any(|offset| !is_cartridge_address(addr.wrapping_add(offset))) {
+            return None;
+        }
+
+        let mut operand = [0; 2];
+        for (index, byte) in operand
+            .iter_mut()
+            .enumerate()
+            .take(width.saturating_sub(1) as usize)
+        {
+            *byte = read_code_byte(addr.wrapping_add(index as u16 + 1));
+        }
+
+        let decoded = TimestampedStaticInstruction {
+            pc: addr,
+            opcode: extended_opcode.opcode,
+            addressing_mode: extended_opcode.addressing_mode,
+            operand,
+            min_cycles: extended_opcode.min_cycles,
+            page_boundary_penalty: extended_opcode.page_boundary_penalty,
+            valid: true,
+        };
+        cache[slot] = decoded;
+        Some(decoded)
+    }
+
     #[cfg(feature = "timestamped-scheduler")]
     pub(crate) fn prepare_timestamped(&mut self, bus: &MemoryBus) -> bool {
         self.timestamped_decoded = None;
@@ -362,7 +837,7 @@ impl CPU {
     /// This is deliberately not a general CPU block cache. The block is
     /// capped, stops at control flow, and falls back before any instruction
     /// whose decode could touch an I/O address or leave cartridge space.
-    #[cfg(feature = "timestamped-scheduler")]
+    #[cfg(all(feature = "timestamped-scheduler", not(feature = "apu-disabled")))]
     pub(crate) fn run_timestamped_block(
         &mut self,
         bus: &mut MemoryBus,
@@ -405,12 +880,166 @@ impl CPU {
         (self.cycles.wrapping_sub(start_cycles) as u16, false)
     }
 
-    #[cfg(feature = "timestamped-scheduler")]
-    fn decoded_instruction_may_access_ppu(
-        &self,
+    /// The gated NROM/APU-disabled runner keeps architectural registers in
+    /// locals across the burst. It still commits at every scheduler barrier
+    /// and uses the exact dispatcher for unsupported opcodes.
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    pub(crate) fn run_timestamped_block(
+        &mut self,
+        bus: &mut MemoryBus,
+        master_tick_budget: u64,
+    ) -> (u16, bool) {
+        const MAX_INSTRUCTIONS: usize = 32;
+        let start_cycles = self.cycles;
+        let mut local = TimestampedLocalCpu::from_cpu(self);
+
+        self.timestamped_decoded = None;
+        for _ in 0..MAX_INSTRUCTIONS {
+            if bus.ppu.nmi_pending()
+                || (bus.mapper.irq_pending() && !local.check_status_bit(StatusFlags::I))
+            {
+                local.write_back(self);
+                self.step(bus, None);
+                break;
+            }
+
+            let Some((addr, decoded, may_access_ppu)) = Self::decode_timestamped_local(
+                &mut self.timestamped_static_cache,
+                bus,
+                local.pc,
+                local.x,
+                local.y,
+                &self.ram,
+            ) else {
+                local.write_back(self);
+                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
+            };
+
+            if may_access_ppu {
+                local.write_back(self);
+                self.timestamped_decoded = Some((addr, decoded));
+                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
+            }
+
+            let opcode = decoded.opcode;
+            if !local.execute(&mut self.ram, bus, decoded) {
+                local.write_back(self);
+                self.execute_compact_decoded(bus, decoded);
+                local = TimestampedLocalCpu::from_cpu(self);
+            }
+
+            let elapsed_master_ticks = local.cycles.wrapping_sub(start_cycles).saturating_mul(3);
+            if elapsed_master_ticks >= master_tick_budget || is_timestamped_block_terminator(opcode)
+            {
+                break;
+            }
+        }
+
+        local.write_back(self);
+        (self.cycles.wrapping_sub(start_cycles) as u16, false)
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    fn decode_timestamped_local(
+        static_cache: &mut [TimestampedStaticInstruction; 256],
+        bus: &MemoryBus,
         addr: u16,
-        decoded: &CompactDecodedInstruction,
-    ) -> bool {
+        x: u8,
+        y: u8,
+        ram: &[u8; 0x800],
+    ) -> Option<(u16, CompactDecodedInstruction, bool)> {
+        let instruction = Self::timestamped_static_instruction_local(static_cache, bus, addr)?;
+        let operand = instruction.operand;
+        let operand_addr = addr.wrapping_add(1);
+        let read_operand_byte = |offset: usize| operand[offset];
+        let read_operand_address = || u16::from_le_bytes([operand[0], operand[1]]);
+
+        let (width, final_address, base_address, page_boundary_hit) =
+            match instruction.addressing_mode {
+                AddressingMode::Absolute => (3, Some(read_operand_address()), None, false),
+                AddressingMode::Implied | AddressingMode::Accumulator => (1, None, None, false),
+                AddressingMode::AbsoluteIndexedX => {
+                    let base = read_operand_address();
+                    let address = base.wrapping_add(x as u16);
+                    (
+                        3,
+                        Some(address),
+                        Some(base),
+                        instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                    )
+                }
+                AddressingMode::AbsoluteIndexedY => {
+                    let base = read_operand_address();
+                    let address = base.wrapping_add(y as u16);
+                    (
+                        3,
+                        Some(address),
+                        Some(base),
+                        instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                    )
+                }
+                AddressingMode::Immediate => (2, Some(operand_addr), None, false),
+                AddressingMode::IndexedIndirect => {
+                    let pointer = read_operand_byte(0).wrapping_add(x) as u16;
+                    let address = Self::preflight_zero_page_indirect_local(bus, ram, pointer)?;
+                    (2, Some(address), Some(pointer), false)
+                }
+                AddressingMode::Indirect => {
+                    let pointer = read_operand_address();
+                    let address = Self::preflight_indirect_local(bus, ram, pointer)?;
+                    (3, Some(address), Some(pointer), false)
+                }
+                AddressingMode::IndirectIndexed => {
+                    let pointer = read_operand_byte(0) as u16;
+                    let base = Self::preflight_zero_page_indirect_local(bus, ram, pointer)?;
+                    let address = base.wrapping_add(y as u16);
+                    (
+                        2,
+                        Some(address),
+                        Some(base),
+                        instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                    )
+                }
+                AddressingMode::Relative => {
+                    let offset = read_operand_byte(0);
+                    let next_pc = addr.wrapping_add(2);
+                    let target = if offset >= 0x80 {
+                        next_pc.wrapping_sub(0x100 - offset as u16)
+                    } else {
+                        next_pc.wrapping_add(offset as u16)
+                    };
+                    (2, Some(target), None, false)
+                }
+                AddressingMode::ZeroPage => (2, Some(read_operand_byte(0) as u16), None, false),
+                AddressingMode::ZeroPageIndexedX => (
+                    2,
+                    Some(read_operand_byte(0).wrapping_add(x) as u16),
+                    None,
+                    false,
+                ),
+                AddressingMode::ZeroPageIndexedY => (
+                    2,
+                    Some(read_operand_byte(0).wrapping_add(y) as u16),
+                    None,
+                    false,
+                ),
+            };
+
+        let decoded = CompactDecodedInstruction {
+            opcode: instruction.opcode,
+            addressing_mode: instruction.addressing_mode,
+            final_address,
+            base_address,
+            width,
+            min_cycles: instruction.min_cycles,
+            page_boundary_hit,
+        };
+        let may_access = Self::decoded_instruction_may_access_ppu(addr, &decoded);
+        Some((addr, decoded, may_access))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn decoded_instruction_may_access_ppu(addr: u16, decoded: &CompactDecodedInstruction) -> bool {
         let may_access = match decoded.addressing_mode {
             AddressingMode::Implied | AddressingMode::Accumulator | AddressingMode::Immediate => {
                 false
@@ -480,6 +1109,35 @@ impl CPU {
             0x2000..=0x5fff => None,
             _ => Some(bus.mapper.read(address)),
         }
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[inline(always)]
+    fn preflight_read_byte_local(bus: &MemoryBus, ram: &[u8; 0x800], address: u16) -> Option<u8> {
+        match address {
+            0x0000..=0x1fff => Some(ram[address as usize % ram.len()]),
+            0x2000..=0x5fff => None,
+            _ => Some(bus.mapper.read(address)),
+        }
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[inline(always)]
+    fn preflight_zero_page_indirect_local(
+        bus: &MemoryBus,
+        ram: &[u8; 0x800],
+        pointer: u16,
+    ) -> Option<u16> {
+        let next = (pointer & 0xff00) | pointer.wrapping_add(1) & 0x00ff;
+        let lo = Self::preflight_read_byte_local(bus, ram, pointer)?;
+        let hi = Self::preflight_read_byte_local(bus, ram, next)?;
+        Some(u16::from_le_bytes([lo, hi]))
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[inline(always)]
+    fn preflight_indirect_local(bus: &MemoryBus, ram: &[u8; 0x800], pointer: u16) -> Option<u16> {
+        Self::preflight_zero_page_indirect_local(bus, ram, pointer)
     }
 
     pub(crate) fn reset(&mut self, bus: &mut MemoryBus) {
@@ -1941,5 +2599,108 @@ mod tests {
             block_bus.ppu.last_read.get(),
             reference_bus.ppu.last_read.get()
         );
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[test]
+    fn timestamped_local_registers_match_reference_with_fallback_opcode() {
+        let program = [
+            0xa9, 0x7f, // LDA #$7f
+            0x69, 0x01, // ADC #$01
+            0xaa, // TAX
+            0xe8, // INX
+            0x9a, // TXS
+            0x48, // PHA
+            0x68, // PLA
+            0xa0, 0x02, // LDY #$02
+            0x85, 0x10, // STA $10
+            0xa5, 0x10, // LDA $10
+            0xc5, 0x10, // CMP $10
+            0x05, 0x10, // ORA $10
+            0x45, 0x10, // EOR $10
+            0x25, 0x10, // AND $10
+            0x06, 0x10, // ASL $10
+            0x46, 0x10, // LSR $10
+            0x26, 0x10, // ROL $10
+            0x66, 0x10, // ROR $10
+            0xe6, 0x10, // INC $10
+            0xc6, 0x10, // DEC $10
+            0xe0, 0x02, // CPX #$02
+            0xc0, 0x02, // CPY #$02
+            0x38, // SEC
+            0xe9, 0x01, // SBC #$01
+            0x18, // CLC
+            0x86, 0x11, // STX $11
+            0x84, 0x12, // STY $12
+            0xa7, 0x10, // LAX $10 (exact-dispatch fallback)
+            0xad, 0x00, 0x20, // LDA $2000
+        ];
+        let barrier_pc = 0x8000 + (program.len() - 3) as u16;
+        let mut local_cpu = super::CPU::default();
+        let mut local_bus = preflight_bus(&program);
+        let mut reference_cpu = super::CPU::default();
+        let mut reference_bus = preflight_bus(&program);
+        local_cpu.pc = 0x8000;
+        reference_cpu.pc = 0x8000;
+
+        let (local_cycles, ppu_barrier) = local_cpu.run_timestamped_block(&mut local_bus, u64::MAX);
+        assert!(ppu_barrier);
+        while reference_cpu.pc != barrier_pc {
+            reference_cpu.step(&mut reference_bus, None);
+        }
+
+        assert_eq!(local_cycles, reference_cpu.cycles as u16);
+        assert_eq!(local_cpu.pc, reference_cpu.pc);
+        assert_eq!(local_cpu.a, reference_cpu.a);
+        assert_eq!(local_cpu.x, reference_cpu.x);
+        assert_eq!(local_cpu.y, reference_cpu.y);
+        assert_eq!(local_cpu.status, reference_cpu.status);
+        assert_eq!(local_cpu.sp, reference_cpu.sp);
+        assert_eq!(local_cpu.cycles, reference_cpu.cycles);
+        assert_eq!(local_cpu.ram, reference_cpu.ram);
+        assert_eq!(local_bus.ppu.last_read.get(), None);
+
+        assert_eq!(
+            local_cpu.step_timestamped(&mut local_bus),
+            reference_cpu.step(&mut reference_bus, None)
+        );
+        assert_eq!(local_cpu.pc, reference_cpu.pc);
+        assert_eq!(local_cpu.a, reference_cpu.a);
+        assert_eq!(local_cpu.status, reference_cpu.status);
+        assert_eq!(local_cpu.cycles, reference_cpu.cycles);
+        assert_eq!(
+            local_bus.ppu.last_read.get(),
+            reference_bus.ppu.last_read.get()
+        );
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[test]
+    fn timestamped_local_runner_preserves_budget_and_indirect_ppu_barrier() {
+        let program = [
+            0xa9, 0x42, // LDA #$42
+            0xa2, 0x01, // LDX #$01
+            0xb1, 0x10, // LDA ($10),Y
+        ];
+        let mut cpu = super::CPU::default();
+        let mut bus = preflight_bus(&program);
+        cpu.pc = 0x8000;
+        cpu.ram[0x10] = 0x00;
+        cpu.ram[0x11] = 0x20;
+
+        let (cycles, barrier) = cpu.run_timestamped_block(&mut bus, 3);
+        assert_eq!(cycles, 2);
+        assert!(!barrier);
+        assert_eq!(cpu.pc, 0x8002);
+
+        let (cycles, barrier) = cpu.run_timestamped_block(&mut bus, u64::MAX);
+        assert_eq!(cycles, 2);
+        assert!(barrier);
+        assert_eq!(cpu.pc, 0x8004);
+        assert_eq!(bus.ppu.last_read.get(), None);
+
+        assert_eq!(cpu.step_timestamped(&mut bus), 5);
+        assert_eq!(cpu.a, 0);
+        assert_eq!(bus.ppu.last_read.get(), Some(0x2000));
     }
 }

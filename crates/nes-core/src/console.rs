@@ -9,6 +9,9 @@ use crate::{
     video::VideoBuffer,
 };
 
+#[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+use crate::cartridge::NROM;
+
 pub use crate::video::{FRAME_HEIGHT, FRAME_WIDTH};
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -129,12 +132,9 @@ impl ConsoleState {
             // deliberately declined to decode an unsafe instruction. Catch
             // the PPU up to the instruction's timestamp before executing it.
             self.scheduler_master_ticks = self
-                .bus
-                .ppu
-                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                .catch_up_timestamped_nrom::<WRITE_OUTPUT, AGGRESSIVE>(
                     self.ppu_master_ticks,
                     target_master_ticks,
-                    &mut self.bus.mapper,
                     screen,
                 );
             self.ppu_master_ticks = self.scheduler_master_ticks;
@@ -142,23 +142,17 @@ impl ConsoleState {
             let barrier_cycles = self.cpu.step_timestamped(&mut self.bus);
             let barrier_target = target_master_ticks + barrier_cycles as u64 * 3;
             self.scheduler_master_ticks = self
-                .bus
-                .ppu
-                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                .catch_up_timestamped_nrom::<WRITE_OUTPUT, AGGRESSIVE>(
                     self.ppu_master_ticks,
                     barrier_target,
-                    &mut self.bus.mapper,
                     screen,
                 );
             self.ppu_master_ticks = self.scheduler_master_ticks;
         } else if target_master_ticks >= deadline {
             self.scheduler_master_ticks = self
-                .bus
-                .ppu
-                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                .catch_up_timestamped_nrom::<WRITE_OUTPUT, AGGRESSIVE>(
                     self.ppu_master_ticks,
                     target_master_ticks,
-                    &mut self.bus.mapper,
                     screen,
                 );
             self.ppu_master_ticks = self.scheduler_master_ticks;
@@ -167,6 +161,27 @@ impl ConsoleState {
         }
 
         let _ = process_sample;
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[inline(always)]
+    fn catch_up_timestamped_nrom<const WRITE_OUTPUT: bool, const AGGRESSIVE: bool>(
+        &mut self,
+        current_master_ticks: u64,
+        target_master_ticks: u64,
+        screen: &mut Screen,
+    ) -> u64 {
+        let (ppu, mapper) = (&mut self.bus.ppu, &mut self.bus.mapper);
+        match mapper {
+            MapperInstance::Nrom(mapper) => ppu
+                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, NROM>(
+                    current_master_ticks,
+                    target_master_ticks,
+                    mapper,
+                    screen,
+                ),
+            MapperInstance::Dynamic(_) => unreachable!("timestamped NROM path saw dynamic mapper"),
+        }
     }
 
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
