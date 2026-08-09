@@ -588,6 +588,23 @@ impl PPU {
                 continue;
             }
 
+            // After sprite evaluation and the mapper scanline clock, dots
+            // 261-319 have no PPU-visible work.  Batch only this gap and stop
+            // at dot 320 so sprite preparation still runs through the exact
+            // dispatcher.  A deferred CPU-visible read must be applied by
+            // the exact path before any arithmetic advance.
+            if self.last_read.get().is_none()
+                && self.rendering_enabled()
+                && (0..=239).contains(&self.scanline)
+                && (261..=319).contains(&self.cycle_in_scanline)
+            {
+                let remaining = target_master_ticks - master_ticks;
+                let ticks = remaining.min((320 - self.cycle_in_scanline) as u64);
+                self.cycle_in_scanline += ticks as u16;
+                master_ticks += ticks;
+                continue;
+            }
+
             let idle = self.idle_ticks_until_boundary();
             if idle != 0 {
                 let ticks = idle.min(target_master_ticks - master_ticks);
@@ -2049,6 +2066,79 @@ mod timestamped_tests {
             assert_same_state(&exact, &caught_up);
             assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
         }
+    }
+
+    #[test]
+    fn catch_up_visible_sprite_gap_matches_exact_dispatch_at_boundaries() {
+        let mut base = PPU::default();
+        base.control_reg = 0x1d;
+        base.mask_reg = 0x1e;
+        base.v = 0x0417;
+        base.t = 0x0417;
+        base.fine_x = 5;
+        for (index, value) in base.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(23).rotate_left(1);
+        }
+        base.oam.fill(0xff);
+        base.oam[0..4].copy_from_slice(&[0, 0x03, 0x01, 0x08]);
+
+        // Check starts at sprite evaluation, the mapper clock, the first
+        // batched dot, and the final dot before sprite preparation. Endpoints
+        // cover partial batches, exactly dot 320, and the following exact
+        // sprite-preparation dot.
+        for start in [257_u16, 260, 261, 262, 319] {
+            let mut positioned = base.clone();
+            let mut setup_mapper = VariedMapper;
+            let mut setup_screen = Screen::default();
+            for _ in 0..start {
+                positioned.step(&mut setup_mapper, &mut setup_screen);
+            }
+
+            for endpoint in [258_u16, 259, 260, 261, 262, 263, 279, 319, 320, 321] {
+                if endpoint <= start {
+                    continue;
+                }
+                let delta = (endpoint - start) as u64;
+                let mut exact = positioned.clone();
+                let mut caught_up = positioned.clone();
+                let mut exact_mapper = VariedMapper;
+                let mut caught_up_mapper = VariedMapper;
+                let mut exact_screen = setup_screen.clone();
+                let mut caught_up_screen = setup_screen.clone();
+
+                for _ in 0..delta {
+                    exact.step(&mut exact_mapper, &mut exact_screen);
+                }
+                caught_up.catch_up_to(0, delta, &mut caught_up_mapper, &mut caught_up_screen);
+
+                assert_same_state(&exact, &caught_up);
+                assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+            }
+        }
+
+        // A pending CPU-visible read forces the first tick through the exact
+        // path before the event-free gap can be batched.
+        let mut deferred = base;
+        let mut setup_mapper = VariedMapper;
+        let mut setup_screen = Screen::default();
+        for _ in 0..261 {
+            deferred.step(&mut setup_mapper, &mut setup_screen);
+        }
+        deferred.last_read.set(Some(0x2007));
+
+        let mut exact = deferred.clone();
+        let mut caught_up = deferred;
+        let mut exact_mapper = VariedMapper;
+        let mut caught_up_mapper = VariedMapper;
+        let mut exact_screen = setup_screen.clone();
+        let mut caught_up_screen = setup_screen;
+        for _ in 0..60 {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(0, 60, &mut caught_up_mapper, &mut caught_up_screen);
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
     }
 
     #[test]
