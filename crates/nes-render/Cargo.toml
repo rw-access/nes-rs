@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 default = []
 headless-cli = ["dep:clap"]
+apu-disabled = ["nes-core/apu-disabled"]
+rewind-disabled = ["nes-core/rewind-disabled"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }

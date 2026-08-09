@@ -3,6 +3,11 @@ name = "nes-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+apu-disabled = []
+rewind-disabled = []
+
 [dependencies]
 arrayvec = "0.7.2"
 dyn-clone = "1.0.9"

@@ -56,6 +56,13 @@ pub trait Mapper: DynClone {
     fn write(&mut self, address: u16, data: u8);
     fn read_page(&self, page: u8) -> Option<&[u8; 256]>;
 
+    /// Return a directly addressable CHR page when the mapper can expose one.
+    /// The generic PPU path falls back to `read` for mappers with banked or
+    /// otherwise dynamic CHR mappings.
+    fn read_chr_page(&self, _page: u8) -> Option<&[u8; 256]> {
+        None
+    }
+
     /// Clock mapper hardware at the end of a rendered scanline.
     /// Most mappers do nothing here; MMC3 uses it for its scanline IRQ counter.
     fn clock_scanline(&mut self) {}
@@ -125,6 +132,17 @@ fn read_chr_1k(cartridge: &Cartridge, bank: usize, offset: usize) -> u8 {
     cartridge.chr.get_banks()[bank / 8][(bank & 7) * 0x400 + (offset & 0x3ff)]
 }
 
+fn chr_page(cartridge: &Cartridge, page: u8) -> Option<&[u8; 256]> {
+    let offset = (page as usize & 0x1f) << 8;
+    cartridge
+        .chr
+        .get_banks()
+        .first()?
+        .get(offset..offset + 0x100)?
+        .try_into()
+        .ok()
+}
+
 fn write_chr_1k(cartridge: &mut Cartridge, bank: usize, offset: usize, data: u8) {
     let bank_count = cartridge.chr.get_banks().len() * 8;
     let bank = bank_index(bank, bank_count);
@@ -134,7 +152,7 @@ fn write_chr_1k(cartridge: &mut Cartridge, bank: usize, offset: usize, data: u8)
 }
 
 #[derive(Clone)]
-struct NROM {
+pub(crate) struct NROM {
     cartridge: Cartridge,
 }
 
@@ -150,10 +168,12 @@ impl NROM {
 }
 
 impl Mapper for NROM {
+    #[inline]
     fn mirror(&self) -> MirroringMode {
         self.cartridge.mirror
     }
 
+    #[inline]
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x1fff => {
@@ -168,6 +188,7 @@ impl Mapper for NROM {
         }
     }
 
+    #[inline]
     fn write(&mut self, address: u16, data: u8) {
         match address {
             0x0000..=0x1fff => write_chr_1k(
@@ -181,10 +202,96 @@ impl Mapper for NROM {
         }
     }
 
+    #[inline]
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
         match page {
             0x80..=0xff => prg_page(&self.cartridge, (page as usize - 0x80) / 0x40, page),
             _ => None,
+        }
+    }
+
+    #[inline]
+    fn read_chr_page(&self, page: u8) -> Option<&[u8; 256]> {
+        (page < 0x20)
+            .then(|| chr_page(&self.cartridge, page))
+            .flatten()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum MapperInstance {
+    Nrom(NROM),
+    Dynamic(Box<dyn Mapper>),
+}
+
+impl MapperInstance {
+    pub(crate) fn new_nrom(cartridge: Cartridge) -> Self {
+        Self::Nrom(NROM::new(cartridge))
+    }
+}
+
+impl Mapper for MapperInstance {
+    #[inline]
+    fn mirror(&self) -> MirroringMode {
+        match self {
+            Self::Nrom(mapper) => mapper.mirror(),
+            Self::Dynamic(mapper) => mapper.mirror(),
+        }
+    }
+
+    #[inline]
+    fn read(&self, address: u16) -> u8 {
+        match self {
+            Self::Nrom(mapper) => mapper.read(address),
+            Self::Dynamic(mapper) => mapper.read(address),
+        }
+    }
+
+    #[inline]
+    fn write(&mut self, address: u16, data: u8) {
+        match self {
+            Self::Nrom(mapper) => mapper.write(address, data),
+            Self::Dynamic(mapper) => mapper.write(address, data),
+        }
+    }
+
+    #[inline]
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match self {
+            Self::Nrom(mapper) => mapper.read_page(page),
+            Self::Dynamic(mapper) => mapper.read_page(page),
+        }
+    }
+
+    #[inline]
+    fn read_chr_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match self {
+            Self::Nrom(mapper) => mapper.read_chr_page(page),
+            Self::Dynamic(mapper) => mapper.read_chr_page(page),
+        }
+    }
+
+    #[inline]
+    fn clock_scanline(&mut self) {
+        match self {
+            Self::Nrom(mapper) => mapper.clock_scanline(),
+            Self::Dynamic(mapper) => mapper.clock_scanline(),
+        }
+    }
+
+    #[inline]
+    fn clock_cpu(&mut self) {
+        match self {
+            Self::Nrom(mapper) => mapper.clock_cpu(),
+            Self::Dynamic(mapper) => mapper.clock_cpu(),
+        }
+    }
+
+    #[inline]
+    fn irq_pending(&self) -> bool {
+        match self {
+            Self::Nrom(mapper) => mapper.irq_pending(),
+            Self::Dynamic(mapper) => mapper.irq_pending(),
         }
     }
 }

@@ -25,6 +25,15 @@ pub(crate) struct CPU {
     pub(crate) ram: [u8; 0x800],
 }
 
+#[derive(Clone, Copy)]
+struct CompactDecodedInstruction {
+    opcode: Opcode,
+    final_address: Option<u16>,
+    width: u8,
+    min_cycles: u8,
+    page_boundary_hit: bool,
+}
+
 impl Default for CPU {
     fn default() -> Self {
         Self {
@@ -137,36 +146,58 @@ impl CPU {
         }
 
         // APU frame IRQs are maskable and are checked between instructions.
+        #[cfg(not(feature = "apu-disabled"))]
         if !self.check_status_bit(StatusFlags::I) && bus.apu.irq_line() {
             return self.irq(bus, log);
         }
 
         let pre_cycles = self.cycles;
 
-        // decode the instruction @ PC
-        let instr = self.decode(bus, self.pc);
+        let (opcode, final_address, width, min_cycles, page_boundary_hit) = if log.is_some() {
+            // The rich form is retained for debug logging and diagnostics.
+            let instr = self.decode(bus, self.pc);
+            if let Some(writer) = log {
+                self.debug_instruction(bus, writer, &instr);
+                writer.write(b"\n").unwrap();
+            }
+            (
+                instr.extended_opcode.opcode,
+                instr.final_address,
+                instr.width,
+                instr.extended_opcode.min_cycles,
+                instr.page_boundary_hit,
+            )
+        } else {
+            let instr = self.decode_compact(bus, self.pc);
+            (
+                instr.opcode,
+                instr.final_address,
+                instr.width,
+                instr.min_cycles,
+                instr.page_boundary_hit,
+            )
+        };
 
-        if let Some(writer) = log {
-            self.debug_instruction(bus, writer, &instr);
-            writer.write(b"\n").unwrap();
-        }
-
-        self.pc = self.pc.wrapping_add(instr.width as u16);
+        self.pc = self.pc.wrapping_add(width as u16);
         self.cycles = self
             .cycles
-            .wrapping_add(instr.extended_opcode.min_cycles as u64)
-            .wrapping_add(if instr.page_boundary_hit { 1 } else { 0 });
+            .wrapping_add(min_cycles as u64)
+            .wrapping_add(page_boundary_hit as u64);
 
         // Memory writes occur on the final cycle of a 6502 instruction. Pass
         // the write phase and the instruction duration to the APU so $4017's
         // delayed reset is measured from the actual write cycle.
+        #[cfg(not(feature = "apu-disabled"))]
         let instruction_cycles = self.cycles.wrapping_sub(pre_cycles) as u8;
+        #[cfg(not(feature = "apu-disabled"))]
         let write_phase = bus
             .apu
             .phase_after_cpu_cycles(instruction_cycles.saturating_sub(1));
+        #[cfg(not(feature = "apu-disabled"))]
         bus.apu
             .set_register_write_timing(write_phase, instruction_cycles);
-        self.dispatch(bus, instr.extended_opcode.opcode, instr.final_address);
+        self.dispatch(bus, opcode, final_address);
+        #[cfg(not(feature = "apu-disabled"))]
         bus.apu.clear_register_write_timing();
 
         self.cycles.wrapping_sub(pre_cycles) as u16
@@ -634,17 +665,17 @@ impl CPU {
         // https://www.nesdev.org/wiki/CPU_memory_map
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()],
-            0x2000..=0x3fff => bus.ppu.read_register(bus.mapper.as_ref(), addr), // PPU
-            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),             // APU
-            0x4014 => 0,                                                         // DMA
-            0x4016 => bus.controller.read(),                                     // controller 1
-            0x4017 => 0,                                                         // controller 2
-            0x4018..=0x401F => 0, // disabled test mode
+            0x2000..=0x3fff => bus.ppu.read_register(&bus.mapper, addr), // PPU
+            0x4000..=0x4013 | 0x4015 => bus.apu.read_register(addr),     // APU
+            0x4014 => 0,                                                 // DMA
+            0x4016 => bus.controller.read(),                             // controller 1
+            0x4017 => 0,                                                 // controller 2
+            0x4018..=0x401F => 0,                                        // disabled test mode
             _ => bus.mapper.read(addr),
         }
     }
 
-    fn read_page<'a>(&'a self, mapper: &'a dyn Mapper, page: u8) -> Option<&'a [u8; 256]> {
+    fn read_page<'a, M: Mapper>(&'a self, mapper: &'a M, page: u8) -> Option<&'a [u8; 256]> {
         match page {
             0x00..=0x1f => (&self.ram[(page as usize) << 8..][..256]).try_into().ok(),
             0x20..=0x7f => None, // IO ports
@@ -655,6 +686,24 @@ impl CPU {
     fn read_address(&self, bus: &MemoryBus, addr: u16) -> u16 {
         let lo = self.read_byte(bus, addr);
         let hi = self.read_byte(bus, addr.wrapping_add(1));
+
+        u16::from_le_bytes([lo, hi])
+    }
+
+    #[inline]
+    fn read_code_byte(&self, bus: &MemoryBus, addr: u16) -> u8 {
+        if addr >= 0x8000 {
+            if let Some(page) = bus.mapper.read_page((addr >> 8) as u8) {
+                return page[(addr & 0xff) as usize];
+            }
+        }
+        self.read_byte(bus, addr)
+    }
+
+    #[inline]
+    fn read_code_address(&self, bus: &MemoryBus, addr: u16) -> u16 {
+        let lo = self.read_code_byte(bus, addr);
+        let hi = self.read_code_byte(bus, addr.wrapping_add(1));
 
         u16::from_le_bytes([lo, hi])
     }
@@ -671,14 +720,14 @@ impl CPU {
         // https://www.nesdev.org/wiki/CPU_memory_map
         match addr {
             0x0000..=0x1fff => self.ram[addr as usize % self.ram.len()] = data,
-            0x2000..=0x3fff => bus.ppu.write_register(bus.mapper.as_mut(), addr, data), // PPU
-            0x4000..=0x4013 | 0x4015 | 0x4017 => bus.apu.write_register(addr, data),    // APU
+            0x2000..=0x3fff => bus.ppu.write_register(&mut bus.mapper, addr, data), // PPU
+            0x4000..=0x4013 | 0x4015 | 0x4017 => bus.apu.write_register(addr, data), // APU
             0x4014 => {
-                let page = self.read_page(bus.mapper.as_ref(), data);
+                let page = self.read_page(&bus.mapper, data);
                 bus.ppu.write_dma(page);
             } // DMA
-            0x4016 => bus.controller.write(data), // controller 1
-            0x4018..=0x401F => {}                 // disabled test mode
+            0x4016 => bus.controller.write(data),                                   // controller 1
+            0x4018..=0x401F => {} // disabled test mode
             _ => bus.mapper.write(addr, data),
         };
     }
@@ -708,12 +757,12 @@ impl CPU {
 
     fn decode(&self, bus: &MemoryBus, addr: u16) -> DecodedInstruction {
         let operand_addr = addr.wrapping_add(1);
-        let opcode = self.read_byte(bus, addr);
+        let opcode = self.read_code_byte(bus, addr);
         let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
 
         match extended_opcode.addressing_mode {
             AddressingMode::Absolute => {
-                let address = self.read_address(bus, operand_addr);
+                let address = self.read_code_address(bus, operand_addr);
                 DecodedInstruction {
                     extended_opcode,
                     address_info: AddressInfo::Absolute { address: address },
@@ -737,7 +786,7 @@ impl CPU {
                 final_address: None,
             },
             AddressingMode::AbsoluteIndexedX => {
-                let indirect = self.read_address(bus, operand_addr);
+                let indirect = self.read_code_address(bus, operand_addr);
                 let address = indirect.wrapping_add(self.x as u16);
 
                 DecodedInstruction {
@@ -750,7 +799,7 @@ impl CPU {
                 }
             }
             AddressingMode::AbsoluteIndexedY => {
-                let indirect = self.read_address(bus, operand_addr);
+                let indirect = self.read_code_address(bus, operand_addr);
                 let address = indirect.wrapping_add(self.y as u16);
 
                 DecodedInstruction {
@@ -773,7 +822,7 @@ impl CPU {
                 }
             }
             AddressingMode::IndexedIndirect => {
-                let offset = self.read_byte(bus, operand_addr);
+                let offset = self.read_code_byte(bus, operand_addr);
                 let indirect = offset.wrapping_add(self.x) as u16;
                 let address = self.read_address_indirect(bus, indirect);
 
@@ -790,7 +839,7 @@ impl CPU {
                 }
             }
             AddressingMode::Indirect => {
-                let indirect = self.read_address(bus, operand_addr);
+                let indirect = self.read_code_address(bus, operand_addr);
                 let address = self.read_address_indirect(bus, indirect);
 
                 DecodedInstruction {
@@ -802,7 +851,7 @@ impl CPU {
                 }
             }
             AddressingMode::IndirectIndexed => {
-                let offset = self.read_byte(bus, operand_addr);
+                let offset = self.read_code_byte(bus, operand_addr);
                 let indirect = self.read_address_indirect(bus, offset as u16);
                 let address = indirect.wrapping_add(self.y as u16);
 
@@ -820,7 +869,7 @@ impl CPU {
                 }
             }
             AddressingMode::Relative => {
-                let offset = self.read_byte(bus, operand_addr);
+                let offset = self.read_code_byte(bus, operand_addr);
                 let next_pc = addr.wrapping_add(2);
                 let address = if offset >= 0x80 {
                     next_pc.wrapping_sub(0x100 - (offset as u16))
@@ -837,7 +886,7 @@ impl CPU {
                 }
             }
             AddressingMode::ZeroPage => {
-                let address = self.read_byte(bus, operand_addr);
+                let address = self.read_code_byte(bus, operand_addr);
                 DecodedInstruction {
                     extended_opcode,
                     address_info: AddressInfo::ZeroPage { address: address },
@@ -847,7 +896,7 @@ impl CPU {
                 }
             }
             AddressingMode::ZeroPageIndexedX => {
-                let offset = self.read_byte(bus, operand_addr);
+                let offset = self.read_code_byte(bus, operand_addr);
                 let address = offset.wrapping_add(self.x) as u16;
 
                 DecodedInstruction {
@@ -859,7 +908,7 @@ impl CPU {
                 }
             }
             AddressingMode::ZeroPageIndexedY => {
-                let offset = self.read_byte(bus, operand_addr);
+                let offset = self.read_code_byte(bus, operand_addr);
                 let address = offset.wrapping_add(self.y) as u16;
 
                 DecodedInstruction {
@@ -870,6 +919,88 @@ impl CPU {
                     final_address: Some(address),
                 }
             }
+        }
+    }
+
+    #[inline]
+    fn decode_compact(&self, bus: &MemoryBus, addr: u16) -> CompactDecodedInstruction {
+        let operand_addr = addr.wrapping_add(1);
+        let extended_opcode = &EXTENDED_OPCODES[self.read_code_byte(bus, addr) as usize];
+        let (width, final_address, page_boundary_hit) = match extended_opcode.addressing_mode {
+            AddressingMode::Absolute => (3, Some(self.read_code_address(bus, operand_addr)), false),
+            AddressingMode::Implied | AddressingMode::Accumulator => (1, None, false),
+            AddressingMode::AbsoluteIndexedX => {
+                let indirect = self.read_code_address(bus, operand_addr);
+                let address = indirect.wrapping_add(self.x as u16);
+                (
+                    3,
+                    Some(address),
+                    extended_opcode.page_boundary_penalty
+                        && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::AbsoluteIndexedY => {
+                let indirect = self.read_code_address(bus, operand_addr);
+                let address = indirect.wrapping_add(self.y as u16);
+                (
+                    3,
+                    Some(address),
+                    extended_opcode.page_boundary_penalty
+                        && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::Immediate => (2, Some(operand_addr), false),
+            AddressingMode::IndexedIndirect => {
+                let offset = self.read_code_byte(bus, operand_addr);
+                let indirect = offset.wrapping_add(self.x) as u16;
+                (2, Some(self.read_address_indirect(bus, indirect)), false)
+            }
+            AddressingMode::Indirect => {
+                let indirect = self.read_code_address(bus, operand_addr);
+                (3, Some(self.read_address_indirect(bus, indirect)), false)
+            }
+            AddressingMode::IndirectIndexed => {
+                let offset = self.read_code_byte(bus, operand_addr);
+                let indirect = self.read_address_indirect(bus, offset as u16);
+                let address = indirect.wrapping_add(self.y as u16);
+                (
+                    2,
+                    Some(address),
+                    extended_opcode.page_boundary_penalty
+                        && crosses_page_boundary(indirect, address),
+                )
+            }
+            AddressingMode::Relative => {
+                let offset = self.read_code_byte(bus, operand_addr);
+                let next_pc = addr.wrapping_add(2);
+                let address = if offset >= 0x80 {
+                    next_pc.wrapping_sub(0x100 - offset as u16)
+                } else {
+                    next_pc.wrapping_add(offset as u16)
+                };
+                (2, Some(address), false)
+            }
+            AddressingMode::ZeroPage => (
+                2,
+                Some(self.read_code_byte(bus, operand_addr) as u16),
+                false,
+            ),
+            AddressingMode::ZeroPageIndexedX => {
+                let offset = self.read_code_byte(bus, operand_addr);
+                (2, Some(offset.wrapping_add(self.x) as u16), false)
+            }
+            AddressingMode::ZeroPageIndexedY => {
+                let offset = self.read_code_byte(bus, operand_addr);
+                (2, Some(offset.wrapping_add(self.y) as u16), false)
+            }
+        };
+
+        CompactDecodedInstruction {
+            opcode: extended_opcode.opcode,
+            final_address,
+            width,
+            min_cycles: extended_opcode.min_cycles,
+            page_boundary_hit,
         }
     }
 

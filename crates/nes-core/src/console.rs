@@ -1,11 +1,10 @@
 use crate::apu::ChannelMask;
 use crate::{
-    apu::APU,
     bus::MemoryBus,
-    cartridge::Mapper,
-    controller::{ButtonState, Controller},
+    cartridge::{Cartridge, Mapper, MapperInstance},
+    controller::ButtonState,
     cpu::CPU,
-    ppu::{Screen, PPU},
+    ppu::Screen,
     snapshot::RewindTape,
     video::VideoBuffer,
 };
@@ -51,21 +50,31 @@ impl ConsoleState {
     }
 
     fn step_hardware_cycle<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        #[cfg(feature = "apu-disabled")]
+        let _ = process_sample;
         self.bus.mapper.clock_cpu();
-        // Temporarily take the APU so its DMC memory callback can read the
-        // CPU address space without aliasing the mutable APU borrow.
-        let mut apu = std::mem::take(&mut self.bus.apu);
-        let sample = apu.step(|addr| self.cpu.read_byte(&self.bus, addr));
-        self.bus.apu = apu;
-        if let Some(sample) = sample {
-            process_sample(sample);
+        #[cfg(not(feature = "apu-disabled"))]
+        // DMC sample addresses are restricted to the cartridge range
+        // ($8000-$ffff), so the callback never needs to access another bus
+        // device. Borrowing the mapper separately keeps the APU in place and
+        // avoids constructing a default APU on every hardware cycle.
+        {
+            let sample = {
+                let apu = &mut self.bus.apu;
+                let mapper = &self.bus.mapper;
+                apu.step(|addr| mapper.read(addr))
+            };
+            if let Some(sample) = sample {
+                process_sample(sample);
+            }
         }
         for _ in 0..3 {
-            self.bus.ppu.step(self.bus.mapper.as_mut(), screen);
+            self.bus.ppu.step(&mut self.bus.mapper, screen);
         }
     }
 
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        #[cfg(not(feature = "apu-disabled"))]
         if self.bus.apu.dma_active() {
             // DMA stalls are observed between abstract CPU instructions. The
             // current CPU core has already dispatched an instruction before
@@ -154,12 +163,7 @@ impl Console {
             .collect();
         let ppu_backup_contents: Vec<u8> = ppu_ignore
             .iter()
-            .map(|addr| {
-                self.state
-                    .bus
-                    .ppu
-                    .read_byte(self.state.bus.mapper.as_ref(), *addr)
-            })
+            .map(|addr| self.state.bus.ppu.read_byte(&self.state.bus.mapper, *addr))
             .collect();
 
         self.state = snapshot;
@@ -178,7 +182,7 @@ impl Console {
                 self.state
                     .bus
                     .ppu
-                    .write_byte(self.state.bus.mapper.as_mut(), *addr, data);
+                    .write_byte(&mut self.state.bus.mapper, *addr, data);
             });
 
         self.reset_timeline();
@@ -239,15 +243,10 @@ impl Console {
         self.state.bus.apu.toggle_channel_mask(toggle_mask);
     }
 
-    pub fn new(mapper: Box<dyn Mapper>) -> Self {
+    fn from_mapper(mapper: MapperInstance) -> Self {
         let mut console = Console {
             state: ConsoleState {
-                bus: MemoryBus {
-                    mapper,
-                    ppu: PPU::default(),
-                    apu: APU::default(),
-                    controller: Controller::default(),
-                },
+                bus: MemoryBus::new(mapper),
                 cpu: CPU::default(),
                 frame_number: 0,
             },
@@ -263,6 +262,15 @@ impl Console {
         console.state.bus.ppu.reset();
         console.state.cpu.reset(&mut console.state.bus);
         console
+    }
+
+    pub fn new(mapper: Box<dyn Mapper>) -> Self {
+        Self::from_mapper(MapperInstance::Dynamic(mapper))
+    }
+
+    /// Construct a console with a cartridge using the mapper-0 fast path.
+    pub fn new_nrom(cartridge: Cartridge) -> Self {
+        Self::from_mapper(MapperInstance::new_nrom(cartridge))
     }
 
     /// Emulate one frame and return its video/audio output.
@@ -289,6 +297,7 @@ impl Console {
             state.wait_vblank(screen, |sample| audio_samples.push(sample));
         }
 
+        #[cfg(not(feature = "rewind-disabled"))]
         if !self.in_rewind {
             self.tape.push_back(self.state.clone());
             self.rewind_history_active = false;
@@ -318,8 +327,9 @@ impl Console {
 #[cfg(test)]
 mod tests {
     use super::{AudioResetSignal, Console};
-    use crate::cartridge::{Mapper, MirroringMode};
+    use crate::cartridge::{Cartridge, Mapper, MirroringMode, CHR, PRG};
     use crate::video::{VideoBuffer, FRAME_HEIGHT, FRAME_WIDTH};
+    use std::rc::Rc;
 
     #[derive(Clone)]
     struct TestMapper;
@@ -340,6 +350,33 @@ mod tests {
         }
     }
 
+    fn patterned_nrom_cartridge() -> Cartridge {
+        let mut prg = vec![[0; 0x4000]];
+        let program = [
+            0xa9, 0x08, 0x8d, 0x01, 0x20, // show background
+            0xa9, 0x3f, 0x8d, 0x06, 0x20, // palette address high
+            0xa9, 0x01, 0x8d, 0x06, 0x20, // palette address low
+            0xa9, 0x01, 0x8d, 0x07, 0x20, // palette entry 1
+            0xa9, 0x20, 0x8d, 0x06, 0x20, // nametable address high
+            0xa9, 0x00, 0x8d, 0x06, 0x20, // nametable address low
+            0xa9, 0x01, 0x8d, 0x07, 0x20, // tile 1 at the top-left
+            0x4c, 0x00, 0x80, // loop
+        ];
+        prg[0][..program.len()].copy_from_slice(&program);
+        prg[0][0x3ffc] = 0x00;
+        prg[0][0x3ffd] = 0x80;
+
+        let mut chr = [0; 0x2000];
+        chr[0x10..0x18].fill(0xff);
+
+        Cartridge {
+            prg: Rc::new(PRG { banks: prg }),
+            chr: CHR::ROM(Rc::new(vec![chr])),
+            sram: vec![[0; 0x2000]],
+            mirror: MirroringMode::Horizontal,
+        }
+    }
+
     #[test]
     fn audio_reset_signal_is_one_shot() {
         let mut signal = AudioResetSignal::default();
@@ -350,6 +387,32 @@ mod tests {
         assert!(!signal.take());
     }
 
+    #[test]
+    fn nrom_static_path_matches_boxed_mapper_frames() {
+        let cartridge = patterned_nrom_cartridge();
+        let mut static_console = Console::new_nrom(cartridge.clone());
+        let mut boxed_console = Console::new(crate::cartridge::new(cartridge, 0).unwrap());
+
+        for _ in 0..2 {
+            let static_frame = static_console.next_frame();
+            let boxed_frame = boxed_console.next_frame();
+
+            assert_eq!(static_frame.frame_number, boxed_frame.frame_number);
+            assert_eq!(static_frame.pixels, boxed_frame.pixels);
+            assert_eq!(static_frame.audio_samples, boxed_frame.audio_samples);
+            assert_eq!(
+                static_frame.audio_discontinuity,
+                boxed_frame.audio_discontinuity
+            );
+            assert!(static_frame
+                .pixels
+                .iter()
+                .flatten()
+                .any(|&pixel| pixel != 0));
+        }
+    }
+
+    #[cfg(all(not(feature = "apu-disabled"), not(feature = "rewind-disabled")))]
     #[test]
     fn frame_output_exposes_dimensions_rate_and_monotonic_sequence() {
         let mut console = Console::new(Box::new(TestMapper));
@@ -371,6 +434,7 @@ mod tests {
         assert!(!rewound.audio_samples.is_empty());
     }
 
+    #[cfg(not(feature = "rewind-disabled"))]
     #[test]
     fn rewind_frame_numbers_cross_checkpoints_one_at_a_time() {
         let mut console = Console::new(Box::new(TestMapper));
@@ -385,6 +449,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(not(feature = "apu-disabled"), not(feature = "rewind-disabled")))]
     #[test]
     fn rewind_holds_at_the_oldest_available_frame() {
         let mut console = Console::new(Box::new(TestMapper));
@@ -432,6 +497,7 @@ mod tests {
         assert_eq!(frame.frame_number, 1);
     }
 
+    #[cfg(not(feature = "apu-disabled"))]
     #[test]
     fn dmc_dma_pauses_cpu_progress_while_hardware_cycles_continue() {
         let console = Console::new(Box::new(TestMapper));
