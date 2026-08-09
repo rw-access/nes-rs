@@ -711,7 +711,9 @@ impl PPU {
 
         self.cycle_in_scanline = 261;
         self.cycle_in_scanline = 320;
-        if !direct_chr || self.sprite_zero_in_line {
+        if direct_chr && self.sprite_zero_in_line {
+            self.prepare_sprite_zero_for_line(mapper);
+        } else if !direct_chr {
             self.prepare_sprites_for_line(mapper);
         }
 
@@ -812,7 +814,11 @@ impl PPU {
                 6 => self.fetch_background_pattern_high(mapper),
                 7 => {
                     self.processed_tile = [self.processed_tile[1], self.pending_tile];
-                    self.update_vram_addr();
+                    if self.cycle_in_scanline == 256 {
+                        self.increment_vram_addr_y();
+                    } else {
+                        self.increment_vram_addr_x();
+                    }
                 }
                 _ => {}
             }
@@ -962,7 +968,11 @@ impl PPU {
             match cycle & 7 {
                 0 => {
                     self.processed_tile = [self.processed_tile[1], self.pending_tile];
-                    self.update_vram_addr();
+                    if cycle == 256 {
+                        self.increment_vram_addr_y();
+                    } else {
+                        self.increment_vram_addr_x();
+                    }
                 }
                 1 if !skip_background_fetches => self.fetch_background_nametable(mapper),
                 3 if !skip_background_fetches => self.fetch_background_attribute(mapper),
@@ -994,7 +1004,7 @@ impl PPU {
             match cycle & 7 {
                 0 => {
                     self.processed_tile = [self.processed_tile[1], self.pending_tile];
-                    self.update_vram_addr();
+                    self.increment_vram_addr_x();
                 }
                 1 => self.fetch_background_nametable(mapper),
                 3 => self.fetch_background_attribute(mapper),
@@ -1027,7 +1037,11 @@ impl PPU {
 
         self.cycle_in_scanline += 1;
         self.processed_tile = [self.processed_tile[1], self.pending_tile];
-        self.update_vram_addr();
+        if self.cycle_in_scanline == 256 {
+            self.increment_vram_addr_y();
+        } else {
+            self.increment_vram_addr_x();
+        }
     }
 
     pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
@@ -1071,7 +1085,21 @@ impl PPU {
         }
 
         match self.scanline {
-            0..=239 => self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen),
+            0..=239 => {
+                // In the timestamped headless direct-CHR path, sprite-zero
+                // hit is the only reason sprite pattern data is needed here.
+                // Keep the exact renderer's eight-sprite preparation intact.
+                let headless_direct_chr_zero = !WRITE_OUTPUT
+                    && AGGRESSIVE
+                    && self.cycle_in_scanline == 320
+                    && self.sprite_zero_in_line
+                    && mapper.read_chr_page(0).is_some();
+                if headless_direct_chr_zero {
+                    self.prepare_sprite_zero_for_line(mapper);
+                } else {
+                    self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen);
+                }
+            }
             240 => self.step_post_render(mapper),
             241..=260 => self.step_vblank(mapper),
             261 => self.step_pre_render(mapper),
@@ -1228,12 +1256,34 @@ impl PPU {
 
     #[inline]
     fn prepare_sprites_for_line<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        self.prepare_sprites_for_line_with_limit(mapper, self.processed_sprites.len());
+    }
+
+    #[inline]
+    fn prepare_sprite_zero_for_line<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        debug_assert!(self.sprite_zero_in_line);
+        self.prepare_sprites_for_line_with_limit(mapper, 1);
+    }
+
+    #[inline]
+    fn prepare_sprites_for_line_with_limit<M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &M,
+        sprite_limit: usize,
+    ) {
         let tall_sprites = self.control_reg & 0x20 != 0;
         let sprite_height: u8 = if tall_sprites { 16 } else { 8 };
         let y = self.scanline;
 
-        // Cycles 257-320: sprite fetches (8 sprites total, 8 cycles per sprite).
-        for (idx, raw_sprite) in self.secondary_oam.chunks_exact(4).enumerate() {
+        // Cycles 257-320: sprite fetches. The timestamped headless direct-
+        // CHR path may request only sprite zero; the exact path passes all
+        // eight slots here.
+        for (idx, raw_sprite) in self
+            .secondary_oam
+            .chunks_exact(4)
+            .take(sprite_limit)
+            .enumerate()
+        {
             let raw_sprite: &[u8; 4] = raw_sprite.try_into().unwrap();
             let processed_sprite = &mut self.processed_sprites[idx];
             processed_sprite.sprite = ParsedSprite::from(raw_sprite);
@@ -1284,13 +1334,15 @@ impl PPU {
                 pattern_high,
             };
         }
-        self.prepare_sprite_pixels();
+        self.prepare_sprite_pixels(sprite_limit);
     }
 
-    fn prepare_sprite_pixels(&mut self) {
+    fn prepare_sprite_pixels(&mut self, sprite_count: usize) {
         self.sprite_pixels.fill(SpritePixel::default());
 
-        for (position, processed_sprite) in self.processed_sprites.iter().enumerate() {
+        for (position, processed_sprite) in
+            self.processed_sprites[..sprite_count].iter().enumerate()
+        {
             if processed_sprite.sprite.is_empty() {
                 break;
             }
@@ -1425,19 +1477,7 @@ impl PPU {
     fn update_vram_addr(&mut self) {
         match (self.scanline, self.cycle_in_scanline) {
             (_, 256) => {
-                // https://www.nesdev.org/wiki/PPU_scrolling#At_dot_256_of_each_scanline
-                let fine_y = self.v >> 12 & 0x7;
-                if fine_y < 7 {
-                    self.v += 0x1000;
-                } else {
-                    self.v &= !0x7000;
-                    let coarse_y = self.v >> 5 & 0x1f;
-                    if coarse_y < 29 {
-                        self.v += 0x20;
-                    } else {
-                        self.v = (self.v & !0x03e0) ^ 0x0800;
-                    }
-                }
+                self.increment_vram_addr_y();
             }
             (_, 257) => {
                 // https://www.nesdev.org/wiki/PPU_scrolling#At_dot_257_of_each_scanline
@@ -1458,13 +1498,35 @@ impl PPU {
                 // it begins at dots 328 and 336, and will continue through the next scanline at 8, 16, 24... 240, 248, 256
                 // (every 8 dots across the scanline until 256). Across the scanline the effective coarse X scroll coordinate
                 // is incremented repeatedly, which will also wrap to the next nametable appropriately
-                self.v = if self.v & 0x1f == 31 {
-                    (self.v & !0x001f) ^ 0x0400
-                } else {
-                    self.v + 1
-                };
+                self.increment_vram_addr_x();
             }
             _ => {}
+        }
+    }
+
+    #[inline]
+    fn increment_vram_addr_x(&mut self) {
+        self.v = if self.v & 0x1f == 31 {
+            (self.v & !0x001f) ^ 0x0400
+        } else {
+            self.v + 1
+        };
+    }
+
+    #[inline]
+    fn increment_vram_addr_y(&mut self) {
+        // https://www.nesdev.org/wiki/PPU_scrolling#At_dot_256_of_each_scanline
+        let fine_y = self.v >> 12 & 0x7;
+        if fine_y < 7 {
+            self.v += 0x1000;
+        } else {
+            self.v &= !0x7000;
+            let coarse_y = self.v >> 5 & 0x1f;
+            if coarse_y < 29 {
+                self.v += 0x20;
+            } else {
+                self.v = (self.v & !0x03e0) ^ 0x0800;
+            }
         }
     }
 
@@ -2499,6 +2561,122 @@ mod timestamped_tests {
                 assert_eq!(rendered.cycle_in_scanline, 0);
                 assert_eq!(headless_screen.pixels, Screen::default().pixels);
             }
+        }
+    }
+
+    #[test]
+    fn timestamped_headless_sprite_zero_only_matches_exact_8x8_and_8x16() {
+        for tall_sprites in [false, true] {
+            let mut base = PPU::default();
+            base.control_reg = (if tall_sprites { 0x20 } else { 0 }) | 0x08;
+            base.mask_reg = 0x1e;
+            base.v = 0x0417;
+            base.t = 0x0417;
+            base.fine_x = 3;
+            base.palette_ram.fill(0x2a);
+            base.nametables.fill(0);
+            base.oam.fill(0xff);
+            base.sprite_zero_in_line = true;
+
+            // Keep sprite zero at the front and exercise both flips.  The
+            // ninth visible sprite also makes the overflow bit a part of the
+            // differential state, while only the first eight enter
+            // secondary OAM.
+            let sprite_zero_tile = if tall_sprites { 3 } else { 4 };
+            base.oam[0..4].copy_from_slice(&[0, sprite_zero_tile, 0xc1, 0]);
+            for index in 1..9 {
+                let offset = index * 4;
+                base.oam[offset..offset + 4].copy_from_slice(&[
+                    0,
+                    index as u8,
+                    (index as u8) & 3,
+                    (index as u8) * 8,
+                ]);
+            }
+
+            let mut exact_headless = base.clone();
+            let mut optimized = base.clone();
+            let mut rendered = base;
+            let mut exact_mapper = DirectChrMapper::patterned();
+            let mut optimized_mapper = DirectChrMapper::patterned();
+            let mut rendered_mapper = DirectChrMapper::patterned();
+            // Use opaque pattern data in every table so that the test covers
+            // the hit-selection path for both 8x8 and 8x16 addressing.
+            for mapper in [
+                &mut exact_mapper,
+                &mut optimized_mapper,
+                &mut rendered_mapper,
+            ] {
+                for page in &mut mapper.chr {
+                    page.fill(0xff);
+                }
+            }
+            let mut exact_screen = Screen::default();
+            let mut optimized_screen = Screen::default();
+            let mut rendered_screen = Screen::default();
+
+            // This is the first line on which sprite evaluation discovers the
+            // candidate.  The optimized path must prepare only sprite zero at
+            // dot 320, while the exact headless and rendered paths prepare
+            // all eight sprites.
+            exact_headless.catch_up_visible_scanline_inner_with_mode::<false, false, _>(
+                &mut exact_mapper,
+                &mut exact_screen,
+            );
+            optimized.catch_up_visible_scanline_inner_with_mode::<false, true, _>(
+                &mut optimized_mapper,
+                &mut optimized_screen,
+            );
+            rendered.catch_up_visible_scanline_inner_with_mode::<true, false, _>(
+                &mut rendered_mapper,
+                &mut rendered_screen,
+            );
+
+            assert_same_observable_state(&exact_headless, &optimized);
+            assert_same_observable_state(&rendered, &optimized);
+            assert_eq!(exact_screen.pixels, optimized_screen.pixels);
+            assert_eq!(optimized_screen.pixels, Screen::default().pixels);
+            assert!(rendered_screen
+                .pixels
+                .iter()
+                .flatten()
+                .any(|&pixel| pixel != 0));
+            assert_ne!(optimized.status_reg & 0x20, 0);
+
+            // Consume the next line's first tile.  This uses the data that
+            // was prepared at dot 320 and verifies that sprite zero's pixel
+            // selection, including flips and tall-sprite addressing, is the
+            // same even though the optimized path did not prepare sprites
+            // one through seven.
+            exact_headless.catch_up_visible_tile_with_mode::<false, false, _>(
+                1,
+                &mut exact_mapper,
+                &mut exact_screen,
+            );
+            optimized.catch_up_visible_tile_with_mode::<false, true, _>(
+                1,
+                &mut optimized_mapper,
+                &mut optimized_screen,
+            );
+            rendered.catch_up_visible_tile_with_mode::<true, false, _>(
+                1,
+                &mut rendered_mapper,
+                &mut rendered_screen,
+            );
+
+            assert_same_observable_state(&exact_headless, &optimized);
+            assert_same_observable_state(&rendered, &optimized);
+            assert_eq!(
+                exact_headless.status_reg & 0x40,
+                optimized.status_reg & 0x40
+            );
+            assert_ne!(optimized.status_reg & 0x40, 0);
+            assert!(rendered_screen
+                .pixels
+                .iter()
+                .flatten()
+                .any(|&pixel| pixel != 0));
+            assert_eq!(optimized_screen.pixels, Screen::default().pixels);
         }
     }
 
