@@ -292,6 +292,22 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        if self.scanline <= 239
+            && self.rendering_enabled()
+            && self.cycle_in_scanline <= 338
+            && !matches!(self.cycle_in_scanline, 261..=317 | 337)
+        {
+            self.apply_deferred_read();
+            self.last_read.set(None);
+            self.step_visible(mapper, screen);
+            self.update_cycle();
+            self.step_visible(mapper, screen);
+            self.update_cycle();
+            self.step_visible(mapper, screen);
+            self.update_cycle();
+            return;
+        }
+
         if self.can_batch_three_idle_ticks() {
             if self.last_read.get().is_some() {
                 // Apply the deferred CPU-visible read effect on the first
@@ -369,7 +385,7 @@ impl PPU {
         self.mask_reg & 0x18 != 0
     }
 
-    pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
+    fn apply_deferred_read(&mut self) {
         // change signals on the next cycle
         match self.last_read.get() {
             Some(0x2002) => {
@@ -383,7 +399,10 @@ impl PPU {
             }
             _ => {}
         }
+    }
 
+    pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
+        self.apply_deferred_read();
         self.last_read.set(None);
 
         // Scanlines 242-260 are entirely idle after the vblank edge. Keep
