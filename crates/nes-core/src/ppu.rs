@@ -292,6 +292,18 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        self.step_cpu_cycle_with_mode::<true, false, M>(mapper, screen);
+    }
+
+    pub(crate) fn step_cpu_cycle_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
         if self.scanline <= 239
             && self.rendering_enabled()
             && self.cycle_in_scanline <= 338
@@ -299,11 +311,11 @@ impl PPU {
         {
             self.apply_deferred_read();
             self.last_read.set(None);
-            self.step_visible(mapper, screen);
+            self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen);
             self.update_cycle();
-            self.step_visible(mapper, screen);
+            self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen);
             self.update_cycle();
-            self.step_visible(mapper, screen);
+            self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen);
             self.update_cycle();
             return;
         }
@@ -312,7 +324,7 @@ impl PPU {
             if self.last_read.get().is_some() {
                 // Apply the deferred CPU-visible read effect on the first
                 // tick, then advance the two remaining idle ticks directly.
-                self.step(mapper, screen);
+                self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
                 self.cycle_in_scanline += 2;
             } else {
                 self.cycle_in_scanline += 3;
@@ -320,9 +332,9 @@ impl PPU {
             return;
         }
 
-        self.step(mapper, screen);
-        self.step(mapper, screen);
-        self.step(mapper, screen);
+        self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
+        self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
+        self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
     }
 
     pub(crate) fn reset(&mut self) {
@@ -470,11 +482,31 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) -> u64 {
+        self.catch_up_to_with_mode::<true, false, M>(
+            current_master_ticks,
+            target_master_ticks,
+            mapper,
+            screen,
+        )
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn catch_up_to_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        current_master_ticks: u64,
+        target_master_ticks: u64,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) -> u64 {
         debug_assert!(target_master_ticks >= current_master_ticks);
         let mut master_ticks = current_master_ticks;
         while master_ticks < target_master_ticks {
             if self.last_read.get().is_some() {
-                self.step(mapper, screen);
+                self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
                 master_ticks += 1;
                 continue;
             }
@@ -484,7 +516,9 @@ impl PPU {
                 && self.cycle_in_scanline == 0
                 && target_master_ticks - master_ticks >= 341
             {
-                self.catch_up_visible_scanline(mapper, screen);
+                self.catch_up_visible_scanline_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
+                    mapper, screen,
+                );
                 master_ticks += 341;
                 continue;
             }
@@ -505,7 +539,9 @@ impl PPU {
                 let start_cycle = self.cycle_in_scanline;
                 let end_cycle =
                     start_cycle.saturating_add(remaining.min((257 - start_cycle) as u64) as u16);
-                self.catch_up_visible_range(end_cycle, mapper, screen);
+                self.catch_up_visible_range_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
+                    end_cycle, mapper, screen,
+                );
                 master_ticks += (end_cycle - start_cycle) as u64;
                 continue;
             }
@@ -536,10 +572,10 @@ impl PPU {
             }
 
             if target_master_ticks - master_ticks >= 3 {
-                self.step_cpu_cycle(mapper, screen);
+                self.step_cpu_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
                 master_ticks += 3;
             } else {
-                self.step(mapper, screen);
+                self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(mapper, screen);
                 master_ticks += 1;
             }
         }
@@ -551,18 +587,39 @@ impl PPU {
     /// 257-340 remain on the exact path so sprite evaluation, mapper clocks,
     /// and sprite fetch preparation retain their existing timing.
     #[cfg(feature = "timestamped-scheduler")]
-    fn catch_up_visible_scanline<M: Mapper + ?Sized>(
+    fn catch_up_visible_scanline_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
         &mut self,
         mapper: &mut M,
         screen: &mut Screen,
     ) {
-        self.catch_up_visible_scanline_inner::<{ !cfg!(feature = "headless-render-disabled") }, M>(
+        self.catch_up_visible_scanline_inner_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
             mapper, screen,
         );
     }
 
     #[cfg(feature = "timestamped-scheduler")]
     fn catch_up_visible_scanline_inner<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        if WRITE_OUTPUT {
+            self.catch_up_visible_scanline_inner_with_mode::<true, false, M>(mapper, screen);
+        } else {
+            self.catch_up_visible_scanline_inner_with_mode::<false, true, M>(mapper, screen);
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn catch_up_visible_scanline_inner_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
         &mut self,
         mapper: &mut M,
         screen: &mut Screen,
@@ -577,13 +634,15 @@ impl PPU {
         // candidate on the line, background fetch values cannot affect any
         // observable result.  Keep the fetch phases and address evolution,
         // but avoid the nametable/attribute/CHR reads themselves.
-        let direct_chr = !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
+        let direct_chr = AGGRESSIVE && !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
         let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
         for tile_start in (1..=256).step_by(8) {
             if skip_background_fetches {
                 self.skip_background_tile(tile_start);
             } else {
-                self.catch_up_visible_tile::<WRITE_OUTPUT, M>(tile_start, mapper, screen);
+                self.catch_up_visible_tile_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
+                    tile_start, mapper, screen,
+                );
             }
         }
 
@@ -620,10 +679,29 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        if WRITE_OUTPUT {
+            self.catch_up_visible_tile_with_mode::<true, false, M>(tile_start, mapper, screen);
+        } else {
+            self.catch_up_visible_tile_with_mode::<false, true, M>(tile_start, mapper, screen);
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_tile_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        tile_start: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
         // In the headless benchmark path, a scanline without sprite zero can
         // never set sprite-zero-hit. Keep the exact fetch/transition timeline
         // but avoid all per-pixel background/sprite occupancy work.
-        if !WRITE_OUTPUT && !self.sprite_zero_in_line {
+        if AGGRESSIVE && !WRITE_OUTPUT && !self.sprite_zero_in_line {
             self.catch_up_background_tile(tile_start, mapper);
             return;
         }
@@ -707,12 +785,28 @@ impl PPU {
         debug_assert!(end_cycle >= self.cycle_in_scanline);
         debug_assert!(end_cycle <= 257);
 
-        let write_output = !cfg!(feature = "headless-render-disabled");
-        if write_output {
-            self.catch_up_visible_range_inner::<true, M>(end_cycle, mapper, screen);
-        } else {
-            self.catch_up_visible_range_inner::<false, M>(end_cycle, mapper, screen);
-        }
+        self.catch_up_visible_range_with_mode::<
+            { !cfg!(feature = "headless-render-disabled") },
+            { cfg!(feature = "headless-render-disabled") },
+            M,
+        >(end_cycle, mapper, screen);
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_range_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        end_cycle: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        self.catch_up_visible_range_inner_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
+            end_cycle, mapper, screen,
+        );
     }
 
     #[cfg(feature = "timestamped-scheduler")]
@@ -723,9 +817,32 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
-        let direct_chr = !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
+        if WRITE_OUTPUT {
+            self.catch_up_visible_range_inner_with_mode::<true, false, M>(
+                end_cycle, mapper, screen,
+            );
+        } else {
+            self.catch_up_visible_range_inner_with_mode::<false, true, M>(
+                end_cycle, mapper, screen,
+            );
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_range_inner_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        end_cycle: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        let direct_chr = AGGRESSIVE && !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
         let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
-        let skip_pixels = !WRITE_OUTPUT && !self.sprite_zero_in_line;
+        let skip_pixels = AGGRESSIVE && !WRITE_OUTPUT && !self.sprite_zero_in_line;
         let y = self.scanline as usize;
         let fine_x = self.fine_x;
         let sprite_enabled = self.mask_reg & 0x10 != 0;
@@ -851,6 +968,18 @@ impl PPU {
     }
 
     pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
+        self.step_with_mode::<true, false, M>(mapper, screen);
+    }
+
+    pub(crate) fn step_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        M: Mapper + ?Sized,
+    >(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
         self.apply_deferred_read();
         self.last_read.set(None);
 
@@ -879,7 +1008,7 @@ impl PPU {
         }
 
         match self.scanline {
-            0..=239 => self.step_visible(mapper, screen),
+            0..=239 => self.step_visible_with_output::<WRITE_OUTPUT, M>(mapper, screen),
             240 => self.step_post_render(mapper),
             241..=260 => self.step_vblank(mapper),
             261 => self.step_pre_render(mapper),
@@ -930,11 +1059,16 @@ impl PPU {
     }
 
     fn render_pixel(&mut self, screen: &mut Screen) {
-        self.render_pixel_inner::<{ !cfg!(feature = "headless-render-disabled") }>(screen);
+        self.render_pixel_with_output::<true>(screen);
     }
 
     #[inline(always)]
     fn render_pixel_inner<const WRITE_OUTPUT: bool>(&mut self, screen: &mut Screen) {
+        self.render_pixel_with_output::<WRITE_OUTPUT>(screen);
+    }
+
+    #[inline(always)]
+    fn render_pixel_with_output<const WRITE_OUTPUT: bool>(&mut self, screen: &mut Screen) {
         let x = self.cycle_in_scanline - 1;
         let y = self.scanline;
 
@@ -986,7 +1120,11 @@ impl PPU {
         }
     }
 
-    fn step_visible<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
+    fn step_visible_with_output<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
         if !self.rendering_enabled() {
             return;
         }
@@ -994,7 +1132,7 @@ impl PPU {
         match self.cycle_in_scanline {
             0 => {}
             1..=256 => {
-                self.render_pixel(screen);
+                self.render_pixel_with_output::<WRITE_OUTPUT>(screen);
                 self.fetch_background_tile(mapper);
                 if self.cycle_in_scanline & 7 == 0 {
                     self.update_vram_addr();
@@ -1905,6 +2043,49 @@ mod timestamped_tests {
             .iter()
             .flatten()
             .any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn strict_video_off_catch_up_preserves_state_without_framebuffer_writes() {
+        let mut base = PPU::default();
+        base.control_reg = 0x0d;
+        base.mask_reg = 0x1e;
+        base.v = 0x0417;
+        base.t = 0x0417;
+        base.fine_x = 3;
+        base.nametables.fill(0);
+        base.palette_ram[1] = 0x2a;
+        base.oam.fill(0xff);
+        base.oam[0..4].copy_from_slice(&[0, 0x03, 0x01, 0x08]);
+
+        let mut exact = base.clone();
+        let mut video_off = base;
+        let mut exact_mapper = PatternMapper;
+        let mut video_off_mapper = PatternMapper;
+        let mut exact_screen = Screen::default();
+        let mut video_off_screen = Screen::default();
+
+        for _ in 0..341 {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        video_off.catch_up_to_with_mode::<false, false, _>(
+            0,
+            341,
+            &mut video_off_mapper,
+            &mut video_off_screen,
+        );
+
+        assert_same_state(&exact, &video_off);
+        assert!(exact_screen
+            .pixels
+            .iter()
+            .flatten()
+            .any(|&pixel| pixel != 0));
+        assert!(video_off_screen
+            .pixels
+            .iter()
+            .flatten()
+            .all(|&pixel| pixel == 0));
     }
 
     #[test]

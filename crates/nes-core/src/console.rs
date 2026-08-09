@@ -13,6 +13,15 @@ pub use crate::video::{FRAME_HEIGHT, FRAME_WIDTH};
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
+/// Selects whether the PPU writes final palette values to the framebuffer.
+/// Disabled output retains the complete emulation timeline and CPU-visible
+/// PPU behavior; it only suppresses final video output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoOutput {
+    Enabled,
+    Disabled,
+}
+
 /// A borrowed output view for one completed emulated video frame.
 ///
 /// Pixels are NES palette indices, not RGB values. Audio is an ordered stream
@@ -54,6 +63,18 @@ impl ConsoleState {
     }
 
     fn step_hardware_cycle<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        self.step_hardware_cycle_with_mode::<true, false, F>(screen, process_sample);
+    }
+
+    fn step_hardware_cycle_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        F: FnMut(f32),
+    >(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: &mut F,
+    ) {
         #[cfg(feature = "apu-disabled")]
         let _ = process_sample;
         self.bus.mapper.clock_cpu();
@@ -72,11 +93,26 @@ impl ConsoleState {
                 process_sample(sample);
             }
         }
-        self.bus.ppu.step_cpu_cycle(&mut self.bus.mapper, screen);
+        self.bus
+            .ppu
+            .step_cpu_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(&mut self.bus.mapper, screen);
     }
 
     #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
     fn step_timestamped_nrom<F: FnMut(f32)>(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: &mut F,
+    ) {
+        self.step_timestamped_nrom_with_mode::<true, false, F>(screen, process_sample);
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    fn step_timestamped_nrom_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        F: FnMut(f32),
+    >(
         &mut self,
         screen: &mut Screen,
         process_sample: &mut F,
@@ -92,30 +128,39 @@ impl ConsoleState {
             // The block has either retained a decoded PPU/DMA instruction or
             // deliberately declined to decode an unsafe instruction. Catch
             // the PPU up to the instruction's timestamp before executing it.
-            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                self.ppu_master_ticks,
-                target_master_ticks,
-                &mut self.bus.mapper,
-                screen,
-            );
+            self.scheduler_master_ticks = self
+                .bus
+                .ppu
+                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                    self.ppu_master_ticks,
+                    target_master_ticks,
+                    &mut self.bus.mapper,
+                    screen,
+                );
             self.ppu_master_ticks = self.scheduler_master_ticks;
 
             let barrier_cycles = self.cpu.step_timestamped(&mut self.bus);
             let barrier_target = target_master_ticks + barrier_cycles as u64 * 3;
-            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                self.ppu_master_ticks,
-                barrier_target,
-                &mut self.bus.mapper,
-                screen,
-            );
+            self.scheduler_master_ticks = self
+                .bus
+                .ppu
+                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                    self.ppu_master_ticks,
+                    barrier_target,
+                    &mut self.bus.mapper,
+                    screen,
+                );
             self.ppu_master_ticks = self.scheduler_master_ticks;
         } else if target_master_ticks >= deadline {
-            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                self.ppu_master_ticks,
-                target_master_ticks,
-                &mut self.bus.mapper,
-                screen,
-            );
+            self.scheduler_master_ticks = self
+                .bus
+                .ppu
+                .catch_up_to_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(
+                    self.ppu_master_ticks,
+                    target_master_ticks,
+                    &mut self.bus.mapper,
+                    screen,
+                );
             self.ppu_master_ticks = self.scheduler_master_ticks;
         } else {
             self.scheduler_master_ticks = target_master_ticks;
@@ -125,19 +170,33 @@ impl ConsoleState {
     }
 
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+        self.step_with_mode::<true, false, F>(screen, process_sample);
+    }
+
+    fn step_with_mode<const WRITE_OUTPUT: bool, const AGGRESSIVE: bool, F: FnMut(f32)>(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: &mut F,
+    ) {
         #[cfg(not(feature = "apu-disabled"))]
         if self.bus.apu.dma_active() {
             // DMA stalls are observed between abstract CPU instructions. The
             // current CPU core has already dispatched an instruction before
             // this loop advances hardware cycles, so a request that becomes
             // due mid-instruction pauses at the next instruction boundary.
-            self.step_hardware_cycle(screen, process_sample);
+            self.step_hardware_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
+                screen,
+                process_sample,
+            );
             return;
         }
 
         #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
         if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) {
-            self.step_timestamped_nrom(screen, process_sample);
+            self.step_timestamped_nrom_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
+                screen,
+                process_sample,
+            );
             return;
         }
 
@@ -146,7 +205,10 @@ impl ConsoleState {
         #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
         {
             for _ in 0..cycles {
-                self.step_hardware_cycle(screen, process_sample);
+                self.step_hardware_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
+                    screen,
+                    process_sample,
+                );
             }
             self.scheduler_master_ticks += cycles as u64 * 3;
             self.ppu_master_ticks = self.scheduler_master_ticks;
@@ -154,22 +216,33 @@ impl ConsoleState {
 
         #[cfg(not(all(feature = "timestamped-scheduler", feature = "apu-disabled")))]
         for _ in 0..cycles {
-            self.step_hardware_cycle(screen, process_sample);
+            self.step_hardware_cycle_with_mode::<WRITE_OUTPUT, AGGRESSIVE, F>(
+                screen,
+                process_sample,
+            );
         }
     }
 
-    pub(crate) fn wait_vblank<F: FnMut(f32)>(
+    pub(crate) fn wait_vblank<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: F) {
+        self.wait_vblank_with_mode::<true, false, F>(screen, process_sample);
+    }
+
+    pub(crate) fn wait_vblank_with_mode<
+        const WRITE_OUTPUT: bool,
+        const AGGRESSIVE: bool,
+        F: FnMut(f32),
+    >(
         &mut self,
         screen: &mut Screen,
         mut process_sample: F,
     ) {
         // only return on a positive edge
         while self.bus.ppu.in_vblank {
-            self.step(screen, &mut process_sample);
+            self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(screen, &mut process_sample);
         }
 
         while !self.bus.ppu.in_vblank {
-            self.step(screen, &mut process_sample);
+            self.step_with_mode::<WRITE_OUTPUT, AGGRESSIVE, _>(screen, &mut process_sample);
         }
     }
 
@@ -199,6 +272,8 @@ pub struct Console {
     state: ConsoleState,
     tape: RewindTape,
     screen: Screen,
+    video_output: VideoOutput,
+    aggressive_headless: bool,
     audio_samples: Vec<f32>,
     in_rewind: bool,
     rewind_history_active: bool,
@@ -323,6 +398,12 @@ impl Console {
                 ppu_master_ticks: 0,
             },
             screen: Screen::default(),
+            video_output: if cfg!(feature = "headless-render-disabled") {
+                VideoOutput::Disabled
+            } else {
+                VideoOutput::Enabled
+            },
+            aggressive_headless: cfg!(feature = "headless-render-disabled"),
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
             tape: RewindTape::new(Self::INITIAL_TAPE_STEP),
             in_rewind: false,
@@ -343,6 +424,15 @@ impl Console {
     /// Construct a console with a cartridge using the mapper-0 fast path.
     pub fn new_nrom(cartridge: Cartridge) -> Self {
         Self::from_mapper(MapperInstance::new_nrom(cartridge))
+    }
+
+    pub fn set_video_output(&mut self, output: VideoOutput) {
+        self.video_output = output;
+        self.aggressive_headless = false;
+    }
+
+    pub fn video_output(&self) -> VideoOutput {
+        self.video_output
     }
 
     /// Emulate one frame and return its video/audio output.
@@ -366,7 +456,24 @@ impl Console {
             let state = &mut self.state;
             let screen = &mut self.screen;
             let audio_samples = &mut self.audio_samples;
-            state.wait_vblank(screen, |sample| audio_samples.push(sample));
+            match self.video_output {
+                VideoOutput::Enabled => {
+                    state.wait_vblank_with_mode::<true, false, _>(screen, |sample| {
+                        audio_samples.push(sample)
+                    });
+                }
+                VideoOutput::Disabled => {
+                    if self.aggressive_headless {
+                        state.wait_vblank_with_mode::<false, true, _>(screen, |sample| {
+                            audio_samples.push(sample)
+                        });
+                    } else {
+                        state.wait_vblank_with_mode::<false, false, _>(screen, |sample| {
+                            audio_samples.push(sample)
+                        });
+                    }
+                }
+            }
         }
 
         #[cfg(not(feature = "rewind-disabled"))]
@@ -628,6 +735,49 @@ mod tests {
                 .flatten()
                 .any(|&pixel| pixel != 0));
         }
+    }
+
+    #[test]
+    fn strict_video_off_preserves_cpu_and_audio_state() {
+        let cartridge = patterned_nrom_cartridge();
+        let mut rendered = Console::new_nrom(cartridge.clone());
+        let mut video_off = Console::new_nrom(cartridge);
+        rendered.set_video_output(super::VideoOutput::Enabled);
+        video_off.set_video_output(super::VideoOutput::Disabled);
+        let mut rendered_pixels_nonzero = false;
+
+        for _ in 0..4 {
+            let (rendered_number, rendered_audio, rendered_discontinuity, rendered_has_pixels) = {
+                let frame = rendered.next_frame();
+                (
+                    frame.frame_number,
+                    frame.audio_samples.to_vec(),
+                    frame.audio_discontinuity,
+                    frame.pixels.iter().flatten().any(|&pixel| pixel != 0),
+                )
+            };
+            rendered_pixels_nonzero |= rendered_has_pixels;
+            let (video_off_number, video_off_audio, video_off_discontinuity, pixels_zero) = {
+                let frame = video_off.next_frame();
+                (
+                    frame.frame_number,
+                    frame.audio_samples.to_vec(),
+                    frame.audio_discontinuity,
+                    frame.pixels.iter().flatten().all(|&pixel| pixel == 0),
+                )
+            };
+
+            assert_eq!(rendered_number, video_off_number);
+            assert_eq!(rendered_audio, video_off_audio);
+            assert_eq!(rendered_discontinuity, video_off_discontinuity);
+            assert_eq!(
+                format!("{:?}", rendered.state.cpu),
+                format!("{:?}", video_off.state.cpu)
+            );
+            assert!(pixels_zero);
+        }
+
+        assert!(rendered_pixels_nonzero);
     }
 
     #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]

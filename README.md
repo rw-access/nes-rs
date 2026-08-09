@@ -39,6 +39,22 @@ Set `NES_TEST_ROM_ROOT` to use a different checkout of the ROM repository. The
 test is skipped when `NES_RUN_APU_ROM_TESTS` is not set to `1`, so ordinary
 `cargo test` does not require the submodule or execute ROMs.
 
+## Strict video-off mode
+
+Call `Console::set_video_output(VideoOutput::Disabled)` to suppress only final
+framebuffer writes. CPU, PPU, APU, mapper, DMA, rewind, register, and
+VBlank/NMI behavior continue on the normal timeline. This is separate from the
+opt-in `headless-render-disabled` feature, whose benchmark path may elide
+internal rendering work under a narrower throughput-only contract.
+
+The benchmark binary accepts the strict mode explicitly:
+
+```text
+cargo run --release -p nes-render --bin perf_bench --features \
+  'timestamped-scheduler,apu-disabled,rewind-disabled' -- \
+  20000 tests/nes-test-roms/stress/NEStress.NES --video-off
+```
+
 ## Frontends
 
 The library and headless paths build without native presentation dependencies:
