@@ -534,8 +534,19 @@ impl PPU {
         debug_assert_eq!(self.cycle_in_scanline, 0);
         debug_assert!(self.last_read.get().is_none());
 
+        // In this repository, a mapper exposing direct CHR pages is NROM's
+        // fixed CHR mapping.  With output disabled and no sprite-zero
+        // candidate on the line, background fetch values cannot affect any
+        // observable result.  Keep the fetch phases and address evolution,
+        // but avoid the nametable/attribute/CHR reads themselves.
+        let skip_background_fetches =
+            !WRITE_OUTPUT && !self.sprite_zero_in_line && mapper.read_chr_page(0).is_some();
         for tile_start in (1..=256).step_by(8) {
-            self.catch_up_visible_tile::<WRITE_OUTPUT, M>(tile_start, mapper, screen);
+            if skip_background_fetches {
+                self.skip_background_tile(tile_start);
+            } else {
+                self.catch_up_visible_tile::<WRITE_OUTPUT, M>(tile_start, mapper, screen);
+            }
         }
 
         self.cycle_in_scanline = 257;
@@ -654,6 +665,18 @@ impl PPU {
         self.cycle_in_scanline += 1;
         self.fetch_background_pattern_high(mapper);
 
+        self.cycle_in_scanline += 1;
+        self.processed_tile = [self.processed_tile[1], self.pending_tile];
+        self.update_vram_addr();
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn skip_background_tile(&mut self, tile_start: u16) {
+        self.cycle_in_scanline = tile_start;
+        self.cycle_in_scanline += 2;
+        self.cycle_in_scanline += 2;
+        self.cycle_in_scanline += 2;
         self.cycle_in_scanline += 1;
         self.processed_tile = [self.processed_tile[1], self.pending_tile];
         self.update_vram_addr();
