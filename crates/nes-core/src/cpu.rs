@@ -65,7 +65,7 @@ fn crosses_page_boundary(a: u16, b: u16) -> bool {
 #[cfg(feature = "timestamped-scheduler")]
 #[inline]
 fn is_ppu_register_address(address: u16) -> bool {
-    (0x2000..=0x3fff).contains(&address)
+    (0x2000..=0x3fff).contains(&address) || address == 0x4014
 }
 
 #[cfg(feature = "timestamped-scheduler")]
@@ -1626,6 +1626,12 @@ mod tests {
         assert_eq!(bus.ppu.last_read.get(), None);
         assert_eq!(cpu.step_timestamped(&mut bus), 4);
         assert_eq!(bus.ppu.last_read.get(), Some(0x2000));
+
+        let mut cpu = super::CPU::default();
+        let bus = preflight_bus(&[0x8d, 0x14, 0x40]); // STA $4014 (OAM DMA)
+        cpu.pc = 0x8000;
+        assert!(cpu.prepare_timestamped(&bus));
+        assert_eq!(bus.ppu.last_read.get(), None);
 
         let mut cpu = super::CPU::default();
         let mut bus = preflight_bus(&[0x6c, 0x00, 0x20]); // JMP ($2000)
