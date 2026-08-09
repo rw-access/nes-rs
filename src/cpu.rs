@@ -195,14 +195,42 @@ impl CPU {
                 self.write_status_bit(StatusFlags::V, ((a ^ sum) & (b ^ sum) & 0x80) != 0);
                 self.set_cnz(sum);
             }
-            (Opcode::AHX, _) => todo!(),
-            (Opcode::ALR, _) => todo!(),
-            (Opcode::ANC, _) => todo!(),
+            (Opcode::AHX, Some(addr)) => {
+                // AHX {addr} = A & X & (high byte of effective address + 1).
+                let high = (addr >> 8) as u8;
+                self.write_byte(bus, addr, self.a & self.x & high.wrapping_add(1));
+            }
+            (Opcode::ALR, Some(addr)) => {
+                // ALR #imm = AND #imm followed by LSR A.
+                self.a &= self.read_byte(bus, addr);
+                let wide = self.a as u16;
+                self.a = (wide >> 1) as u8;
+                self.write_status_bit(StatusFlags::C, wide & 1 != 0);
+                self.set_nz(self.a);
+            }
+            (Opcode::ANC, Some(addr)) => {
+                // ANC #imm = AND #imm and copy the result's sign bit to C.
+                self.a &= self.read_byte(bus, addr);
+                self.set_nz(self.a);
+                self.write_status_bit(StatusFlags::C, self.check_status_bit(StatusFlags::N));
+            }
             (Opcode::AND, Some(addr)) => {
                 self.a &= self.read_byte(bus, addr);
                 self.set_nz(self.a);
             }
-            (Opcode::ARR, _) => todo!(),
+            (Opcode::ARR, Some(addr)) => {
+                // ARR #imm = AND #imm followed by ROR A. Decimal mode is not
+                // used by the NES, so the binary-mode flags are sufficient.
+                self.a &= self.read_byte(bus, addr);
+                let carry = self.check_status_bit(StatusFlags::C) as u8;
+                self.a = (self.a >> 1) | (carry << 7);
+                self.set_nz(self.a);
+                self.write_status_bit(StatusFlags::C, self.a & 0x40 != 0);
+                self.write_status_bit(
+                    StatusFlags::V,
+                    ((self.a & 0x40) != 0) ^ ((self.a & 0x20) != 0),
+                );
+            }
             (Opcode::ASL, None) => {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#ASL
                 let wide = (self.a as u16) << 1;
@@ -215,7 +243,15 @@ impl CPU {
                 self.write_byte(bus, addr, wide as u8);
                 self.set_cnz(wide);
             }
-            (Opcode::AXS, _) => todo!(),
+            (Opcode::AXS, Some(addr)) => {
+                // AXS/SBX #imm = (A & X) - imm.
+                let operand = self.read_byte(bus, addr);
+                let base = self.a & self.x;
+                let result = base.wrapping_sub(operand);
+                self.write_status_bit(StatusFlags::C, base >= operand);
+                self.x = result;
+                self.set_nz(self.x);
+            }
             (Opcode::BCC, Some(addr)) => {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#BCC
                 self.branch_on_flag(StatusFlags::C, false, addr)
@@ -357,7 +393,13 @@ impl CPU {
                 self.push_address(bus, self.pc.wrapping_sub(1));
                 self.pc = addr;
             }
-            (Opcode::LAS, _) => todo!(),
+            (Opcode::LAS, Some(addr)) => {
+                let value = self.read_byte(bus, addr) & self.sp;
+                self.a = value;
+                self.x = value;
+                self.sp = value;
+                self.set_nz(value);
+            }
             (Opcode::LAX, Some(addr)) => {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#LAX
                 let data = self.read_byte(bus, addr);
@@ -506,8 +548,14 @@ impl CPU {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#SEI
                 self.write_status_bit(StatusFlags::I, true);
             }
-            (Opcode::SHX, _) => todo!(),
-            (Opcode::SHY, _) => todo!(),
+            (Opcode::SHX, Some(addr)) => {
+                let high = (addr >> 8) as u8;
+                self.write_byte(bus, addr, self.x & high.wrapping_add(1));
+            }
+            (Opcode::SHY, Some(addr)) => {
+                let high = (addr >> 8) as u8;
+                self.write_byte(bus, addr, self.y & high.wrapping_add(1));
+            }
             (Opcode::SLO, Some(addr)) => {
                 // http://www.oxyron.de/html/opcodes02.html
                 // SLO {adr} = ASL {adr} + ORA {adr}
@@ -536,7 +584,11 @@ impl CPU {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#STY
                 self.write_byte(bus, addr, self.y);
             }
-            (Opcode::TAS, _) => todo!(),
+            (Opcode::TAS, Some(addr)) => {
+                self.sp = self.a & self.x;
+                let high = (addr >> 8) as u8;
+                self.write_byte(bus, addr, self.sp & high.wrapping_add(1));
+            }
             (Opcode::TAX, None) => {
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#TAX
                 self.x = self.a;
@@ -565,8 +617,16 @@ impl CPU {
                 self.a = self.y;
                 self.set_nz(self.a);
             }
-            (Opcode::XAA, _) => todo!(),
-            _ => unreachable!("unknown instruction: {:?}", opcode),
+            (Opcode::XAA, Some(addr)) => {
+                // XAA is unstable on real hardware. X & imm is the
+                // deterministic behavior used by common NES test ROMs.
+                self.a = self.x & self.read_byte(bus, addr);
+                self.set_nz(self.a);
+            }
+            // Every decoded opcode should have a matching addressing mode.
+            // Treat a malformed/unsupported combination as a no-op instead
+            // of trapping the entire WASM animation loop.
+            _ => {}
         }
     }
 

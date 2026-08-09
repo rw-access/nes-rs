@@ -11,3 +11,4 @@ crate-type = ["cdylib", "rlib"]
 js-sys = "0.3"
 nes = { path = "../.." }
 wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

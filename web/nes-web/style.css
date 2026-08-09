@@ -28,6 +28,7 @@ h1 { margin: 0; font-size: 1.25rem; }
 p { margin: .25rem 0 0; color: #a8acb9; font-size: .9rem; }
 
 button, .file-button {
+  position: relative;
   border: 1px solid #474c5b;
   border-radius: .45rem;
   background: #202532;
@@ -42,6 +43,19 @@ button, .file-button {
 button:hover, .file-button:hover, button:focus-visible, .file-button:focus-within { background: #30394c; }
 button:disabled { cursor: not-allowed; opacity: .45; }
 input { display: none; }
+
+.file-button input {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#rewind-button { touch-action: none; }
 
 .screen-wrap {
   display: grid;

@@ -1,5 +1,52 @@
 import init, { NesWeb } from "./pkg/nes_web.js";
 
+const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
+const debugEndpoint = debugEnabled ? new URL("__debug", document.baseURI).href : null;
+
+function debugValue(value) {
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
+  }
+  if (typeof value === "string") return value;
+  try { return JSON.parse(JSON.stringify(value)); }
+  catch (_) { return String(value); }
+}
+
+function reportDebug(kind, ...values) {
+  const record = {
+    timestamp: new Date().toISOString(),
+    kind,
+    url: window.location.href,
+    values: values.map(debugValue),
+  };
+  if (debugEnabled) {
+    fetch(debugEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(record),
+      keepalive: true,
+    }).catch(() => {});
+  }
+  return record;
+}
+
+window.addEventListener("error", (event) => {
+  reportDebug("window.error", event.error || event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportDebug("unhandledrejection", event.reason);
+});
+
+if (debugEnabled) {
+  for (const level of ["log", "info", "warn", "error"]) {
+    const original = console[level].bind(console);
+    console[level] = (...values) => {
+      original(...values);
+      reportDebug(`console.${level}`, ...values);
+    };
+  }
+}
+
 const WIDTH = 256;
 const HEIGHT = 240;
 const FRAME_MS = 1000 / 60;
@@ -30,6 +77,7 @@ let savedSnapshot = null;
 let heldButtons = 0;
 let previousTime = 0;
 let accumulator = 0;
+let rewinding = false;
 
 class AudioScheduler {
   constructor() {
@@ -114,33 +162,81 @@ function release(name) {
   updateButtons();
 }
 
-function drawFrame() {
+function startRewind() {
+  if (!emulator || rewinding) return;
+  rewinding = true;
+  audio.flush();
+  accumulator = 0;
+  setStatus("Rewinding…");
+  reportDebug("rewind-start");
+}
+
+function stopRewind() {
+  if (!rewinding) return;
+  rewinding = false;
+  previousTime = performance.now();
+  accumulator = 0;
+  reportDebug("rewind-stop");
+}
+
+function rewindFrame() {
+  if (!emulator) return null;
+  emulator.rewind();
+  return drawFrame(false);
+}
+
+function drawFrame(scheduleAudio = true) {
   if (!emulator) return null;
   const metadata = emulator.step_frame();
   const rgba = emulator.rgba_buffer();
   image.data.set(rgba);
   context.putImageData(image, 0, 0);
-  audio.schedule(emulator.audio_buffer().subarray(0, metadata.audio_samples), metadata.audio_sample_rate, metadata.audio_discontinuity);
-  setStatus(`Frame ${metadata.frame_number} · ${metadata.audio_samples} audio samples`);
+  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number} · ${metadata.audio_samples} audio samples`);
+  if (scheduleAudio) {
+    try {
+      audio.schedule(emulator.audio_buffer().subarray(0, metadata.audio_samples), metadata.audio_sample_rate, metadata.audio_discontinuity);
+    } catch (error) {
+      reportDebug("audio-scheduling", error);
+      console.error("Audio scheduling failed", error);
+      setStatus(`Frame ${metadata.frame_number} · audio unavailable`);
+    }
+  }
   return metadata;
 }
 
 function tick(now) {
-  if (!previousTime) previousTime = now;
-  accumulator += Math.min(now - previousTime, 250);
-  previousTime = now;
+  try {
+    if (!previousTime) previousTime = now;
+    accumulator += Math.min(now - previousTime, 250);
+    previousTime = now;
 
-  let frames = 0;
-  while (emulator && accumulator >= FRAME_MS && frames < 4) {
-    drawFrame();
-    accumulator -= FRAME_MS;
-    frames += 1;
+    if (emulator && rewinding) {
+      rewindFrame();
+    } else {
+      let frames = 0;
+      while (emulator && accumulator >= FRAME_MS && frames < 4) {
+        drawFrame();
+        accumulator -= FRAME_MS;
+        frames += 1;
+      }
+    }
+  } catch (error) {
+    reportDebug("emulation-frame", error);
+    console.error("Emulation frame failed", error);
+    emulator = null;
+    savedSnapshot = null;
+    rewinding = false;
+    snapshotButton.disabled = true;
+    restoreButton.disabled = true;
+    rewindButton.disabled = true;
+    setStatus(`Emulation stopped: ${error?.message ?? error}`);
   }
   requestAnimationFrame(tick);
 }
 
 async function loadRom(file) {
   try {
+    setStatus(`Reading ${file.name}…`);
     audio.flush();
     const bytes = new Uint8Array(await file.arrayBuffer());
     emulator = NesWeb.load_rom(bytes);
@@ -149,22 +245,31 @@ async function loadRom(file) {
     snapshotButton.disabled = false;
     restoreButton.disabled = true;
     rewindButton.disabled = false;
+    rewinding = false;
     previousTime = performance.now();
     accumulator = FRAME_MS;
     setStatus(`${file.name} loaded · press Enable audio to hear it`);
   } catch (error) {
+    reportDebug("rom-load", error);
     emulator = null;
     setStatus(`Could not load ROM: ${error}`);
   }
 }
 
 romInput.addEventListener("change", () => {
-  if (romInput.files?.[0]) loadRom(romInput.files[0]);
+  if (romInput.files?.[0]) void loadRom(romInput.files[0]);
 });
+
+// Allow selecting the same ROM again after an invalid load or a picker
+// cancellation. Android file pickers otherwise may not emit `change`.
+romInput.addEventListener("click", () => { romInput.value = ""; });
 
 audioButton.addEventListener("click", async () => {
   try { await audio.enable(); }
-  catch (error) { setStatus(`Audio unavailable: ${error}`); }
+  catch (error) {
+    reportDebug("audio", error);
+    setStatus(`Audio unavailable: ${error}`);
+  }
 });
 
 snapshotButton.addEventListener("click", () => {
@@ -182,31 +287,50 @@ restoreButton.addEventListener("click", () => {
   setStatus("State restored");
 });
 
-rewindButton.addEventListener("click", () => {
-  if (!emulator) return;
-  emulator.rewind();
-  audio.flush();
-  accumulator = FRAME_MS;
-  setStatus("Rewound one frame");
+rewindButton.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  rewindButton.setPointerCapture(event.pointerId);
+  startRewind();
 });
+for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  rewindButton.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    stopRewind();
+  });
+}
 
 const keyboard = new Map([
   ["z", "a"], ["x", "b"], ["Shift", "select"], ["Enter", "start"],
   ["ArrowUp", "up"], ["ArrowDown", "down"], ["ArrowLeft", "left"], ["ArrowRight", "right"],
 ]);
 window.addEventListener("keydown", (event) => {
+  reportDebug("keydown", event.key);
+  if (event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    startRewind();
+    return;
+  }
   const name = keyboard.get(event.key);
   if (!name) return;
   event.preventDefault();
   press(name);
 });
 window.addEventListener("keyup", (event) => {
+  if (event.key.toLowerCase() === "r") {
+    event.preventDefault();
+    stopRewind();
+    return;
+  }
   const name = keyboard.get(event.key);
   if (!name) return;
   event.preventDefault();
   release(name);
 });
-window.addEventListener("blur", () => { heldButtons = 0; updateButtons(); });
+window.addEventListener("blur", () => {
+  heldButtons = 0;
+  stopRewind();
+  updateButtons();
+});
 
 for (const button of document.querySelectorAll("[data-button]")) {
   const name = button.dataset.button;

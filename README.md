@@ -1,6 +1,8 @@
 # nes-rs
 NES emulator in Rust
 
+[Try the WASM demo](https://rw-access.dev/nes-rs/)
+
 ## Headless test ROM runner
 
 The optional `headless_test` binary runs mapper-0/NROM iNES test ROMs through
@@ -88,6 +90,15 @@ python3 -m http.server 8000 --directory web/nes-web
 Open <http://localhost:8000/> in a browser. Use the frontend's ROM file picker
 to load an iNES `.nes` ROM; the browser reads the selected file and passes its
 bytes to the emulator. ROM files are not bundled into the WASM package.
+
+#### GitHub Pages
+
+The repository includes `.github/workflows/pages.yml`, which builds and
+deploys the browser frontend automatically whenever `main` changes. To enable
+it, open the repository's **Settings → Pages** page and set **Source** to
+**GitHub Actions**. After the first successful run, the site will be available
+at `https://<owner>.github.io/nes-rs/` (or the custom domain configured in
+GitHub Pages).
 
 The default keyboard mapping is:
 

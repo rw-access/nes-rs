@@ -770,9 +770,10 @@ impl PPU {
 
     pub(crate) fn read_register(&self, mapper: &dyn Mapper, addr: u16) -> u8 {
         // change statuses signals on the next step()
-        self.last_read.set(Some(0x2000 | (addr & 0xf)));
+        // The eight PPU registers repeat throughout $2000-$3FFF.
+        self.last_read.set(Some(0x2000 | (addr & 0x7)));
 
-        match 0x2000 | (addr & 0xf) {
+        match 0x2000 | (addr & 0x7) {
             0x2002 => {
                 // PPUSTATUS: $2002
                 self.status_reg
@@ -805,7 +806,7 @@ impl PPU {
     }
 
     pub(crate) fn write_register(&mut self, mapper: &mut dyn Mapper, addr: u16, data: u8) {
-        match 0x2000 | (addr & 0xf) {
+        match 0x2000 | (addr & 0x7) {
             0x2000 => {
                 // PPUCTRL: $2000
                 let parsed_prev_ctrl = PPUControl::from(self.control_reg);

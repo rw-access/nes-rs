@@ -4,6 +4,11 @@ use js_sys::{Float32Array, Uint8Array};
 use nes::{cartridge, ines, Console, VideoBuffer, AUDIO_SAMPLE_RATE};
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+}
+
 /// A browser-owned emulator instance. The core remains responsible for
 /// emulation; this wrapper owns the presentation buffers and the JS boundary.
 #[wasm_bindgen]
@@ -115,7 +120,9 @@ impl NesWeb {
         if self.audio.len() > self.audio_js.length() as usize {
             self.audio_js = Float32Array::new_with_length(self.audio.len() as u32);
         }
-        self.audio_js.copy_from(&self.audio);
+        self.audio_js
+            .subarray(0, self.audio.len() as u32)
+            .copy_from(&self.audio);
         if self.audio.len() < self.audio_js.length() as usize {
             self.audio_js
                 .subarray(self.audio.len() as u32, self.audio_js.length())
