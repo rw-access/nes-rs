@@ -210,6 +210,7 @@ pub(crate) struct PPU {
     palette_ram: [u8; 32],
     nametables: [u8; 4096],
     nametable_mirroring: MirroringMode,
+    nametable_map: [u16; 4096],
     pending_nmi: bool,
     pending_tile: TileData,
     processed_tile: [TileData; 2],
@@ -238,6 +239,7 @@ impl Default for PPU {
             palette_ram: [0; 32],
             nametables: [0; 4096],
             nametable_mirroring: MirroringMode::Horizontal,
+            nametable_map: Self::build_nametable_map(MirroringMode::Horizontal),
             in_vblank: Default::default(),
             fine_x: Default::default(),
             pending_nmi: Default::default(),
@@ -274,6 +276,7 @@ impl PPU {
     #[inline]
     pub(crate) fn refresh_nametable_mirroring<M: Mapper + ?Sized>(&mut self, mapper: &M) {
         self.nametable_mirroring = mapper.mirror();
+        self.nametable_map = Self::build_nametable_map(self.nametable_mirroring);
     }
 
     fn multiplex_colors(
@@ -756,6 +759,14 @@ impl PPU {
         (nametable_bank as u16) << 10 | nametable_offset
     }
 
+    fn build_nametable_map(mode: MirroringMode) -> [u16; 4096] {
+        let mut map = [0; 4096];
+        for (addr, mapped) in map.iter_mut().enumerate() {
+            *mapped = Self::mirror_nametable(addr as u16, mode);
+        }
+        map
+    }
+
     fn mirror_palette(offset: u8) -> u8 {
         // Expected range [0x00, 0x1F]
         // Addresses $3F10/$3F14/$3F18/$3F1C are mirrors of $3F00/$3F04/$3F08/$3F0C
@@ -771,7 +782,7 @@ impl PPU {
                 .read_chr_page((addr >> 8) as u8)
                 .map_or_else(|| mapper.read(addr), |page| page[(addr & 0xff) as usize]),
             0x2000..=0x3eff => {
-                self.nametables[PPU::mirror_nametable(addr, self.nametable_mirroring) as usize]
+                self.nametables[self.nametable_map[(addr & 0x0fff) as usize] as usize]
             }
             0x3f00.. => self.palette_ram[PPU::mirror_palette((addr & 0x1f) as u8) as usize],
         }
@@ -801,8 +812,8 @@ impl PPU {
                 self.refresh_nametable_mirroring(mapper);
             }
             0x2000..=0x3eff => {
-                self.nametables[PPU::mirror_nametable(addr, self.nametable_mirroring) as usize] =
-                    data;
+                let mapped = self.nametable_map[(addr & 0x0fff) as usize] as usize;
+                self.nametables[mapped] = data;
             }
             0x3f00.. => self.palette_ram[PPU::mirror_palette((addr & 0x1f) as u8) as usize] = data,
         }
