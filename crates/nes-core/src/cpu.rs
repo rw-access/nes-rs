@@ -76,7 +76,23 @@ fn is_non_cartridge_address(address: u16) -> bool {
 
 #[cfg(feature = "timestamped-scheduler")]
 #[inline]
-fn instruction_width(addressing_mode: AddressingMode) -> u16 {
+fn is_indexed_ppu_access(base: u16, final_address: u16) -> bool {
+    // Indexed reads, and conservatively indexed writes, can issue a
+    // page-crossing dummy access using the old high byte and new low byte.
+    let dummy_address = (base & 0xff00) | (final_address & 0x00ff);
+    is_ppu_register_address(final_address) || is_ppu_register_address(dummy_address)
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn instruction_width(opcode: Opcode, addressing_mode: AddressingMode) -> u16 {
+    if matches!(opcode, Opcode::BRK) {
+        // BRK fetches and discards its signature byte before reading the
+        // interrupt vector, even though the opcode table models it as
+        // implied addressing.
+        return 2;
+    }
+
     match addressing_mode {
         AddressingMode::Implied | AddressingMode::Accumulator => 1,
         AddressingMode::Immediate
@@ -121,7 +137,7 @@ impl CPU {
 
         let opcode = self.read_code_byte(bus, opcode_address);
         let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
-        let width = instruction_width(extended_opcode.addressing_mode);
+        let width = instruction_width(extended_opcode.opcode, extended_opcode.addressing_mode);
 
         for offset in 1..width {
             if !is_cartridge_address(opcode_address.wrapping_add(offset as u16)) {
@@ -145,12 +161,12 @@ impl CPU {
             AddressingMode::AbsoluteIndexedX => {
                 let base = self.read_code_address(bus, operand_address);
                 let address = base.wrapping_add(self.x as u16);
-                is_ppu_register_address(address)
+                is_indexed_ppu_access(base, address)
             }
             AddressingMode::AbsoluteIndexedY => {
                 let base = self.read_code_address(bus, operand_address);
                 let address = base.wrapping_add(self.y as u16);
-                is_ppu_register_address(address)
+                is_indexed_ppu_access(base, address)
             }
             AddressingMode::IndexedIndirect => {
                 let offset = self.read_code_byte(bus, operand_address);
@@ -174,7 +190,7 @@ impl CPU {
                     return true;
                 };
                 let address = base.wrapping_add(self.y as u16);
-                is_ppu_register_address(address)
+                is_indexed_ppu_access(base, address)
             }
             AddressingMode::Relative => {
                 let offset = self.read_code_byte(bus, operand_address);
@@ -1371,6 +1387,23 @@ mod tests {
         let bus = preflight_bus(&[0xbd, 0xff, 0x1f]); // LDA $1fff,X
         cpu.pc = 0x8000;
         cpu.x = 1;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xbd, 0xff, 0x3f]); // LDA $3fff,X
+        cpu.pc = 0x8000;
+        cpu.x = 1; // final $4000, page-crossing dummy read mirrors to $3f00
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xb9, 0xff, 0x1f]); // LDA $1fff,Y
+        cpu.pc = 0x8000;
+        cpu.y = 1;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xa1, 0x10]); // LDA ($10,X)
+        cpu.pc = 0x8000;
+        cpu.x = 0;
+        cpu.ram[0x10] = 0x00;
+        cpu.ram[0x11] = 0x20;
         assert!(cpu.next_instruction_may_access_ppu(&bus));
 
         let bus = preflight_bus(&[0xb1, 0x10]); // LDA ($10),Y

@@ -43,6 +43,8 @@ pub struct ConsoleState {
     frame_number: u64,
     #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
     scheduler_master_ticks: u64,
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    ppu_master_ticks: u64,
 }
 
 impl ConsoleState {
@@ -73,6 +75,46 @@ impl ConsoleState {
         self.bus.ppu.step_cpu_cycle(&mut self.bus.mapper, screen);
     }
 
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    fn step_timestamped_nrom<F: FnMut(f32)>(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: &mut F,
+    ) {
+        loop {
+            let current_master_ticks = self.scheduler_master_ticks;
+            let deadline = self.ppu_master_ticks + self.bus.ppu.next_vblank_in_ticks();
+            let may_access_ppu = self.cpu.next_instruction_may_access_ppu(&self.bus);
+
+            if may_access_ppu {
+                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                    self.ppu_master_ticks,
+                    current_master_ticks,
+                    &mut self.bus.mapper,
+                    screen,
+                );
+                self.ppu_master_ticks = self.scheduler_master_ticks;
+            }
+
+            let cycles = self.cpu.step(&mut self.bus, None);
+            let target_master_ticks = current_master_ticks + cycles as u64 * 3;
+
+            if may_access_ppu || target_master_ticks >= deadline {
+                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                    self.ppu_master_ticks,
+                    target_master_ticks,
+                    &mut self.bus.mapper,
+                    screen,
+                );
+                self.ppu_master_ticks = self.scheduler_master_ticks;
+                let _ = process_sample;
+                return;
+            }
+
+            self.scheduler_master_ticks = target_master_ticks;
+        }
+    }
+
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
         #[cfg(not(feature = "apu-disabled"))]
         if self.bus.apu.dma_active() {
@@ -84,26 +126,21 @@ impl ConsoleState {
             return;
         }
 
+        #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+        if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) {
+            self.step_timestamped_nrom(screen, process_sample);
+            return;
+        }
+
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
 
         #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
         {
-            if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) {
-                let current_master_ticks = self.scheduler_master_ticks;
-                let target_master_ticks = self.scheduler_master_ticks + cycles as u64 * 3;
-                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                    current_master_ticks,
-                    target_master_ticks,
-                    &mut self.bus.mapper,
-                    screen,
-                );
-                let _ = process_sample;
-            } else {
-                for _ in 0..cycles {
-                    self.step_hardware_cycle(screen, process_sample);
-                }
-                self.scheduler_master_ticks += cycles as u64 * 3;
+            for _ in 0..cycles {
+                self.step_hardware_cycle(screen, process_sample);
             }
+            self.scheduler_master_ticks += cycles as u64 * 3;
+            self.ppu_master_ticks = self.scheduler_master_ticks;
         }
 
         #[cfg(not(all(feature = "timestamped-scheduler", feature = "apu-disabled")))]
@@ -273,6 +310,8 @@ impl Console {
                 frame_number: 0,
                 #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
                 scheduler_master_ticks: 0,
+                #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+                ppu_master_ticks: 0,
             },
             screen: Screen::default(),
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
@@ -469,7 +508,7 @@ mod tests {
         let mut static_console = Console::new_nrom(cartridge.clone());
         let mut boxed_console = Console::new(crate::cartridge::new(cartridge, 0).unwrap());
 
-        for _ in 0..2 {
+        for _ in 0..10 {
             let static_frame = static_console.next_frame();
             let boxed_frame = boxed_console.next_frame();
 

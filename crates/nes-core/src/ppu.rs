@@ -421,6 +421,23 @@ impl PPU {
         self.cycle_in_scanline = (position % 341) as u16;
     }
 
+    /// Return the number of PPU ticks until the next vblank-entry action is
+    /// executed. The extra tick accounts for `step()` applying the action at
+    /// the current dot before advancing to the following dot.
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn next_vblank_in_ticks(&self) -> u64 {
+        const VBLANK_EVENT: u64 = 241 * 341 + 1;
+        let current = self.scanline as u64 * 341 + self.cycle_in_scanline as u64;
+
+        if current <= VBLANK_EVENT {
+            return VBLANK_EVENT - current + 1;
+        }
+
+        let ticks_to_next_frame = 262 * 341 - current;
+        let next_frame_start = (self.rendering_enabled() && ((self.frame + 1) & 1 == 1)) as u64;
+        ticks_to_next_frame + VBLANK_EVENT - next_frame_start + 1
+    }
+
     /// Catch the PPU up to an absolute master-clock timestamp. The exact
     /// stepping path remains the authority at all eventful boundaries; only
     /// intervals with no rendering, mapper, or interrupt work are arithmetic.
