@@ -41,7 +41,7 @@ pub struct ConsoleState {
     pub(crate) bus: MemoryBus,
     pub(crate) cpu: CPU,
     frame_number: u64,
-    #[cfg(feature = "timestamped-scheduler")]
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
     scheduler_master_ticks: u64,
 }
 
@@ -88,13 +88,22 @@ impl ConsoleState {
 
         #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
         {
-            let target_master_ticks = self.scheduler_master_ticks + cycles as u64 * 3;
-            self.bus
-                .ppu
-                .catch_up_to(target_master_ticks, &mut self.bus.mapper, screen);
-            debug_assert_eq!(self.bus.ppu.master_ticks(), target_master_ticks);
-            self.scheduler_master_ticks = target_master_ticks;
-            let _ = process_sample;
+            if matches!(&self.bus.mapper, MapperInstance::Nrom(_)) {
+                let current_master_ticks = self.scheduler_master_ticks;
+                let target_master_ticks = self.scheduler_master_ticks + cycles as u64 * 3;
+                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                    current_master_ticks,
+                    target_master_ticks,
+                    &mut self.bus.mapper,
+                    screen,
+                );
+                let _ = process_sample;
+            } else {
+                for _ in 0..cycles {
+                    self.step_hardware_cycle(screen, process_sample);
+                }
+                self.scheduler_master_ticks += cycles as u64 * 3;
+            }
         }
 
         #[cfg(not(all(feature = "timestamped-scheduler", feature = "apu-disabled")))]
@@ -262,7 +271,7 @@ impl Console {
                 bus: MemoryBus::new(mapper),
                 cpu: CPU::default(),
                 frame_number: 0,
-                #[cfg(feature = "timestamped-scheduler")]
+                #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
                 scheduler_master_ticks: 0,
             },
             screen: Screen::default(),
@@ -365,6 +374,33 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[derive(Clone)]
+    struct CpuClockMapper {
+        clocks: Rc<Cell<u32>>,
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    impl Mapper for CpuClockMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, _address: u16) -> u8 {
+            0
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+
+        fn clock_cpu(&mut self) {
+            self.clocks.set(self.clocks.get() + 1);
+        }
+    }
+
     #[derive(Clone)]
     struct MirrorChangingMapper {
         mode: Rc<Cell<MirroringMode>>,
@@ -450,6 +486,21 @@ mod tests {
                 .flatten()
                 .any(|&pixel| pixel != 0));
         }
+    }
+
+    #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+    #[test]
+    fn timestamped_scheduler_preserves_dynamic_mapper_cpu_clocks() {
+        let clocks = Rc::new(Cell::new(0));
+        let mut console = Console::new(Box::new(CpuClockMapper {
+            clocks: clocks.clone(),
+        }));
+        let mut screen = super::Screen::default();
+        let mut process_sample = |_| {};
+
+        console.state.step(&mut screen, &mut process_sample);
+
+        assert_eq!(clocks.get(), 7);
     }
 
     #[test]

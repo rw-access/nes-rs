@@ -56,7 +56,172 @@ fn crosses_page_boundary(a: u16, b: u16) -> bool {
     a_page != b_page
 }
 
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn is_ppu_register_address(address: u16) -> bool {
+    (0x2000..=0x3fff).contains(&address)
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn is_cartridge_address(address: u16) -> bool {
+    address >= 0x8000
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn is_non_cartridge_address(address: u16) -> bool {
+    !is_cartridge_address(address)
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn instruction_width(addressing_mode: AddressingMode) -> u16 {
+    match addressing_mode {
+        AddressingMode::Implied | AddressingMode::Accumulator => 1,
+        AddressingMode::Immediate
+        | AddressingMode::IndexedIndirect
+        | AddressingMode::IndirectIndexed
+        | AddressingMode::Relative
+        | AddressingMode::ZeroPage
+        | AddressingMode::ZeroPageIndexedX
+        | AddressingMode::ZeroPageIndexedY => 2,
+        AddressingMode::Absolute
+        | AddressingMode::AbsoluteIndexedX
+        | AddressingMode::AbsoluteIndexedY
+        | AddressingMode::Indirect => 3,
+    }
+}
+
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn is_control_flow_opcode(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::JMP | Opcode::JSR)
+}
+
 impl CPU {
+    /// Conservatively determine whether the next CPU instruction may touch a
+    /// PPU register or leave the cartridge-backed instruction stream.
+    ///
+    /// The timestamped runner can use this before taking a long CPU run.  A
+    /// `true` result is deliberately allowed to be pessimistic: reads from
+    /// non-cartridge regions are not inspected because doing so could itself
+    /// have I/O side effects.  In particular, code or operands below `$8000`,
+    /// indirect pointers in I/O space, and `RTS`/`RTI` are treated as unsafe.
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn next_instruction_may_access_ppu(&self, bus: &MemoryBus) -> bool {
+        // Do not probe opcode or operand bytes through the bus until every
+        // byte is known to be cartridge-backed.  This keeps preflight from
+        // accidentally reading a PPU register while trying to decide whether
+        // the instruction reads a PPU register.
+        let opcode_address = self.pc;
+        if !is_cartridge_address(opcode_address) {
+            return true;
+        }
+
+        let opcode = self.read_code_byte(bus, opcode_address);
+        let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
+        let width = instruction_width(extended_opcode.addressing_mode);
+
+        for offset in 1..width {
+            if !is_cartridge_address(opcode_address.wrapping_add(offset as u16)) {
+                return true;
+            }
+        }
+
+        let operand_address = opcode_address.wrapping_add(1);
+        let may_access = match extended_opcode.addressing_mode {
+            AddressingMode::Implied | AddressingMode::Accumulator | AddressingMode::Immediate => {
+                false
+            }
+            AddressingMode::Absolute => {
+                let address = self.read_code_address(bus, operand_address);
+                if is_control_flow_opcode(extended_opcode.opcode) {
+                    is_non_cartridge_address(address)
+                } else {
+                    is_ppu_register_address(address)
+                }
+            }
+            AddressingMode::AbsoluteIndexedX => {
+                let base = self.read_code_address(bus, operand_address);
+                let address = base.wrapping_add(self.x as u16);
+                is_ppu_register_address(address)
+            }
+            AddressingMode::AbsoluteIndexedY => {
+                let base = self.read_code_address(bus, operand_address);
+                let address = base.wrapping_add(self.y as u16);
+                is_ppu_register_address(address)
+            }
+            AddressingMode::IndexedIndirect => {
+                let offset = self.read_code_byte(bus, operand_address);
+                let pointer = offset.wrapping_add(self.x) as u16;
+                self.preflight_zero_page_indirect(bus, pointer)
+                    .is_some_and(is_ppu_register_address)
+            }
+            AddressingMode::Indirect => {
+                let pointer = self.read_code_address(bus, operand_address);
+                let Some(address) = self.preflight_indirect(bus, pointer) else {
+                    return true;
+                };
+                // The target is the next instruction fetch.  Treat a target
+                // outside cartridge space as unsafe even when it is not
+                // itself in the PPU range.
+                is_non_cartridge_address(address)
+            }
+            AddressingMode::IndirectIndexed => {
+                let offset = self.read_code_byte(bus, operand_address);
+                let Some(base) = self.preflight_zero_page_indirect(bus, offset as u16) else {
+                    return true;
+                };
+                let address = base.wrapping_add(self.y as u16);
+                is_ppu_register_address(address)
+            }
+            AddressingMode::Relative => {
+                let offset = self.read_code_byte(bus, operand_address);
+                let next_pc = opcode_address.wrapping_add(2);
+                let target = if offset >= 0x80 {
+                    next_pc.wrapping_sub(0x100 - offset as u16)
+                } else {
+                    next_pc.wrapping_add(offset as u16)
+                };
+                is_non_cartridge_address(target)
+            }
+            AddressingMode::ZeroPage
+            | AddressingMode::ZeroPageIndexedX
+            | AddressingMode::ZeroPageIndexedY => false,
+        };
+
+        may_access || matches!(extended_opcode.opcode, Opcode::RTS | Opcode::RTI)
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn preflight_zero_page_indirect(&self, bus: &MemoryBus, pointer: u16) -> Option<u16> {
+        // The 6502 wraps the high-byte read within the zero page for both
+        // ($xx,X) and ($xx),Y.
+        let next = (pointer & 0xff00) | pointer.wrapping_add(1) & 0x00ff;
+        let lo = self.preflight_read_byte(bus, pointer)?;
+        let hi = self.preflight_read_byte(bus, next)?;
+        Some(u16::from_le_bytes([lo, hi]))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn preflight_indirect(&self, bus: &MemoryBus, pointer: u16) -> Option<u16> {
+        // JMP ($xxxx) has the NMOS 6502 page-wrap bug.
+        let next = (pointer & 0xff00) | pointer.wrapping_add(1) & 0x00ff;
+        let lo = self.preflight_read_byte(bus, pointer)?;
+        let hi = self.preflight_read_byte(bus, next)?;
+        Some(u16::from_le_bytes([lo, hi]))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn preflight_read_byte(&self, bus: &MemoryBus, address: u16) -> Option<u8> {
+        match address {
+            0x0000..=0x1fff => Some(self.ram[address as usize % self.ram.len()]),
+            0x2000..=0x5fff => None,
+            _ => Some(bus.mapper.read(address)),
+        }
+    }
+
     pub(crate) fn reset(&mut self, bus: &mut MemoryBus) {
         // https://www.nesdev.org/wiki/CPU_ALL#At_power-up
         self.a = 0;
@@ -1153,6 +1318,21 @@ mod tests {
     use crate::console::Console;
     use crate::ines;
 
+    #[cfg(feature = "timestamped-scheduler")]
+    fn preflight_bus(program: &[u8]) -> crate::bus::MemoryBus {
+        use crate::cartridge::{Cartridge, MapperInstance, MirroringMode, CHR, PRG};
+        use std::rc::Rc;
+
+        let mut prg = vec![[0; 0x4000]];
+        prg[0][..program.len()].copy_from_slice(program);
+        crate::bus::MemoryBus::new(MapperInstance::new_nrom(Cartridge {
+            prg: Rc::new(PRG { banks: prg }),
+            chr: CHR::ROM(Rc::new(vec![[0; 0x2000]])),
+            sram: vec![[0; 0x2000]],
+            mirror: MirroringMode::Horizontal,
+        }))
+    }
+
     #[test]
     fn test_debug_log() {
         if !std::path::Path::new("tests/nestest.nes").exists() {
@@ -1173,5 +1353,50 @@ mod tests {
         for _ in 0..8991 {
             state.cpu.step(&mut state.bus, Some(&mut log_file));
         }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamp_preflight_covers_fetches_effective_addresses_and_control_flow() {
+        let mut cpu = super::CPU::default();
+
+        let bus = preflight_bus(&[0xa9, 0x42]); // LDA #$42
+        cpu.pc = 0x8000;
+        assert!(!cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xad, 0x00, 0x20]); // LDA $2000
+        cpu.pc = 0x8000;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xbd, 0xff, 0x1f]); // LDA $1fff,X
+        cpu.pc = 0x8000;
+        cpu.x = 1;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xb1, 0x10]); // LDA ($10),Y
+        bus.ppu.last_read.set(None);
+        cpu.pc = 0x8000;
+        cpu.x = 0;
+        cpu.y = 0;
+        cpu.ram[0x10] = 0x00;
+        cpu.ram[0x11] = 0x20;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+        assert_eq!(bus.ppu.last_read.get(), None);
+
+        let bus = preflight_bus(&[0x6c, 0x00, 0x20]); // JMP ($2000)
+        cpu.pc = 0x8000;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0x4c, 0x00, 0x20]); // JMP $2000
+        cpu.pc = 0x8000;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0x60]); // RTS: return target is stack-dependent
+        cpu.pc = 0x8000;
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
+
+        let bus = preflight_bus(&[0xa9, 0x42]);
+        cpu.pc = 0x7fff; // opcode fetch itself is not cartridge-backed
+        assert!(cpu.next_instruction_may_access_ppu(&bus));
     }
 }

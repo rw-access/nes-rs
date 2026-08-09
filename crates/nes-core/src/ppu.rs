@@ -195,8 +195,6 @@ pub(crate) struct PPU {
     cycle_in_scanline: u16, // 0..=340
     scanline: u16,          // 0..=261
     frame: usize,
-    #[cfg(feature = "timestamped-scheduler")]
-    master_ticks: u64,
     control_reg: u8,
     status_reg: u8,
     mask_reg: u8,
@@ -228,8 +226,6 @@ impl Default for PPU {
             cycle_in_scanline: Default::default(),
             scanline: Default::default(),
             frame: Default::default(),
-            #[cfg(feature = "timestamped-scheduler")]
-            master_ticks: Default::default(),
             control_reg: Default::default(),
             status_reg: Default::default(),
             mask_reg: Default::default(),
@@ -318,16 +314,8 @@ impl PPU {
                 // tick, then advance the two remaining idle ticks directly.
                 self.step(mapper, screen);
                 self.cycle_in_scanline += 2;
-                #[cfg(feature = "timestamped-scheduler")]
-                {
-                    self.master_ticks += 2;
-                }
             } else {
                 self.cycle_in_scanline += 3;
-                #[cfg(feature = "timestamped-scheduler")]
-                {
-                    self.master_ticks += 3;
-                }
             }
             return;
         }
@@ -341,10 +329,6 @@ impl PPU {
         self.cycle_in_scanline = 0;
         self.scanline = 0;
         self.frame = 0;
-        #[cfg(feature = "timestamped-scheduler")]
-        {
-            self.master_ticks = 0;
-        }
         self.control_reg = 0;
         self.oam_addr = 0;
         self.mask_reg = 0;
@@ -418,11 +402,6 @@ impl PPU {
     }
 
     #[cfg(feature = "timestamped-scheduler")]
-    pub(crate) fn master_ticks(&self) -> u64 {
-        self.master_ticks
-    }
-
-    #[cfg(feature = "timestamped-scheduler")]
     fn idle_ticks_until_boundary(&self) -> u64 {
         let position = self.scanline as u64 * 341 + self.cycle_in_scanline as u64;
         match self.scanline {
@@ -440,7 +419,6 @@ impl PPU {
         let position = self.cycle_in_scanline as u64 + ticks;
         self.scanline += (position / 341) as u16;
         self.cycle_in_scanline = (position % 341) as u16;
-        self.master_ticks += ticks;
     }
 
     /// Catch the PPU up to an absolute master-clock timestamp. The exact
@@ -449,29 +427,37 @@ impl PPU {
     #[cfg(feature = "timestamped-scheduler")]
     pub(crate) fn catch_up_to<M: Mapper + ?Sized>(
         &mut self,
+        current_master_ticks: u64,
         target_master_ticks: u64,
         mapper: &mut M,
         screen: &mut Screen,
-    ) {
-        debug_assert!(target_master_ticks >= self.master_ticks);
-        while self.master_ticks < target_master_ticks {
+    ) -> u64 {
+        debug_assert!(target_master_ticks >= current_master_ticks);
+        let mut master_ticks = current_master_ticks;
+        while master_ticks < target_master_ticks {
             if self.last_read.get().is_some() {
                 self.step(mapper, screen);
+                master_ticks += 1;
                 continue;
             }
 
             let idle = self.idle_ticks_until_boundary();
             if idle != 0 {
-                self.advance_idle_ticks(idle.min(target_master_ticks - self.master_ticks));
+                let ticks = idle.min(target_master_ticks - master_ticks);
+                self.advance_idle_ticks(ticks);
+                master_ticks += ticks;
                 continue;
             }
 
-            if target_master_ticks - self.master_ticks >= 3 {
+            if target_master_ticks - master_ticks >= 3 {
                 self.step_cpu_cycle(mapper, screen);
+                master_ticks += 3;
             } else {
                 self.step(mapper, screen);
+                master_ticks += 1;
             }
         }
+        master_ticks
     }
 
     pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
@@ -865,10 +851,6 @@ impl PPU {
     }
 
     fn update_cycle(&mut self) {
-        #[cfg(feature = "timestamped-scheduler")]
-        {
-            self.master_ticks += 1;
-        }
         if self.cycle_in_scanline < 340 {
             // advance in current scanline
             self.cycle_in_scanline += 1;
@@ -1127,7 +1109,6 @@ mod timestamped_tests {
     }
 
     fn assert_same_state(exact: &PPU, caught_up: &PPU) {
-        assert_eq!(exact.master_ticks, caught_up.master_ticks);
         assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
         assert_eq!(exact.scanline, caught_up.scanline);
         assert_eq!(exact.frame, caught_up.frame);
@@ -1156,10 +1137,9 @@ mod timestamped_tests {
         for _ in 0..343 {
             exact.step(&mut exact_mapper, &mut exact_screen);
         }
-        caught_up.catch_up_to(
-            caught_up.master_ticks + 343,
-            &mut caught_up_mapper,
-            &mut caught_up_screen,
+        assert_eq!(
+            caught_up.catch_up_to(0, 343, &mut caught_up_mapper, &mut caught_up_screen),
+            343
         );
 
         assert_same_state(&exact, &caught_up);
@@ -1175,7 +1155,6 @@ mod timestamped_tests {
         exact.in_vblank = true;
         exact.status_reg = 0b1100_0000;
         exact.pending_nmi = true;
-        exact.master_ticks = 241 * 341 + 2;
         let mut caught_up = exact.clone();
         let mut exact_mapper = NoopMapper;
         let mut caught_up_mapper = NoopMapper;
@@ -1186,11 +1165,7 @@ mod timestamped_tests {
         for _ in 0..ticks {
             exact.step(&mut exact_mapper, &mut exact_screen);
         }
-        caught_up.catch_up_to(
-            caught_up.master_ticks + ticks,
-            &mut caught_up_mapper,
-            &mut caught_up_screen,
-        );
+        caught_up.catch_up_to(0, ticks, &mut caught_up_mapper, &mut caught_up_screen);
 
         assert_same_state(&exact, &caught_up);
         assert_eq!(caught_up.scanline, 261);
@@ -1215,11 +1190,7 @@ mod timestamped_tests {
         for _ in 0..ticks {
             exact.step(&mut exact_mapper, &mut exact_screen);
         }
-        caught_up.catch_up_to(
-            caught_up.master_ticks + ticks,
-            &mut caught_up_mapper,
-            &mut caught_up_screen,
-        );
+        caught_up.catch_up_to(0, ticks, &mut caught_up_mapper, &mut caught_up_screen);
 
         assert_same_state(&exact, &caught_up);
         assert_eq!(caught_up.status_reg & 0x80, 0);
@@ -1231,7 +1202,6 @@ mod timestamped_tests {
         exact.mask_reg = 0x18;
         exact.scanline = 261;
         exact.cycle_in_scanline = 338;
-        exact.master_ticks = 261 * 341 + 338;
         let mut caught_up = exact.clone();
         let mut exact_mapper = NoopMapper;
         let mut caught_up_mapper = NoopMapper;
@@ -1241,11 +1211,7 @@ mod timestamped_tests {
         for _ in 0..5 {
             exact.step(&mut exact_mapper, &mut exact_screen);
         }
-        caught_up.catch_up_to(
-            caught_up.master_ticks + 5,
-            &mut caught_up_mapper,
-            &mut caught_up_screen,
-        );
+        caught_up.catch_up_to(0, 5, &mut caught_up_mapper, &mut caught_up_screen);
 
         assert_same_state(&exact, &caught_up);
         assert_eq!(caught_up.frame, 1);
