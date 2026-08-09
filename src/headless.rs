@@ -103,7 +103,7 @@ pub fn run_rom(path: &Path, frame_limit: u64) -> io::Result<TestResult> {
     })?);
 
     for frame in 0..frame_limit {
-        console.next_screen(|_| {});
+        let _output = console.next_frame();
         let result = read_result(&console, path, frame + 1);
         if result.signature_valid && !matches!(result.status, Some(Status::Running)) {
             return Ok(result);

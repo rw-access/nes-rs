@@ -13,3 +13,8 @@ pub mod ines;
 mod instructions;
 pub(crate) mod ppu;
 pub mod snapshot;
+
+pub use console::{
+    AudioBlock, AudioQueueAction, AudioQueuePacer, Console, FrameOutput, AUDIO_SAMPLE_RATE,
+    FRAME_HEIGHT, FRAME_WIDTH,
+};

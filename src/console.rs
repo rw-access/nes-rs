@@ -9,10 +9,28 @@ use crate::{
     snapshot::RewindTape,
 };
 
+pub const FRAME_WIDTH: usize = 256;
+pub const FRAME_HEIGHT: usize = 240;
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+
+/// A borrowed output view for one completed emulated video frame.
+///
+/// Pixels are NES palette indices, not RGB values. Audio is an ordered stream
+/// collected during this frame; its length may vary slightly from frame to
+/// frame and must not be assumed to be exactly sample_rate / 60.
+pub struct FrameOutput<'a> {
+    pub frame_number: u64,
+    pub pixels: &'a [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+    pub audio_samples: &'a [f32],
+    pub audio_sample_rate: u32,
+    pub audio_discontinuity: bool,
+}
+
 #[derive(Clone)]
 pub struct ConsoleState {
     pub(crate) bus: MemoryBus,
     pub(crate) cpu: CPU,
+    frame_number: u64,
 }
 
 impl ConsoleState {
@@ -164,6 +182,7 @@ pub struct Console {
     state: ConsoleState,
     tape: RewindTape,
     screen: Screen,
+    audio_samples: Vec<f32>,
     in_rewind: bool,
     audio_reset: AudioResetSignal,
 }
@@ -252,8 +271,10 @@ impl Console {
                     controller: Controller::default(),
                 },
                 cpu: CPU::default(),
+                frame_number: 0,
             },
             screen: Screen::default(),
+            audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
             tape: RewindTape::new(INITIAL_TAPE_STEP),
             in_rewind: false,
             audio_reset: AudioResetSignal::default(),
@@ -264,21 +285,48 @@ impl Console {
         console
     }
 
-    pub fn next_screen<F: FnMut(f32)>(&mut self, process_sample: F) -> &Screen {
-        self.state.wait_vblank(&mut self.screen, process_sample);
+    /// Emulate one frame and return its video/audio output.
+    pub fn next_frame(&mut self) -> FrameOutput<'_> {
+        let audio_discontinuity = self.audio_reset.take();
+        self.audio_samples.clear();
+        {
+            let state = &mut self.state;
+            let screen = &mut self.screen;
+            let audio_samples = &mut self.audio_samples;
+            state.wait_vblank(screen, |sample| audio_samples.push(sample));
+        }
 
         if !self.in_rewind {
             self.tape.push_back(self.state.clone());
         }
 
         self.in_rewind = false;
+        self.state.frame_number += 1;
+        FrameOutput {
+            frame_number: self.state.frame_number,
+            pixels: &self.screen.pixels,
+            audio_samples: &self.audio_samples,
+            audio_sample_rate: AUDIO_SAMPLE_RATE,
+            audio_discontinuity,
+        }
+    }
+
+    /// Compatibility wrapper for callers that consume audio through a callback.
+    pub fn next_screen<F: FnMut(f32)>(&mut self, mut process_sample: F) -> &Screen {
+        let frame = self.next_frame();
+        for &sample in frame.audio_samples {
+            process_sample(sample);
+        }
         &self.screen
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioBlock, AudioQueueAction, AudioQueuePacer, AudioResetSignal, Console};
+    use super::{
+        AudioBlock, AudioQueueAction, AudioQueuePacer, AudioResetSignal, Console, FRAME_HEIGHT,
+        FRAME_WIDTH,
+    };
     use crate::cartridge::{Mapper, MirroringMode};
 
     #[derive(Clone)]
@@ -334,6 +382,27 @@ mod tests {
         signal.mark();
         assert!(signal.take());
         assert!(!signal.take());
+    }
+
+    #[test]
+    fn frame_output_exposes_dimensions_rate_and_monotonic_sequence() {
+        let mut console = Console::new(Box::new(TestMapper));
+
+        let first = console.next_frame();
+        assert_eq!(first.frame_number, 1);
+        assert_eq!(first.pixels.len(), FRAME_HEIGHT);
+        assert_eq!(first.pixels[0].len(), FRAME_WIDTH);
+        assert_eq!(first.audio_sample_rate, super::AUDIO_SAMPLE_RATE);
+        assert!(!first.audio_samples.is_empty());
+
+        let second = console.next_frame();
+        assert_eq!(second.frame_number, 2);
+        assert!(!second.audio_samples.is_empty());
+
+        console.rewind();
+        let rewound = console.next_frame();
+        assert!(rewound.audio_discontinuity);
+        assert!(!rewound.audio_samples.is_empty());
     }
 
     #[test]

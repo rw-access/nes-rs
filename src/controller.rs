@@ -1,5 +1,6 @@
 use std::cell::Cell;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Button {
     A = 0,
     B = 1,
@@ -11,10 +12,18 @@ pub enum Button {
     Right = 7,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ButtonState(pub u8);
 
 impl ButtonState {
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
     pub fn set(&mut self, button: Button) {
         self.0 |= 1 << (button as u8);
     }
@@ -65,5 +74,15 @@ impl Controller {
         if self.strobe {
             self.index.set(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ButtonState;
+
+    #[test]
+    fn button_state_exposes_a_stable_bitmask_boundary() {
+        assert_eq!(ButtonState::from_bits(0xa5).bits(), 0xa5);
     }
 }
