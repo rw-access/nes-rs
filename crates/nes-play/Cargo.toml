@@ -7,6 +7,7 @@ edition = "2021"
 default = []
 sdl2-frontend = ["dep:clap", "dep:image", "dep:sdl2"]
 winit-frontend = ["dep:cpal", "dep:softbuffer", "dep:winit"]
+diagnostic-capture = []
 
 [dependencies]
 nes-core = { path = "../nes-core" }

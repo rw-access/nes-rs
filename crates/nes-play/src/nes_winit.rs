@@ -8,6 +8,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "diagnostic-capture")]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamConfig};
 use nes_core::apu::ChannelMask;
@@ -144,11 +147,153 @@ impl AudioOutput {
             }
         }
     }
+
+    fn pause(&self) {
+        if let Err(error) = self._stream.pause() {
+            eprintln!("failed to pause audio stream: {error}");
+        }
+    }
 }
 
 struct RunningWindow {
     window: Rc<Window>,
     surface: Option<Surface<OwnedDisplayHandle, Rc<Window>>>,
+}
+
+#[cfg(feature = "diagnostic-capture")]
+const DIAGNOSTIC_SCREENSHOT_INTERVAL: u64 = 5;
+
+#[cfg(feature = "diagnostic-capture")]
+const DIAGNOSTIC_HISTORY_SCREENSHOTS: usize = 120 / DIAGNOSTIC_SCREENSHOT_INTERVAL as usize;
+
+#[cfg(feature = "diagnostic-capture")]
+#[derive(Clone)]
+struct DiagnosticFrame {
+    frame_number: u64,
+    pixels: [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+}
+
+#[cfg(feature = "diagnostic-capture")]
+struct DiagnosticKeyEvent {
+    frame_number: u64,
+    key: String,
+    pressed: bool,
+    repeat: bool,
+}
+
+#[cfg(feature = "diagnostic-capture")]
+struct DiagnosticCapture {
+    history: VecDeque<DiagnosticFrame>,
+    input_frames: Vec<(u64, u8)>,
+    key_events: Vec<DiagnosticKeyEvent>,
+}
+
+#[cfg(feature = "diagnostic-capture")]
+impl DiagnosticCapture {
+    fn new() -> Self {
+        Self {
+            history: VecDeque::new(),
+            input_frames: Vec::new(),
+            key_events: Vec::new(),
+        }
+    }
+
+    fn record_key(&mut self, frame_number: u64, code: KeyCode, pressed: bool, repeat: bool) {
+        self.key_events.push(DiagnosticKeyEvent {
+            frame_number: frame_number.saturating_add(1),
+            key: format!("{code:?}"),
+            pressed,
+            repeat,
+        });
+    }
+
+    fn record_frame(
+        &mut self,
+        frame_number: u64,
+        buttons: u8,
+        pixels: [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+    ) {
+        self.input_frames.push((frame_number, buttons));
+        if frame_number % DIAGNOSTIC_SCREENSHOT_INTERVAL == 0 {
+            self.history.push_back(DiagnosticFrame {
+                frame_number,
+                pixels,
+            });
+        }
+
+        while self.history.len() > DIAGNOSTIC_HISTORY_SCREENSHOTS {
+            self.history.pop_front();
+        }
+    }
+
+    fn dump(
+        &self,
+        marker_frame: u64,
+        marker_buttons: u8,
+        marker_pixels: [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+    ) -> std::io::Result<std::path::PathBuf> {
+        let root = std::env::var_os("NES_DIAGNOSTIC_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("diagnostics"));
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let output = root.join(format!("marker-{marker_frame}-{timestamp}"));
+        std::fs::create_dir_all(&output)?;
+
+        for (sample, frame) in self.history.iter().enumerate() {
+            write_diagnostic_ppm(
+                &output.join(format!(
+                    "sample-{sample:03}-frame-{:08}.ppm",
+                    frame.frame_number
+                )),
+                &frame.pixels,
+            )?;
+        }
+
+        write_diagnostic_ppm(
+            &output.join(format!("frame-{marker_frame:08}-marker.ppm")),
+            &marker_pixels,
+        )?;
+
+        let mut transcript = String::from("# nes-rs diagnostic input transcript\n");
+        transcript.push_str("# frame buttons_hex\n");
+        for (frame, buttons) in &self.input_frames {
+            transcript.push_str(&format!("frame {frame} buttons=0x{buttons:02x}\n"));
+        }
+        transcript.push_str("# key events (effective next frame)\n");
+        for event in &self.key_events {
+            transcript.push_str(&format!(
+                "key frame={} key={} state={} repeat={}\n",
+                event.frame_number,
+                event.key,
+                if event.pressed { "down" } else { "up" },
+                event.repeat
+            ));
+        }
+        transcript.push_str(&format!(
+            "marker frame={marker_frame} buttons=0x{marker_buttons:02x}\n"
+        ));
+        std::fs::write(output.join("input-transcript.txt"), transcript)?;
+        Ok(output)
+    }
+}
+
+#[cfg(feature = "diagnostic-capture")]
+fn write_diagnostic_ppm(
+    path: &std::path::Path,
+    pixels: &[[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+) -> std::io::Result<()> {
+    let mut ppm = format!("P6\n{} {}\n255\n", FRAME_WIDTH, FRAME_HEIGHT).into_bytes();
+    ppm.reserve(FRAME_WIDTH * FRAME_HEIGHT * 3);
+    for row in pixels {
+        for &palette_index in row {
+            let [_, r, g, b] = NES_PALETTE_RGB[palette_index as usize & 0x3f].to_be_bytes();
+            ppm.extend_from_slice(&[r, g, b]);
+        }
+    }
+    std::fs::write(path, ppm)
 }
 
 struct App {
@@ -161,7 +306,11 @@ struct App {
     pixels: [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
     have_frame: bool,
     audio_started: bool,
+    fps_throttled: bool,
     next_frame_at: Instant,
+    last_frame_number: u64,
+    #[cfg(feature = "diagnostic-capture")]
+    diagnostics: DiagnosticCapture,
 }
 
 impl App {
@@ -176,7 +325,11 @@ impl App {
             pixels: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
             have_frame: false,
             audio_started: false,
+            fps_throttled: true,
             next_frame_at: Instant::now(),
+            last_frame_number: 0,
+            #[cfg(feature = "diagnostic-capture")]
+            diagnostics: DiagnosticCapture::new(),
         }
     }
 
@@ -191,6 +344,22 @@ impl App {
         }
     }
 
+    fn set_rewinding(&mut self, rewinding: bool) {
+        if self.rewinding == rewinding {
+            return;
+        }
+
+        self.rewinding = rewinding;
+        self.audio.flush();
+        if rewinding {
+            self.audio.pause();
+        } else {
+            // Rewind flushed the queue. Let normal frame processing prefill it
+            // before restarting the stream, avoiding an immediate underrun.
+            self.audio_started = false;
+        }
+    }
+
     fn advance_frame(&mut self) {
         if self.rewinding {
             self.console.rewind();
@@ -198,15 +367,23 @@ impl App {
         }
 
         let frame = self.console.next_frame();
-        if frame.audio_discontinuity {
+        if frame.audio_discontinuity || self.rewinding {
             self.audio.flush();
         }
         debug_assert_eq!(frame.audio_sample_rate, self.audio.sample_rate);
-        self.audio.enqueue(frame.audio_samples);
-        if !self.audio_started && self.audio.queued_samples() >= (AUDIO_SAMPLE_RATE / 20) as usize {
-            self.audio_started = self.audio.start();
+        if !self.rewinding {
+            self.audio.enqueue(frame.audio_samples);
+            if !self.audio_started
+                && self.audio.queued_samples() >= (AUDIO_SAMPLE_RATE / 20) as usize
+            {
+                self.audio_started = self.audio.start();
+            }
         }
         self.pixels = *frame.pixels;
+        self.last_frame_number = frame.frame_number;
+        #[cfg(feature = "diagnostic-capture")]
+        self.diagnostics
+            .record_frame(frame.frame_number, self.buttons.bits(), self.pixels);
         self.have_frame = true;
 
         let now = Instant::now();
@@ -270,21 +447,53 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        if !self.have_frame || Instant::now() >= self.next_frame_at {
+        if !self.have_frame || !self.fps_throttled || Instant::now() >= self.next_frame_at {
             self.advance_frame();
         }
         self.render();
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, state: ElementState) {
+    fn handle_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        code: KeyCode,
+        state: ElementState,
+        repeat: bool,
+    ) {
         let pressed = state == ElementState::Pressed;
+
+        #[cfg(feature = "diagnostic-capture")]
+        self.diagnostics
+            .record_key(self.last_frame_number, code, pressed, repeat);
+
+        #[cfg(feature = "diagnostic-capture")]
+        if code == KeyCode::Semicolon && pressed && !repeat {
+            match self
+                .diagnostics
+                .dump(self.last_frame_number, self.buttons.bits(), self.pixels)
+            {
+                Ok(path) => eprintln!("diagnostic capture written to {}", path.display()),
+                Err(error) => eprintln!("failed to write diagnostic capture: {error}"),
+            }
+            return;
+        }
+
         if pressed && code == KeyCode::Escape {
             event_loop.exit();
             return;
         }
 
+        if should_toggle_fps_throttle(code, state, repeat) {
+            toggle_fps_throttle(
+                &mut self.fps_throttled,
+                &mut self.next_frame_at,
+                Instant::now(),
+            );
+            return;
+        }
+
         if code == KeyCode::KeyI {
-            self.rewinding = pressed;
+            self.set_rewinding(pressed);
             if !pressed {
                 self.console.update_buttons(self.buttons);
             }
@@ -402,12 +611,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    self.handle_key(event_loop, code, event.state);
+                    self.handle_key(event_loop, code, event.state, event.repeat);
                 }
             }
             WindowEvent::Focused(false) => {
                 self.buttons = ButtonState::default();
-                self.rewinding = false;
+                self.set_rewinding(false);
                 self.console.update_buttons(self.buttons);
             }
             _ => {}
@@ -415,12 +624,30 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
-        if Instant::now() >= self.next_frame_at {
+        if self.fps_throttled {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
+            if Instant::now() >= self.next_frame_at {
+                if let Some(running) = &self.window {
+                    running.window.request_redraw();
+                }
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::Poll);
             if let Some(running) = &self.window {
                 running.window.request_redraw();
             }
         }
+    }
+}
+
+fn should_toggle_fps_throttle(code: KeyCode, state: ElementState, repeat: bool) -> bool {
+    code == KeyCode::KeyF && state == ElementState::Pressed && !repeat
+}
+
+fn toggle_fps_throttle(fps_throttled: &mut bool, next_frame_at: &mut Instant, now: Instant) {
+    *fps_throttled = !*fps_throttled;
+    if *fps_throttled {
+        *next_frame_at = now;
     }
 }
 
@@ -460,8 +687,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::button_for_key;
+    use super::{button_for_key, should_toggle_fps_throttle, toggle_fps_throttle};
     use nes_core::controller::Button;
+    use std::time::{Duration, Instant};
+    use winit::event::ElementState;
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -481,5 +710,45 @@ mod tests {
             assert_eq!(button_for_key(key), Some(button));
         }
         assert_eq!(button_for_key(KeyCode::Escape), None);
+    }
+
+    #[test]
+    fn fps_throttle_toggles_only_on_initial_f_press() {
+        assert!(should_toggle_fps_throttle(
+            KeyCode::KeyF,
+            ElementState::Pressed,
+            false
+        ));
+        assert!(!should_toggle_fps_throttle(
+            KeyCode::KeyF,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(!should_toggle_fps_throttle(
+            KeyCode::KeyF,
+            ElementState::Released,
+            false
+        ));
+        assert!(!should_toggle_fps_throttle(
+            KeyCode::KeyG,
+            ElementState::Pressed,
+            false
+        ));
+    }
+
+    #[test]
+    fn enabling_fps_throttle_resynchronizes_the_deadline() {
+        let initial = Instant::now();
+        let resynchronized = initial + Duration::from_secs(1);
+        let mut throttled = true;
+        let mut next_frame_at = initial;
+
+        toggle_fps_throttle(&mut throttled, &mut next_frame_at, resynchronized);
+        assert!(!throttled);
+        assert_eq!(next_frame_at, initial);
+
+        toggle_fps_throttle(&mut throttled, &mut next_frame_at, resynchronized);
+        assert!(throttled);
+        assert_eq!(next_frame_at, resynchronized);
     }
 }

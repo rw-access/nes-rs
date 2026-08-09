@@ -243,6 +243,9 @@ mod sdl2_frontend {
                     } => {
                         if k == Keycode::I {
                             rewind = true;
+                            audio_device.pause();
+                            audio_device.clear();
+                            audio_pacer.reset();
                         }
 
                         if let Some(button) = get_button(k) {
@@ -285,30 +288,32 @@ mod sdl2_frontend {
             audio_block.clear();
             let frame = console.next_frame();
 
-            if frame.audio_discontinuity {
+            if frame.audio_discontinuity || rewind {
                 audio_device.pause();
                 audio_device.clear();
                 audio_pacer.reset();
                 audio_block.clear();
             }
 
-            for &sample in frame.audio_samples {
-                audio_block.push(sample);
-            }
-
-            if !audio_block.is_empty() && !audio_device.queue(audio_block.as_slice()) {
-                panic!("failed to queue audio block");
-            }
-
-            let queued_samples = || audio_device.size() as usize / std::mem::size_of::<f32>();
-            match audio_pacer.observe(queued_samples()) {
-                AudioQueueAction::Resume => audio_device.resume(),
-                AudioQueueAction::Pace => {
-                    while queued_samples() > audio_pacer.target_samples() {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
+            if !rewind {
+                for &sample in frame.audio_samples {
+                    audio_block.push(sample);
                 }
-                AudioQueueAction::WaitForPrefill | AudioQueueAction::Continue => {}
+
+                if !audio_block.is_empty() && !audio_device.queue(audio_block.as_slice()) {
+                    panic!("failed to queue audio block");
+                }
+
+                let queued_samples = || audio_device.size() as usize / std::mem::size_of::<f32>();
+                match audio_pacer.observe(queued_samples()) {
+                    AudioQueueAction::Resume => audio_device.resume(),
+                    AudioQueueAction::Pace => {
+                        while queued_samples() > audio_pacer.target_samples() {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                    AudioQueueAction::WaitForPrefill | AudioQueueAction::Continue => {}
+                }
             }
 
             for (y, row) in frame.pixels.iter().enumerate() {
