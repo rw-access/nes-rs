@@ -905,6 +905,26 @@ impl PPU {
         let mut status_reg = self.status_reg;
         let mut cycle = self.cycle_in_scanline;
 
+        if skip_pixels && skip_background_fetches {
+            let start_cycle = cycle;
+            let last_cycle = end_cycle.saturating_sub(1);
+            let first_horizontal = start_cycle.saturating_add(7) / 8 * 8;
+            let last_horizontal = last_cycle.min(248);
+
+            if first_horizontal <= last_horizontal {
+                let horizontal_increments = (last_horizontal - first_horizontal) / 8 + 1;
+                self.increment_vram_addr_x_by(horizontal_increments);
+            }
+
+            if start_cycle <= 256 && end_cycle > 256 {
+                self.cycle_in_scanline = 256;
+                self.update_vram_addr();
+            }
+
+            self.cycle_in_scanline = end_cycle;
+            return;
+        }
+
         while cycle < end_cycle {
             self.cycle_in_scanline = cycle;
 
@@ -1446,6 +1466,15 @@ impl PPU {
             }
             _ => {}
         }
+    }
+
+    #[inline]
+    fn increment_vram_addr_x_by(&mut self, increments: u16) {
+        debug_assert!(increments <= 31);
+        let coarse_x = self.v & 0x001f;
+        let total = coarse_x + increments;
+        let wrapped = (total >= 32) as u16 * 0x0400;
+        self.v = (self.v & !0x041f) | (total & 0x001f) | ((self.v & 0x0400) ^ wrapped);
     }
 
     fn update_cycle(&mut self) {
@@ -2535,6 +2564,53 @@ mod timestamped_tests {
         ppu.cycle_in_scanline = 1;
         assert_eq!(ppu.next_scheduler_event_in_ticks(), 1);
     }
+    #[test]
+    fn catch_up_headless_partial_direct_chr_folds_vram_updates() {
+        for &initial_v in &[0x0000_u16, 0x001f, 0x041f, 0x73ff, 0x7be0] {
+            for &start in &[1_u16, 2, 7, 8, 9, 15, 16, 63, 127, 248, 249, 255, 256] {
+                let mut base = PPU::default();
+                base.control_reg = 0x1d;
+                base.mask_reg = 0x1e;
+                base.v = initial_v;
+                base.t = initial_v;
+                base.fine_x = 3;
+                base.oam.fill(0xff);
+
+                let mut positioned = base.clone();
+                let mut setup_mapper = DirectChrMapper::patterned();
+                let mut setup_screen = Screen::default();
+                for _ in 0..start {
+                    positioned.step(&mut setup_mapper, &mut setup_screen);
+                }
+
+                for &delta in &[1_u64, 2, 3, 7, 8, 16] {
+                    if start as u64 + delta > 257 {
+                        continue;
+                    }
+
+                    let mut exact = positioned.clone();
+                    let mut headless = positioned.clone();
+                    let mut exact_mapper = DirectChrMapper::patterned();
+                    let mut headless_mapper = DirectChrMapper::patterned();
+                    let mut exact_screen = setup_screen.clone();
+                    let mut headless_screen = setup_screen.clone();
+
+                    for _ in 0..delta {
+                        exact.step(&mut exact_mapper, &mut exact_screen);
+                    }
+                    headless.catch_up_to_with_mode::<false, true, _>(
+                        0,
+                        delta,
+                        &mut headless_mapper,
+                        &mut headless_screen,
+                    );
+
+                    assert_same_observable_state(&exact, &headless);
+                }
+            }
+        }
+    }
+
     fn assert_same_observable_state(exact: &PPU, caught_up: &PPU) {
         assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
         assert_eq!(exact.scanline, caught_up.scanline);
