@@ -479,6 +479,16 @@ impl PPU {
                 continue;
             }
 
+            if self.rendering_enabled()
+                && (0..=239).contains(&self.scanline)
+                && self.cycle_in_scanline == 0
+                && target_master_ticks - master_ticks >= 341
+            {
+                self.catch_up_visible_scanline(mapper, screen);
+                master_ticks += 341;
+                continue;
+            }
+
             let idle = self.idle_ticks_until_boundary();
             if idle != 0 {
                 let ticks = idle.min(target_master_ticks - master_ticks);
@@ -496,6 +506,56 @@ impl PPU {
             }
         }
         master_ticks
+    }
+
+    /// Process the pixel/background portion of a visible scanline without
+    /// re-running the generic cycle dispatcher for every dot. Eventful dots
+    /// 257-340 remain on the exact path so sprite evaluation, mapper clocks,
+    /// and sprite fetch preparation retain their existing timing.
+    #[cfg(feature = "timestamped-scheduler")]
+    fn catch_up_visible_scanline<M: Mapper + ?Sized>(
+        &mut self,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        debug_assert!(self.rendering_enabled());
+        debug_assert!((0..=239).contains(&self.scanline));
+        debug_assert_eq!(self.cycle_in_scanline, 0);
+        debug_assert!(self.last_read.get().is_none());
+
+        self.cycle_in_scanline = 1;
+        while self.cycle_in_scanline <= 256 {
+            self.render_pixel(screen);
+            self.fetch_background_tile(mapper);
+            if self.cycle_in_scanline & 7 == 0 {
+                self.update_vram_addr();
+            }
+            self.cycle_in_scanline += 1;
+        }
+
+        self.cycle_in_scanline = 257;
+        self.find_sprites_in_line();
+        self.update_vram_addr();
+
+        self.cycle_in_scanline = 258;
+        self.cycle_in_scanline = 260;
+        mapper.clock_scanline();
+
+        self.cycle_in_scanline = 261;
+        self.cycle_in_scanline = 320;
+        self.prepare_sprites_for_line(mapper);
+
+        self.cycle_in_scanline = 321;
+        while self.cycle_in_scanline <= 336 {
+            self.fetch_background_tile(mapper);
+            if self.cycle_in_scanline & 7 == 0 {
+                self.update_vram_addr();
+            }
+            self.cycle_in_scanline += 1;
+        }
+
+        self.cycle_in_scanline = 0;
+        self.scanline += 1;
     }
 
     pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
@@ -637,70 +697,7 @@ impl PPU {
                 mapper.clock_scanline();
             }
             320 => {
-                let tall_sprites = self.control_reg & 0x20 != 0;
-                let sprite_height: u8 = if tall_sprites { 16 } else { 8 };
-                let y = self.scanline;
-
-                // Cycles 257-320: Sprite fetches (8 sprites total, 8 cycles per sprite).
-                // Find the corresponding tiles for each sprite
-                // 1-4: Read the Y-coordinate, tile number, attributes, and X-coordinate of the selected sprite from secondary OAM
-                // 5-8: Read the X-coordinate of the selected sprite from secondary OAM 4 times (while the PPU fetches the sprite tile data)
-                // For the first empty sprite slot, this will consist of sprite #63's Y-coordinate followed by 3 $FF bytes; for subsequent empty sprite slots, this will be four $FF bytes
-                for (idx, raw_sprite) in self.secondary_oam.chunks_exact(4).enumerate() {
-                    let raw_sprite: &[u8; 4] = raw_sprite.try_into().unwrap();
-                    let processed_sprite = &mut self.processed_sprites[idx];
-                    processed_sprite.sprite = ParsedSprite::from(raw_sprite);
-
-                    // continue if the sprite is empty
-                    if raw_sprite == &[0xff; 4] {
-                        continue;
-                    }
-
-                    // retrieve the corresponding tile
-                    let bank = if tall_sprites {
-                        processed_sprite.sprite.tile_index & 0b1
-                    } else {
-                        (self.control_reg >> 3) & 1
-                    };
-
-                    let pattern_table_address = (bank as u16) << 12;
-                    let mut tile_index = processed_sprite.sprite.tile_index & !(tall_sprites as u8);
-                    let mut tile_y = (y - (processed_sprite.sprite.top_y as u16)) as u8;
-
-                    tile_y = if processed_sprite.sprite.flip_vertical {
-                        sprite_height - 1 - tile_y
-                    } else {
-                        tile_y
-                    };
-
-                    tile_index &= !(tall_sprites as u8);
-                    tile_index += (tile_y >= 8) as u8;
-                    tile_y &= 0x7;
-
-                    let tile_address_lo =
-                        pattern_table_address | (tile_index as u16) << 4 | (0 << 3) | tile_y as u16;
-                    let tile_address_hi = tile_address_lo | (1 << 3);
-                    let pattern_low = mapper
-                        .read_chr_page((tile_address_lo >> 8) as u8)
-                        .map_or_else(
-                            || mapper.read(tile_address_lo),
-                            |page| page[(tile_address_lo & 0xff) as usize],
-                        );
-                    let pattern_high = mapper
-                        .read_chr_page((tile_address_hi >> 8) as u8)
-                        .map_or_else(
-                            || mapper.read(tile_address_hi),
-                            |page| page[(tile_address_hi & 0xff) as usize],
-                        );
-
-                    processed_sprite.tile = TileData {
-                        nametable_index: 0,
-                        palette: processed_sprite.sprite.palette,
-                        pattern_low,
-                        pattern_high,
-                    }
-                }
-                self.prepare_sprite_pixels();
+                self.prepare_sprites_for_line(mapper);
             }
             321..=336 => {
                 // Cycles 321-336: This is where the first two tiles for the next scanline are fetched,
@@ -713,6 +710,67 @@ impl PPU {
             }
             _ => {}
         }
+    }
+
+    #[inline]
+    fn prepare_sprites_for_line<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        let tall_sprites = self.control_reg & 0x20 != 0;
+        let sprite_height: u8 = if tall_sprites { 16 } else { 8 };
+        let y = self.scanline;
+
+        // Cycles 257-320: sprite fetches (8 sprites total, 8 cycles per sprite).
+        for (idx, raw_sprite) in self.secondary_oam.chunks_exact(4).enumerate() {
+            let raw_sprite: &[u8; 4] = raw_sprite.try_into().unwrap();
+            let processed_sprite = &mut self.processed_sprites[idx];
+            processed_sprite.sprite = ParsedSprite::from(raw_sprite);
+
+            if raw_sprite == &[0xff; 4] {
+                continue;
+            }
+
+            let bank = if tall_sprites {
+                processed_sprite.sprite.tile_index & 0b1
+            } else {
+                (self.control_reg >> 3) & 1
+            };
+
+            let pattern_table_address = (bank as u16) << 12;
+            let mut tile_index = processed_sprite.sprite.tile_index & !(tall_sprites as u8);
+            let mut tile_y = (y - (processed_sprite.sprite.top_y as u16)) as u8;
+
+            tile_y = if processed_sprite.sprite.flip_vertical {
+                sprite_height - 1 - tile_y
+            } else {
+                tile_y
+            };
+
+            tile_index &= !(tall_sprites as u8);
+            tile_index += (tile_y >= 8) as u8;
+            tile_y &= 0x7;
+
+            let tile_address_lo = pattern_table_address | (tile_index as u16) << 4 | tile_y as u16;
+            let tile_address_hi = tile_address_lo | (1 << 3);
+            let pattern_low = mapper
+                .read_chr_page((tile_address_lo >> 8) as u8)
+                .map_or_else(
+                    || mapper.read(tile_address_lo),
+                    |page| page[(tile_address_lo & 0xff) as usize],
+                );
+            let pattern_high = mapper
+                .read_chr_page((tile_address_hi >> 8) as u8)
+                .map_or_else(
+                    || mapper.read(tile_address_hi),
+                    |page| page[(tile_address_hi & 0xff) as usize],
+                );
+
+            processed_sprite.tile = TileData {
+                nametable_index: 0,
+                palette: processed_sprite.sprite.palette,
+                pattern_low,
+                pattern_high,
+            };
+        }
+        self.prepare_sprite_pixels();
     }
 
     fn prepare_sprite_pixels(&mut self) {
