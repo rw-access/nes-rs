@@ -81,38 +81,47 @@ impl ConsoleState {
         screen: &mut Screen,
         process_sample: &mut F,
     ) {
-        loop {
-            let current_master_ticks = self.scheduler_master_ticks;
-            let deadline = self.ppu_master_ticks + self.bus.ppu.next_scheduler_event_in_ticks();
-            let may_access_ppu = self.cpu.prepare_timestamped(&self.bus);
+        let current_master_ticks = self.scheduler_master_ticks;
+        let deadline = self.ppu_master_ticks + self.bus.ppu.next_scheduler_event_in_ticks();
+        let (cycles, ppu_barrier) = self
+            .cpu
+            .run_timestamped_block(&mut self.bus, deadline.saturating_sub(current_master_ticks));
+        let target_master_ticks = current_master_ticks + cycles as u64 * 3;
 
-            if may_access_ppu {
-                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                    self.ppu_master_ticks,
-                    current_master_ticks,
-                    &mut self.bus.mapper,
-                    screen,
-                );
-                self.ppu_master_ticks = self.scheduler_master_ticks;
-            }
+        if ppu_barrier {
+            // The block has either retained a decoded PPU/DMA instruction or
+            // deliberately declined to decode an unsafe instruction. Catch
+            // the PPU up to the instruction's timestamp before executing it.
+            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                self.ppu_master_ticks,
+                target_master_ticks,
+                &mut self.bus.mapper,
+                screen,
+            );
+            self.ppu_master_ticks = self.scheduler_master_ticks;
 
-            let cycles = self.cpu.step_timestamped(&mut self.bus);
-            let target_master_ticks = current_master_ticks + cycles as u64 * 3;
-
-            if may_access_ppu || target_master_ticks >= deadline {
-                self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
-                    self.ppu_master_ticks,
-                    target_master_ticks,
-                    &mut self.bus.mapper,
-                    screen,
-                );
-                self.ppu_master_ticks = self.scheduler_master_ticks;
-                let _ = process_sample;
-                return;
-            }
-
+            let barrier_cycles = self.cpu.step_timestamped(&mut self.bus);
+            let barrier_target = target_master_ticks + barrier_cycles as u64 * 3;
+            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                self.ppu_master_ticks,
+                barrier_target,
+                &mut self.bus.mapper,
+                screen,
+            );
+            self.ppu_master_ticks = self.scheduler_master_ticks;
+        } else if target_master_ticks >= deadline {
+            self.scheduler_master_ticks = self.bus.ppu.catch_up_to(
+                self.ppu_master_ticks,
+                target_master_ticks,
+                &mut self.bus.mapper,
+                screen,
+            );
+            self.ppu_master_ticks = self.scheduler_master_ticks;
+        } else {
             self.scheduler_master_ticks = target_master_ticks;
         }
+
+        let _ = process_sample;
     }
 
     fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {

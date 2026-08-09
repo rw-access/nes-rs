@@ -121,6 +121,27 @@ fn is_control_flow_opcode(opcode: Opcode) -> bool {
     matches!(opcode, Opcode::JMP | Opcode::JSR)
 }
 
+#[cfg(feature = "timestamped-scheduler")]
+#[inline]
+fn is_timestamped_block_terminator(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::BCC
+            | Opcode::BCS
+            | Opcode::BEQ
+            | Opcode::BMI
+            | Opcode::BNE
+            | Opcode::BPL
+            | Opcode::BVC
+            | Opcode::BVS
+            | Opcode::JMP
+            | Opcode::JSR
+            | Opcode::RTI
+            | Opcode::RTS
+            | Opcode::BRK
+    )
+}
+
 impl CPU {
     /// Conservatively determine whether the next CPU instruction may touch a
     /// PPU register or leave the cartridge-backed instruction stream.
@@ -221,32 +242,96 @@ impl CPU {
     /// touching PPU registers; indirect JMP pointers in I/O space are left to
     /// the ordinary CPU step after the scheduler catches the PPU up.
     #[cfg(feature = "timestamped-scheduler")]
-    pub(crate) fn prepare_timestamped(&mut self, bus: &MemoryBus) -> bool {
-        self.timestamped_decoded = None;
-
+    fn decode_timestamped(
+        &self,
+        bus: &MemoryBus,
+    ) -> Option<(u16, CompactDecodedInstruction, bool)> {
         let addr = self.pc;
         if !is_cartridge_address(addr) {
-            return true;
+            return None;
         }
 
         let opcode = self.read_code_byte(bus, addr);
         let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
         let width = instruction_width(extended_opcode.opcode, extended_opcode.addressing_mode);
         if (1..width).any(|offset| !is_cartridge_address(addr.wrapping_add(offset))) {
-            return true;
+            return None;
         }
 
         if matches!(extended_opcode.addressing_mode, AddressingMode::Indirect) {
             let pointer = self.read_code_address(bus, addr.wrapping_add(1));
             if self.preflight_indirect(bus, pointer).is_none() {
-                return true;
+                return None;
             }
         }
 
         let decoded = self.decode_compact_opcode(bus, addr, opcode);
         let may_access = self.decoded_instruction_may_access_ppu(addr, &decoded);
+        Some((addr, decoded, may_access))
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn prepare_timestamped(&mut self, bus: &MemoryBus) -> bool {
+        self.timestamped_decoded = None;
+
+        let Some((addr, decoded, may_access)) = self.decode_timestamped(bus) else {
+            return true;
+        };
+
         self.timestamped_decoded = Some((addr, decoded));
         may_access
+    }
+
+    /// Run a bounded sequence of side-effect-safe instructions without
+    /// returning through the scheduler for every instruction. The first
+    /// instruction that may observe or modify PPU state is decoded and held
+    /// in `timestamped_decoded`; the caller must catch the PPU up before
+    /// calling `step_timestamped` to execute it.
+    ///
+    /// This is deliberately not a general CPU block cache. The block is
+    /// capped, stops at control flow, and falls back before any instruction
+    /// whose decode could touch an I/O address or leave cartridge space.
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn run_timestamped_block(
+        &mut self,
+        bus: &mut MemoryBus,
+        master_tick_budget: u64,
+    ) -> (u16, bool) {
+        const MAX_INSTRUCTIONS: usize = 32;
+        let start_cycles = self.cycles;
+
+        self.timestamped_decoded = None;
+        for _ in 0..MAX_INSTRUCTIONS {
+            // A PPU event can only become pending after the scheduler catches
+            // up, but keep this check here so a block never runs past an
+            // already-visible interrupt boundary.
+            if bus.ppu.nmi_pending()
+                || (bus.mapper.irq_pending() && !self.check_status_bit(StatusFlags::I))
+            {
+                self.step(bus, None);
+                break;
+            }
+
+            let Some((addr, decoded, may_access_ppu)) = self.decode_timestamped(bus) else {
+                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
+            };
+
+            if may_access_ppu {
+                self.timestamped_decoded = Some((addr, decoded));
+                return (self.cycles.wrapping_sub(start_cycles) as u16, true);
+            }
+
+            let opcode = decoded.opcode;
+            self.execute_compact_decoded(bus, decoded);
+
+            let elapsed_master_ticks = self.cycles.wrapping_sub(start_cycles).saturating_mul(3);
+            if elapsed_master_ticks >= master_tick_budget || is_timestamped_block_terminator(opcode)
+            {
+                break;
+            }
+        }
+
+        (self.cycles.wrapping_sub(start_cycles) as u16, false)
     }
 
     #[cfg(feature = "timestamped-scheduler")]
@@ -1649,5 +1734,41 @@ mod tests {
         cpu.prepare_timestamped(&bus);
         assert_eq!(cpu.step_timestamped(&mut bus), 7);
         assert_eq!(cpu.pc, 0);
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[test]
+    fn timestamped_block_matches_reference_at_ppu_barrier() {
+        let program = [0xa9, 0x42, 0xad, 0x00, 0x20]; // LDA #$42; LDA $2000
+        let mut block_cpu = super::CPU::default();
+        let mut block_bus = preflight_bus(&program);
+        block_cpu.pc = 0x8000;
+
+        let mut reference_cpu = super::CPU::default();
+        let mut reference_bus = preflight_bus(&program);
+        reference_cpu.pc = 0x8000;
+
+        let (safe_cycles, ppu_barrier) = block_cpu.run_timestamped_block(&mut block_bus, u64::MAX);
+        assert_eq!(safe_cycles, 2);
+        assert!(ppu_barrier);
+        let reference_first_cycles = reference_cpu.step(&mut reference_bus, None);
+        assert_eq!(block_cpu.a, reference_cpu.a);
+        assert_eq!(block_cpu.pc, 0x8002);
+
+        let barrier_cycles = block_cpu.step_timestamped(&mut block_bus);
+        let reference_cycles =
+            reference_first_cycles + reference_cpu.step(&mut reference_bus, None);
+
+        assert_eq!(barrier_cycles + safe_cycles, reference_cycles);
+        assert_eq!(block_cpu.pc, reference_cpu.pc);
+        assert_eq!(block_cpu.a, reference_cpu.a);
+        assert_eq!(block_cpu.status, reference_cpu.status);
+        assert_eq!(block_cpu.sp, reference_cpu.sp);
+        assert_eq!(block_cpu.cycles, reference_cpu.cycles);
+        assert_eq!(block_cpu.ram, reference_cpu.ram);
+        assert_eq!(
+            block_bus.ppu.last_read.get(),
+            reference_bus.ppu.last_read.get()
+        );
     }
 }
