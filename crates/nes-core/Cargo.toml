@@ -7,6 +7,7 @@ edition = "2021"
 default = []
 apu-disabled = []
 rewind-disabled = []
+timestamped-scheduler = []
 
 [dependencies]
 arrayvec = "0.7.2"

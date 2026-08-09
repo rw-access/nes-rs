@@ -41,6 +41,8 @@ pub struct ConsoleState {
     pub(crate) bus: MemoryBus,
     pub(crate) cpu: CPU,
     frame_number: u64,
+    #[cfg(feature = "timestamped-scheduler")]
+    scheduler_master_ticks: u64,
 }
 
 impl ConsoleState {
@@ -83,6 +85,19 @@ impl ConsoleState {
         }
 
         let cycles = self.cpu.step(&mut self.bus, None); // Some(&mut stdout()));
+
+        #[cfg(all(feature = "timestamped-scheduler", feature = "apu-disabled"))]
+        {
+            let target_master_ticks = self.scheduler_master_ticks + cycles as u64 * 3;
+            self.bus
+                .ppu
+                .catch_up_to(target_master_ticks, &mut self.bus.mapper, screen);
+            debug_assert_eq!(self.bus.ppu.master_ticks(), target_master_ticks);
+            self.scheduler_master_ticks = target_master_ticks;
+            let _ = process_sample;
+        }
+
+        #[cfg(not(all(feature = "timestamped-scheduler", feature = "apu-disabled")))]
         for _ in 0..cycles {
             self.step_hardware_cycle(screen, process_sample);
         }
@@ -247,6 +262,8 @@ impl Console {
                 bus: MemoryBus::new(mapper),
                 cpu: CPU::default(),
                 frame_number: 0,
+                #[cfg(feature = "timestamped-scheduler")]
+                scheduler_master_ticks: 0,
             },
             screen: Screen::default(),
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),

@@ -195,6 +195,8 @@ pub(crate) struct PPU {
     cycle_in_scanline: u16, // 0..=340
     scanline: u16,          // 0..=261
     frame: usize,
+    #[cfg(feature = "timestamped-scheduler")]
+    master_ticks: u64,
     control_reg: u8,
     status_reg: u8,
     mask_reg: u8,
@@ -226,6 +228,8 @@ impl Default for PPU {
             cycle_in_scanline: Default::default(),
             scanline: Default::default(),
             frame: Default::default(),
+            #[cfg(feature = "timestamped-scheduler")]
+            master_ticks: Default::default(),
             control_reg: Default::default(),
             status_reg: Default::default(),
             mask_reg: Default::default(),
@@ -314,8 +318,16 @@ impl PPU {
                 // tick, then advance the two remaining idle ticks directly.
                 self.step(mapper, screen);
                 self.cycle_in_scanline += 2;
+                #[cfg(feature = "timestamped-scheduler")]
+                {
+                    self.master_ticks += 2;
+                }
             } else {
                 self.cycle_in_scanline += 3;
+                #[cfg(feature = "timestamped-scheduler")]
+                {
+                    self.master_ticks += 3;
+                }
             }
             return;
         }
@@ -329,6 +341,10 @@ impl PPU {
         self.cycle_in_scanline = 0;
         self.scanline = 0;
         self.frame = 0;
+        #[cfg(feature = "timestamped-scheduler")]
+        {
+            self.master_ticks = 0;
+        }
         self.control_reg = 0;
         self.oam_addr = 0;
         self.mask_reg = 0;
@@ -398,6 +414,63 @@ impl PPU {
                     .wrapping_add(if self.control_reg & 4 != 0 { 32 } else { 1 })
             }
             _ => {}
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn master_ticks(&self) -> u64 {
+        self.master_ticks
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn idle_ticks_until_boundary(&self) -> u64 {
+        let position = self.scanline as u64 * 341 + self.cycle_in_scanline as u64;
+        match self.scanline {
+            240 => 241 * 341 - position,
+            241 if self.cycle_in_scanline >= 2 => 261 * 341 - position,
+            242..=260 => 261 * 341 - position,
+            _ => 0,
+        }
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    fn advance_idle_ticks(&mut self, ticks: u64) {
+        debug_assert!(ticks > 0);
+        debug_assert!(ticks <= self.idle_ticks_until_boundary());
+        let position = self.cycle_in_scanline as u64 + ticks;
+        self.scanline += (position / 341) as u16;
+        self.cycle_in_scanline = (position % 341) as u16;
+        self.master_ticks += ticks;
+    }
+
+    /// Catch the PPU up to an absolute master-clock timestamp. The exact
+    /// stepping path remains the authority at all eventful boundaries; only
+    /// intervals with no rendering, mapper, or interrupt work are arithmetic.
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn catch_up_to<M: Mapper + ?Sized>(
+        &mut self,
+        target_master_ticks: u64,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        debug_assert!(target_master_ticks >= self.master_ticks);
+        while self.master_ticks < target_master_ticks {
+            if self.last_read.get().is_some() {
+                self.step(mapper, screen);
+                continue;
+            }
+
+            let idle = self.idle_ticks_until_boundary();
+            if idle != 0 {
+                self.advance_idle_ticks(idle.min(target_master_ticks - self.master_ticks));
+                continue;
+            }
+
+            if target_master_ticks - self.master_ticks >= 3 {
+                self.step_cpu_cycle(mapper, screen);
+            } else {
+                self.step(mapper, screen);
+            }
         }
     }
 
@@ -792,6 +865,10 @@ impl PPU {
     }
 
     fn update_cycle(&mut self) {
+        #[cfg(feature = "timestamped-scheduler")]
+        {
+            self.master_ticks += 1;
+        }
         if self.cycle_in_scanline < 340 {
             // advance in current scanline
             self.cycle_in_scanline += 1;
@@ -1022,5 +1099,157 @@ impl PPU {
             }
             _ => unreachable!(),
         };
+    }
+}
+
+#[cfg(all(test, feature = "timestamped-scheduler"))]
+mod timestamped_tests {
+    use super::{Screen, PPU};
+    use crate::cartridge::{Mapper, MirroringMode};
+
+    #[derive(Clone)]
+    struct NoopMapper;
+
+    impl Mapper for NoopMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, _address: u16) -> u8 {
+            0
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
+
+    fn assert_same_state(exact: &PPU, caught_up: &PPU) {
+        assert_eq!(exact.master_ticks, caught_up.master_ticks);
+        assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
+        assert_eq!(exact.scanline, caught_up.scanline);
+        assert_eq!(exact.frame, caught_up.frame);
+        assert_eq!(exact.control_reg, caught_up.control_reg);
+        assert_eq!(exact.status_reg, caught_up.status_reg);
+        assert_eq!(exact.mask_reg, caught_up.mask_reg);
+        assert_eq!(exact.v, caught_up.v);
+        assert_eq!(exact.t, caught_up.t);
+        assert_eq!(exact.w, caught_up.w);
+        assert_eq!(exact.in_vblank, caught_up.in_vblank);
+        assert_eq!(exact.pending_nmi, caught_up.pending_nmi);
+        assert_eq!(exact.last_read.get(), caught_up.last_read.get());
+    }
+
+    #[test]
+    fn catch_up_preserves_vblank_nmi_edge() {
+        let mut exact = PPU::default();
+        exact.control_reg = 0x80;
+        exact.scanline = 240;
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = NoopMapper;
+        let mut caught_up_mapper = NoopMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+
+        for _ in 0..343 {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(
+            caught_up.master_ticks + 343,
+            &mut caught_up_mapper,
+            &mut caught_up_screen,
+        );
+
+        assert_same_state(&exact, &caught_up);
+        assert!(caught_up.in_vblank);
+        assert!(caught_up.pending_nmi);
+    }
+
+    #[test]
+    fn catch_up_preserves_pre_render_clear_edge() {
+        let mut exact = PPU::default();
+        exact.scanline = 241;
+        exact.cycle_in_scanline = 2;
+        exact.in_vblank = true;
+        exact.status_reg = 0b1100_0000;
+        exact.pending_nmi = true;
+        exact.master_ticks = 241 * 341 + 2;
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = NoopMapper;
+        let mut caught_up_mapper = NoopMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+        let ticks = 20 * 341;
+
+        for _ in 0..ticks {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(
+            caught_up.master_ticks + ticks,
+            &mut caught_up_mapper,
+            &mut caught_up_screen,
+        );
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(caught_up.scanline, 261);
+        assert_eq!(caught_up.cycle_in_scanline, 2);
+        assert!(!caught_up.in_vblank);
+        assert!(!caught_up.pending_nmi);
+    }
+
+    #[test]
+    fn catch_up_applies_deferred_status_read_before_idle_skip() {
+        let mut exact = PPU::default();
+        exact.scanline = 242;
+        exact.last_read.set(Some(0x2002));
+        exact.status_reg = 0b1000_0000;
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = NoopMapper;
+        let mut caught_up_mapper = NoopMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+        let ticks = 1000;
+
+        for _ in 0..ticks {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(
+            caught_up.master_ticks + ticks,
+            &mut caught_up_mapper,
+            &mut caught_up_screen,
+        );
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(caught_up.status_reg & 0x80, 0);
+    }
+
+    #[test]
+    fn catch_up_preserves_odd_frame_rollover() {
+        let mut exact = PPU::default();
+        exact.mask_reg = 0x18;
+        exact.scanline = 261;
+        exact.cycle_in_scanline = 338;
+        exact.master_ticks = 261 * 341 + 338;
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = NoopMapper;
+        let mut caught_up_mapper = NoopMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+
+        for _ in 0..5 {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(
+            caught_up.master_ticks + 5,
+            &mut caught_up_mapper,
+            &mut caught_up_screen,
+        );
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(caught_up.frame, 1);
+        assert_eq!(caught_up.scanline, 0);
+        assert_eq!(caught_up.cycle_in_scanline, 3);
     }
 }

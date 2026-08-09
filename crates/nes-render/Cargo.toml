@@ -8,6 +8,7 @@ default = []
 headless-cli = ["dep:clap"]
 apu-disabled = ["nes-core/apu-disabled"]
 rewind-disabled = ["nes-core/rewind-disabled"]
+timestamped-scheduler = ["nes-core/timestamped-scheduler"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }
