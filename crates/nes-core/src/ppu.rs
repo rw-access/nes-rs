@@ -104,7 +104,7 @@ impl From<u16> for VRAMAddress {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct TileData {
     nametable_index: u8,
     palette: u8,
@@ -121,7 +121,7 @@ impl TileData {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ParsedSprite {
     top_y: u8,
     tile_index: u8,
@@ -152,7 +152,7 @@ impl ParsedSprite {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ProcessedSprite {
     sprite: ParsedSprite,
     tile: TileData,
@@ -168,7 +168,7 @@ impl ProcessedSprite {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct SpritePixel {
     palette: u8,
     position: u8,
@@ -523,14 +523,8 @@ impl PPU {
         debug_assert_eq!(self.cycle_in_scanline, 0);
         debug_assert!(self.last_read.get().is_none());
 
-        self.cycle_in_scanline = 1;
-        while self.cycle_in_scanline <= 256 {
-            self.render_pixel(screen);
-            self.fetch_background_tile(mapper);
-            if self.cycle_in_scanline & 7 == 0 {
-                self.update_vram_addr();
-            }
-            self.cycle_in_scanline += 1;
+        for tile_start in (1..=256).step_by(8) {
+            self.catch_up_visible_tile(tile_start, mapper, screen);
         }
 
         self.cycle_in_scanline = 257;
@@ -545,17 +539,77 @@ impl PPU {
         self.cycle_in_scanline = 320;
         self.prepare_sprites_for_line(mapper);
 
-        self.cycle_in_scanline = 321;
-        while self.cycle_in_scanline <= 336 {
-            self.fetch_background_tile(mapper);
-            if self.cycle_in_scanline & 7 == 0 {
-                self.update_vram_addr();
-            }
-            self.cycle_in_scanline += 1;
-        }
+        self.catch_up_background_tile(321, mapper);
+        self.catch_up_background_tile(329, mapper);
 
         self.cycle_in_scanline = 0;
         self.scanline += 1;
+    }
+
+    /// Run one complete eight-dot background fetch group. Keeping the dot
+    /// number explicit is important: the renderer consumes the current dot,
+    /// and each fetch phase observes the VRAM address produced by the prior
+    /// phases exactly as it does on the cycle-stepped path.
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_visible_tile<M: Mapper + ?Sized>(
+        &mut self,
+        tile_start: u16,
+        mapper: &mut M,
+        screen: &mut Screen,
+    ) {
+        self.cycle_in_scanline = tile_start;
+        self.render_pixel(screen);
+        self.fetch_background_nametable(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+        self.fetch_background_attribute(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+        self.fetch_background_pattern_low(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+        self.fetch_background_pattern_high(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.render_pixel(screen);
+        self.processed_tile = [self.processed_tile[1], self.pending_tile];
+        self.update_vram_addr();
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    #[inline]
+    fn catch_up_background_tile<M: Mapper + ?Sized>(&mut self, tile_start: u16, mapper: &M) {
+        self.cycle_in_scanline = tile_start;
+        self.fetch_background_nametable(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.cycle_in_scanline += 1;
+        self.fetch_background_attribute(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.cycle_in_scanline += 1;
+        self.fetch_background_pattern_low(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.cycle_in_scanline += 1;
+        self.fetch_background_pattern_high(mapper);
+
+        self.cycle_in_scanline += 1;
+        self.processed_tile = [self.processed_tile[1], self.pending_tile];
+        self.update_vram_addr();
     }
 
     pub(crate) fn step<M: Mapper + ?Sized>(&mut self, mapper: &mut M, screen: &mut Screen) {
@@ -838,53 +892,61 @@ impl PPU {
         // https://www.nesdev.org/wiki/PPU_scrolling#Tile_and_attribute_fetching
         match self.cycle_in_scanline & 7 {
             0 => self.processed_tile = [self.processed_tile[1], self.pending_tile],
-            1 => {
-                let nametable_addr = 0x2000 | (self.v & 0x0FFF);
-                self.pending_tile.nametable_index = self.read_byte(mapper, nametable_addr)
-            }
+            1 => self.fetch_background_nametable(mapper),
             2 => {}
-            3 => {
-                // https://www.nesdev.org/wiki/PPU_scrolling#Tile_and_attribute_fetching
-                // https://www.nesdev.org/wiki/PPU_attribute_tables
-                let attr_address =
-                    0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
-                let attr_data = self.read_byte(mapper, attr_address);
-                let attr_shift = (self.v & 0x40) >> 4 | (self.v & 0x2);
-                self.pending_tile.palette = (attr_data >> attr_shift) & 0b11;
-            }
+            3 => self.fetch_background_attribute(mapper),
             4 => {}
-            5 => {
-                // two pattern tables: 0x0000 and 0x1000
-                // xxxx xxxx xxxx xxxx
-                //                 ^^^--- fine Y
-                //      ^^^^ ^^^^ ------- tile
-                //                0------ low byte
-                //    ^ ---- ---- ------- foreground/background
-                let pattern_table = ((self.control_reg as u16) & 0x10) << 8;
-                let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
-                let lo_byte_offset = 0 << 3;
-                let fine_y = self.v >> 12 & 0x7;
-                let pattern_low_address = pattern_table | nametable_index | lo_byte_offset | fine_y;
-                self.pending_tile.pattern_low = self.read_byte(mapper, pattern_low_address);
-            }
+            5 => self.fetch_background_pattern_low(mapper),
             6 => {}
-            7 => {
-                //two pattern tables: 0x0000 and 0x1000
-                // xxxx xxxx xxxx xxxx
-                //                 ^^^--- fine Y
-                //      ^^^^ ^^^^ ------- tile
-                //                1------ high byte
-                //    ^ ---- ---- ------- foreground/background
-                let pattern_table = ((self.control_reg as u16) & 0x10) << 8;
-                let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
-                let hi_byte_offset = 1 << 3;
-                let fine_y = self.v >> 12 & 0x7;
-                let pattern_high_address =
-                    pattern_table | nametable_index | hi_byte_offset | fine_y;
-                self.pending_tile.pattern_high = self.read_byte(mapper, pattern_high_address);
-            }
+            7 => self.fetch_background_pattern_high(mapper),
             _ => unreachable!(),
         };
+    }
+
+    #[inline]
+    fn fetch_background_nametable<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        let nametable_addr = 0x2000 | (self.v & 0x0FFF);
+        self.pending_tile.nametable_index = self.read_byte(mapper, nametable_addr);
+    }
+
+    #[inline]
+    fn fetch_background_attribute<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        // https://www.nesdev.org/wiki/PPU_scrolling#Tile_and_attribute_fetching
+        // https://www.nesdev.org/wiki/PPU_attribute_tables
+        let attr_address =
+            0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
+        let attr_data = self.read_byte(mapper, attr_address);
+        let attr_shift = (self.v & 0x40) >> 4 | (self.v & 0x2);
+        self.pending_tile.palette = (attr_data >> attr_shift) & 0b11;
+    }
+
+    #[inline]
+    fn fetch_background_pattern_low<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        // two pattern tables: 0x0000 and 0x1000
+        // xxxx xxxx xxxx xxxx
+        //                 ^^^--- fine Y
+        //      ^^^^ ^^^^ ------- tile
+        //                0------ low byte
+        //    ^ ---- ---- ------- foreground/background
+        let pattern_table = ((self.control_reg as u16) & 0x10) << 8;
+        let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
+        let fine_y = self.v >> 12 & 0x7;
+        let pattern_low_address = pattern_table | nametable_index | fine_y;
+        self.pending_tile.pattern_low = self.read_byte(mapper, pattern_low_address);
+    }
+
+    #[inline]
+    fn fetch_background_pattern_high<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        // two pattern tables: 0x0000 and 0x1000
+        //                 ^^^--- fine Y
+        //      ^^^^ ^^^^ ------- tile
+        //                1------ high byte
+        //    ^ ---- ---- ------- foreground/background
+        let pattern_table = ((self.control_reg as u16) & 0x10) << 8;
+        let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
+        let fine_y = self.v >> 12 & 0x7;
+        let pattern_high_address = pattern_table | nametable_index | (1 << 3) | fine_y;
+        self.pending_tile.pattern_high = self.read_byte(mapper, pattern_high_address);
     }
 
     #[inline]
@@ -1231,6 +1293,26 @@ mod timestamped_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct VariedMapper;
+
+    impl Mapper for VariedMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Vertical
+        }
+
+        fn read(&self, address: u16) -> u8 {
+            let mixed = address.wrapping_mul(37).rotate_left(3).wrapping_add(0x5a);
+            mixed as u8 ^ (mixed >> 8) as u8
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+    }
+
     fn assert_same_state(exact: &PPU, caught_up: &PPU) {
         assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
         assert_eq!(exact.scanline, caught_up.scanline);
@@ -1244,6 +1326,12 @@ mod timestamped_tests {
         assert_eq!(exact.in_vblank, caught_up.in_vblank);
         assert_eq!(exact.pending_nmi, caught_up.pending_nmi);
         assert_eq!(exact.last_read.get(), caught_up.last_read.get());
+        assert_eq!(exact.pending_tile, caught_up.pending_tile);
+        assert_eq!(exact.processed_tile, caught_up.processed_tile);
+        assert_eq!(exact.secondary_oam, caught_up.secondary_oam);
+        assert_eq!(exact.processed_sprites, caught_up.processed_sprites);
+        assert_eq!(exact.sprite_pixels, caught_up.sprite_pixels);
+        assert_eq!(exact.sprite_zero_in_line, caught_up.sprite_zero_in_line);
     }
 
     #[test]
@@ -1367,6 +1455,43 @@ mod timestamped_tests {
             .iter()
             .flatten()
             .any(|&pixel| pixel != 0));
+    }
+
+    #[test]
+    fn catch_up_matches_rendered_pixels_with_scroll_control_and_sprites() {
+        let mut exact = PPU::default();
+        exact.control_reg = 0x1d;
+        exact.mask_reg = 0x1e;
+        exact.v = 0x4a35;
+        exact.t = 0x4a35;
+        exact.fine_x = 3;
+
+        for (index, value) in exact.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(13) ^ 0x55;
+        }
+        for (index, value) in exact.palette_ram.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(7) & 0x3f;
+        }
+
+        exact.oam.fill(0xff);
+        exact.oam[0..4].copy_from_slice(&[0, 0x02, 0x00, 0x00]);
+        exact.oam[4..8].copy_from_slice(&[1, 0x11, 0x21, 0x08]);
+        exact.oam[8..12].copy_from_slice(&[2, 0x20, 0x42, 0x10]);
+
+        let mut caught_up = exact.clone();
+        let mut exact_mapper = VariedMapper;
+        let mut caught_up_mapper = VariedMapper;
+        let mut exact_screen = Screen::default();
+        let mut caught_up_screen = Screen::default();
+        let ticks = 240 * 341;
+
+        for _ in 0..ticks {
+            exact.step(&mut exact_mapper, &mut exact_screen);
+        }
+        caught_up.catch_up_to(0, ticks, &mut caught_up_mapper, &mut caught_up_screen);
+
+        assert_same_state(&exact, &caught_up);
+        assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
     }
 
     #[test]
