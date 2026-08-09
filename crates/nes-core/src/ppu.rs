@@ -558,35 +558,55 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        let y = self.scanline as usize;
+        let fine_x = self.fine_x;
+        let processed_tile = self.processed_tile;
+        let sprite_enabled = self.mask_reg & 0x10 != 0;
+        let sprite_zero_in_line = self.sprite_zero_in_line;
+        let mut status_reg = self.status_reg;
+
         self.cycle_in_scanline = tile_start;
-        self.render_pixel(screen);
-        self.fetch_background_nametable(mapper);
+        for dot in 0..8 {
+            let x = (tile_start + dot - 1) as usize;
+            let fine_x = (x as u8 & 7) + fine_x;
+            let tile = processed_tile[(fine_x >= 8) as usize];
+            let shift = 7 - (fine_x % 8);
+            let tile_palette =
+                ((tile.pattern_high >> shift) & 1) << 1 | ((tile.pattern_low >> shift) & 1);
+            let tile_palette_offset = (tile.palette & 0x3) << 2;
+            let sprite = if sprite_enabled {
+                self.sprite_pixels[x]
+            } else {
+                SpritePixel::default()
+            };
 
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
+            let (decision, color) = PPU::multiplex_colors(
+                tile_palette,
+                tile_palette_offset,
+                sprite.palette,
+                0x10 | sprite.palette_offset,
+                sprite.behind_background,
+            );
+            let zero_hit = sprite_zero_in_line
+                && sprite.position == 0
+                && decision == MultiplexerDecision::DrawSprite;
+            status_reg |= (zero_hit as u8) << 6;
+            screen.pixels[y][x] = self.palette_ram[PPU::mirror_palette(color) as usize];
 
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-        self.fetch_background_attribute(mapper);
-
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-        self.fetch_background_pattern_low(mapper);
-
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-        self.fetch_background_pattern_high(mapper);
-
-        self.cycle_in_scanline += 1;
-        self.render_pixel(screen);
-        self.processed_tile = [self.processed_tile[1], self.pending_tile];
-        self.update_vram_addr();
+            self.cycle_in_scanline = tile_start + dot;
+            match dot {
+                0 => self.fetch_background_nametable(mapper),
+                2 => self.fetch_background_attribute(mapper),
+                4 => self.fetch_background_pattern_low(mapper),
+                6 => self.fetch_background_pattern_high(mapper),
+                7 => {
+                    self.processed_tile = [self.processed_tile[1], self.pending_tile];
+                    self.update_vram_addr();
+                }
+                _ => {}
+            }
+        }
+        self.status_reg = status_reg;
     }
 
     #[cfg(feature = "timestamped-scheduler")]
@@ -1492,6 +1512,43 @@ mod timestamped_tests {
 
         assert_same_state(&exact, &caught_up);
         assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+    }
+
+    #[test]
+    fn catch_up_matches_rendered_pixels_across_masks_and_palette_mirrors() {
+        let mut base = PPU::default();
+        base.control_reg = 0x1d;
+        base.v = 0x0417;
+        base.t = 0x0417;
+        base.fine_x = 5;
+        for (index, value) in base.nametables.iter_mut().enumerate() {
+            *value = (index as u8).wrapping_mul(29).rotate_left(1);
+        }
+        for (index, value) in base.palette_ram.iter_mut().enumerate() {
+            *value = 0x40 | (index as u8).wrapping_mul(3);
+        }
+        base.oam.fill(0xff);
+        base.oam[0..4].copy_from_slice(&[0, 0x00, 0x00, 0x00]);
+        base.oam[4..8].copy_from_slice(&[3, 0x07, 0x20, 0x04]);
+
+        for mask in [0x08, 0x10, 0x18, 0x1a, 0x1e] {
+            let mut exact = base.clone();
+            exact.mask_reg = mask;
+            let mut caught_up = exact.clone();
+            let mut exact_mapper = VariedMapper;
+            let mut caught_up_mapper = VariedMapper;
+            let mut exact_screen = Screen::default();
+            let mut caught_up_screen = Screen::default();
+            let ticks = 240 * 341;
+
+            for _ in 0..ticks {
+                exact.step(&mut exact_mapper, &mut exact_screen);
+            }
+            caught_up.catch_up_to(0, ticks, &mut caught_up_mapper, &mut caught_up_screen);
+
+            assert_same_state(&exact, &caught_up);
+            assert_eq!(exact_screen.pixels, caught_up_screen.pixels);
+        }
     }
 
     #[test]
