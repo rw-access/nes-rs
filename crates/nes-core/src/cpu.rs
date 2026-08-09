@@ -860,10 +860,24 @@ impl CPU {
         let read_operand_byte = |offset: usize| operand[offset];
         let read_operand_address = || u16::from_le_bytes([operand[0], operand[1]]);
 
-        let (width, final_address, base_address, page_boundary_hit) =
+        let (width, final_address, base_address, page_boundary_hit, may_access_ppu) =
             match instruction.addressing_mode {
-                AddressingMode::Absolute => (3, Some(read_operand_address()), None, false),
-                AddressingMode::Implied | AddressingMode::Accumulator => (1, None, None, false),
+                AddressingMode::Absolute => {
+                    let address = read_operand_address();
+                    let may_access_ppu = if is_control_flow_opcode(instruction.opcode) {
+                        is_non_cartridge_address(address)
+                    } else {
+                        is_ppu_register_address(address)
+                    };
+                    (3, Some(address), None, false, may_access_ppu)
+                }
+                AddressingMode::Implied | AddressingMode::Accumulator => (
+                    1,
+                    None,
+                    None,
+                    false,
+                    matches!(instruction.opcode, Opcode::BRK | Opcode::RTS | Opcode::RTI),
+                ),
                 AddressingMode::AbsoluteIndexedX => {
                     let base = read_operand_address();
                     let address = base.wrapping_add(x as u16);
@@ -872,6 +886,7 @@ impl CPU {
                         Some(address),
                         Some(base),
                         instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                        is_indexed_ppu_access(base, address),
                     )
                 }
                 AddressingMode::AbsoluteIndexedY => {
@@ -882,18 +897,31 @@ impl CPU {
                         Some(address),
                         Some(base),
                         instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                        is_indexed_ppu_access(base, address),
                     )
                 }
-                AddressingMode::Immediate => (2, Some(operand_addr), None, false),
+                AddressingMode::Immediate => (2, Some(operand_addr), None, false, false),
                 AddressingMode::IndexedIndirect => {
                     let pointer = read_operand_byte(0).wrapping_add(x) as u16;
                     let address = Self::preflight_zero_page_indirect_local(bus, ram, pointer)?;
-                    (2, Some(address), Some(pointer), false)
+                    (
+                        2,
+                        Some(address),
+                        Some(pointer),
+                        false,
+                        is_ppu_register_address(address),
+                    )
                 }
                 AddressingMode::Indirect => {
                     let pointer = read_operand_address();
                     let address = Self::preflight_indirect_local(bus, ram, pointer)?;
-                    (3, Some(address), Some(pointer), false)
+                    (
+                        3,
+                        Some(address),
+                        Some(pointer),
+                        false,
+                        is_non_cartridge_address(address),
+                    )
                 }
                 AddressingMode::IndirectIndexed => {
                     let pointer = read_operand_byte(0) as u16;
@@ -904,6 +932,7 @@ impl CPU {
                         Some(address),
                         Some(base),
                         instruction.page_boundary_penalty && crosses_page_boundary(base, address),
+                        is_indexed_ppu_access(base, address),
                     )
                 }
                 AddressingMode::Relative => {
@@ -914,19 +943,29 @@ impl CPU {
                     } else {
                         next_pc.wrapping_add(offset as u16)
                     };
-                    (2, Some(target), None, false)
+                    (
+                        2,
+                        Some(target),
+                        None,
+                        false,
+                        is_non_cartridge_address(target),
+                    )
                 }
-                AddressingMode::ZeroPage => (2, Some(read_operand_byte(0) as u16), None, false),
+                AddressingMode::ZeroPage => {
+                    (2, Some(read_operand_byte(0) as u16), None, false, false)
+                }
                 AddressingMode::ZeroPageIndexedX => (
                     2,
                     Some(read_operand_byte(0).wrapping_add(x) as u16),
                     None,
+                    false,
                     false,
                 ),
                 AddressingMode::ZeroPageIndexedY => (
                     2,
                     Some(read_operand_byte(0).wrapping_add(y) as u16),
                     None,
+                    false,
                     false,
                 ),
             };
@@ -940,8 +979,7 @@ impl CPU {
             min_cycles: instruction.min_cycles,
             page_boundary_hit,
         };
-        let may_access = Self::decoded_instruction_may_access_ppu(addr, &decoded);
-        Some((addr, decoded, may_access))
+        Some((addr, decoded, may_access_ppu))
     }
 
     #[cfg(feature = "timestamped-scheduler")]
