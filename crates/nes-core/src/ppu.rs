@@ -456,11 +456,15 @@ impl PPU {
             1..=256 => {
                 self.render_pixel(screen);
                 self.fetch_background_tile(mapper);
+                if self.cycle_in_scanline & 7 == 0 {
+                    self.update_vram_addr();
+                }
             }
             257 => {
                 // Cycles 1-64: fill secondary OAM with 0xFF.
                 // Cycles 65-256: Sprite evaluation
                 self.find_sprites_in_line();
+                self.update_vram_addr();
             }
             260 => {
                 mapper.clock_scanline();
@@ -536,11 +540,12 @@ impl PPU {
                 // and loaded into the shift registers. Again, each memory access takes 2 PPU cycles to
                 // complete, and 4 are performed for the two tiles:
                 self.fetch_background_tile(mapper);
+                if self.cycle_in_scanline & 7 == 0 {
+                    self.update_vram_addr();
+                }
             }
             _ => {}
         }
-
-        self.update_vram_addr_if_needed();
     }
 
     fn prepare_sprite_pixels(&mut self) {
