@@ -656,17 +656,30 @@ impl PPU {
         // but avoid the nametable/attribute/CHR reads themselves.
         let direct_chr = AGGRESSIVE && !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
         let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
-        for tile_start in (1..=256).step_by(8) {
-            if skip_background_fetches {
-                self.skip_background_tile(tile_start);
-            } else {
+        if skip_background_fetches {
+            // Dots 8-248 perform 31 horizontal increments, then dot 256
+            // performs the vertical increment. Fold the 31 horizontal
+            // updates into one address calculation and retain the exact dot
+            // 256 vertical update; the intermediate tile pipeline is
+            // unobservable here because this line has no sprite-zero
+            // candidate and output is disabled.
+            let coarse_x = self.v & 0x001f;
+            let horizontal_nametable = self.v & 0x0400;
+            let wrapped = (coarse_x != 0) as u16 * 0x0400;
+            self.v = (self.v & !0x041f)
+                | ((coarse_x.wrapping_add(31)) & 0x001f)
+                | (horizontal_nametable ^ wrapped);
+            self.cycle_in_scanline = 256;
+            self.update_vram_addr();
+        } else {
+            for tile_start in (1..=256).step_by(8) {
                 self.catch_up_visible_tile_with_mode::<WRITE_OUTPUT, AGGRESSIVE, M>(
                     tile_start, mapper, screen,
                 );
             }
         }
-
         self.cycle_in_scanline = 257;
+
         self.find_sprites_in_line();
         self.update_vram_addr();
 
@@ -970,18 +983,6 @@ impl PPU {
         self.cycle_in_scanline += 1;
         self.fetch_background_pattern_high(mapper);
 
-        self.cycle_in_scanline += 1;
-        self.processed_tile = [self.processed_tile[1], self.pending_tile];
-        self.update_vram_addr();
-    }
-
-    #[cfg(feature = "timestamped-scheduler")]
-    #[inline]
-    fn skip_background_tile(&mut self, tile_start: u16) {
-        self.cycle_in_scanline = tile_start;
-        self.cycle_in_scanline += 2;
-        self.cycle_in_scanline += 2;
-        self.cycle_in_scanline += 2;
         self.cycle_in_scanline += 1;
         self.processed_tile = [self.processed_tile[1], self.pending_tile];
         self.update_vram_addr();
