@@ -1355,7 +1355,7 @@ impl PPU {
         let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
         let fine_y = self.v >> 12 & 0x7;
         let pattern_low_address = pattern_table | nametable_index | fine_y;
-        self.pending_tile.pattern_low = self.read_byte(mapper, pattern_low_address);
+        self.pending_tile.pattern_low = Self::read_chr_byte(mapper, pattern_low_address);
     }
 
     #[inline]
@@ -1369,7 +1369,7 @@ impl PPU {
         let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
         let fine_y = self.v >> 12 & 0x7;
         let pattern_high_address = pattern_table | nametable_index | (1 << 3) | fine_y;
-        self.pending_tile.pattern_high = self.read_byte(mapper, pattern_high_address);
+        self.pending_tile.pattern_high = Self::read_chr_byte(mapper, pattern_high_address);
     }
 
     #[inline]
@@ -1481,6 +1481,14 @@ impl PPU {
         // Perform with no branching logic
         let is_mirrored = (offset & 0x13) == 0x10;
         offset & !((is_mirrored as u8) << 4)
+    }
+
+    #[inline]
+    fn read_chr_byte<M: Mapper + ?Sized>(mapper: &M, addr: u16) -> u8 {
+        match mapper.read_chr_page((addr >> 8) as u8) {
+            Some(page) => page[(addr & 0xff) as usize],
+            None => mapper.read(addr),
+        }
     }
 
     pub(crate) fn read_byte<M: Mapper + ?Sized>(&self, mapper: &M, addr: u16) -> u8 {
