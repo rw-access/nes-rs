@@ -755,10 +755,10 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
-        // In the headless benchmark path, a scanline without sprite zero can
+        // With video output disabled, a scanline without sprite zero can
         // never set sprite-zero-hit. Keep the exact fetch/transition timeline
-        // but avoid all per-pixel background/sprite occupancy work.
-        if AGGRESSIVE && !WRITE_OUTPUT && !self.sprite_zero_in_line {
+        // but avoid pixel selection work that has no CPU-visible effect.
+        if !WRITE_OUTPUT && !self.sprite_zero_in_line {
             self.catch_up_background_tile(tile_start, mapper);
             return;
         }
@@ -903,7 +903,7 @@ impl PPU {
     ) {
         let direct_chr = AGGRESSIVE && !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
         let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
-        let skip_pixels = AGGRESSIVE && !WRITE_OUTPUT && !self.sprite_zero_in_line;
+        let skip_pixels = !WRITE_OUTPUT && !self.sprite_zero_in_line;
         let y = self.scanline as usize;
         let fine_x = self.fine_x;
         let sprite_enabled = self.mask_reg & 0x10 != 0;
@@ -2065,6 +2065,54 @@ mod timestamped_tests {
     }
 
     #[test]
+    fn strict_video_off_partial_ranges_skip_only_unobservable_pixels() {
+        let mut base = PPU::default();
+        base.control_reg = 0x1d;
+        base.mask_reg = 0x1e;
+        base.v = 0x0417;
+        base.t = 0x0417;
+        base.fine_x = 5;
+        base.oam.fill(0xff);
+        // Keep sprite zero out of range for this line. A later sprite is
+        // present to ensure ordinary sprite preparation remains irrelevant to
+        // the strict video-off state comparison.
+        base.oam[0..4].copy_from_slice(&[32, 0x00, 0x00, 0x00]);
+        base.oam[4..8].copy_from_slice(&[0, 0x07, 0x20, 0x04]);
+
+        for start in [1_u16, 2, 5, 7, 63, 127, 255] {
+            let mut positioned = base.clone();
+            let mut setup_mapper = VariedMapper;
+            let mut setup_screen = Screen::default();
+            for _ in 0..start {
+                positioned.step_with_mode::<false, false, _>(&mut setup_mapper, &mut setup_screen);
+            }
+
+            for delta in [1_u64, 3, 8, 16, (257 - start) as u64] {
+                let mut exact = positioned.clone();
+                let mut caught_up = positioned.clone();
+                let mut exact_mapper = VariedMapper;
+                let mut caught_up_mapper = VariedMapper;
+                let mut exact_screen = Screen::default();
+                let mut caught_up_screen = Screen::default();
+
+                for _ in 0..delta {
+                    exact.step_with_mode::<false, false, _>(&mut exact_mapper, &mut exact_screen);
+                }
+                caught_up.catch_up_to_with_mode::<false, false, _>(
+                    0,
+                    delta,
+                    &mut caught_up_mapper,
+                    &mut caught_up_screen,
+                );
+
+                assert_same_state(&exact, &caught_up);
+                assert_eq!(exact_screen.pixels, Screen::default().pixels);
+                assert_eq!(caught_up_screen.pixels, Screen::default().pixels);
+            }
+        }
+    }
+
+    #[test]
     fn catch_up_partial_direct_chr_respects_sprite_zero_fetch_contract() {
         for sprite_zero_in_line in [false, true] {
             let mut base = PPU::default();
@@ -2551,7 +2599,7 @@ mod timestamped_tests {
                     &mut rendered_mapper,
                     &mut rendered_screen,
                 );
-                headless.catch_up_visible_scanline_inner::<false, _>(
+                headless.catch_up_visible_scanline_inner_with_mode::<false, false, _>(
                     &mut headless_mapper,
                     &mut headless_screen,
                 );
