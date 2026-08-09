@@ -539,8 +539,8 @@ impl PPU {
         // candidate on the line, background fetch values cannot affect any
         // observable result.  Keep the fetch phases and address evolution,
         // but avoid the nametable/attribute/CHR reads themselves.
-        let skip_background_fetches =
-            !WRITE_OUTPUT && !self.sprite_zero_in_line && mapper.read_chr_page(0).is_some();
+        let direct_chr = !WRITE_OUTPUT && mapper.read_chr_page(0).is_some();
+        let skip_background_fetches = direct_chr && !self.sprite_zero_in_line;
         for tile_start in (1..=256).step_by(8) {
             if skip_background_fetches {
                 self.skip_background_tile(tile_start);
@@ -559,7 +559,9 @@ impl PPU {
 
         self.cycle_in_scanline = 261;
         self.cycle_in_scanline = 320;
-        self.prepare_sprites_for_line(mapper);
+        if !direct_chr || self.sprite_zero_in_line {
+            self.prepare_sprites_for_line(mapper);
+        }
 
         self.catch_up_background_tile(321, mapper);
         self.catch_up_background_tile(329, mapper);
@@ -1385,6 +1387,42 @@ mod timestamped_tests {
     }
 
     #[derive(Clone)]
+    struct DirectChrMapper {
+        chr: [[u8; 256]; 32],
+    }
+
+    impl DirectChrMapper {
+        fn patterned() -> Self {
+            let mut mapper = Self {
+                chr: [[0; 256]; 32],
+            };
+            mapper.chr[0].fill(0xff);
+            mapper.chr[1].fill(0xff);
+            mapper
+        }
+    }
+
+    impl Mapper for DirectChrMapper {
+        fn mirror(&self) -> MirroringMode {
+            MirroringMode::Horizontal
+        }
+
+        fn read(&self, address: u16) -> u8 {
+            self.chr[(address >> 8) as usize][(address & 0xff) as usize]
+        }
+
+        fn write(&mut self, _address: u16, _data: u8) {}
+
+        fn read_page(&self, _page: u8) -> Option<&[u8; 256]> {
+            None
+        }
+
+        fn read_chr_page(&self, page: u8) -> Option<&[u8; 256]> {
+            Some(&self.chr[page as usize & 0x1f])
+        }
+    }
+
+    #[derive(Clone)]
     struct VariedMapper;
 
     impl Mapper for VariedMapper {
@@ -1881,5 +1919,71 @@ mod timestamped_tests {
         ppu.scanline = 261;
         ppu.cycle_in_scanline = 1;
         assert_eq!(ppu.next_scheduler_event_in_ticks(), 1);
+    }
+    fn assert_same_observable_state(exact: &PPU, caught_up: &PPU) {
+        assert_eq!(exact.cycle_in_scanline, caught_up.cycle_in_scanline);
+        assert_eq!(exact.scanline, caught_up.scanline);
+        assert_eq!(exact.frame, caught_up.frame);
+        assert_eq!(exact.control_reg, caught_up.control_reg);
+        assert_eq!(exact.status_reg, caught_up.status_reg);
+        assert_eq!(exact.mask_reg, caught_up.mask_reg);
+        assert_eq!(exact.oam_addr, caught_up.oam_addr);
+        assert_eq!(
+            exact.buffered_ppu_data.get(),
+            caught_up.buffered_ppu_data.get()
+        );
+        assert_eq!(exact.v, caught_up.v);
+        assert_eq!(exact.t, caught_up.t);
+        assert_eq!(exact.w, caught_up.w);
+        assert_eq!(exact.in_vblank, caught_up.in_vblank);
+        assert_eq!(exact.pending_nmi, caught_up.pending_nmi);
+        assert_eq!(exact.last_read.get(), caught_up.last_read.get());
+        assert_eq!(exact.oam, caught_up.oam);
+        assert_eq!(exact.palette_ram, caught_up.palette_ram);
+        assert_eq!(exact.nametables, caught_up.nametables);
+        assert_eq!(exact.nametable_mirroring, caught_up.nametable_mirroring);
+        assert_eq!(exact.nametable_map, caught_up.nametable_map);
+        assert_eq!(exact.secondary_oam, caught_up.secondary_oam);
+        assert_eq!(exact.sprite_zero_in_line, caught_up.sprite_zero_in_line);
+    }
+
+    #[test]
+    fn timestamped_headless_skips_sprite_preparation_only_without_sprite_zero() {
+        let mut base = PPU::default();
+        base.control_reg = 0x00;
+        base.mask_reg = 0x18;
+        base.oam.fill(0xff);
+
+        // Sprite 1 is visible on the first line, while sprite 0 appears on
+        // the following line. The timestamped pipeline prepares sprites one
+        // line ahead, so the first line exercises the skip and the later line
+        // proves preparation is retained when sprite zero is present.
+        base.oam[0..4].copy_from_slice(&[1, 1, 1, 0]);
+        base.oam[4..8].copy_from_slice(&[0, 1, 1, 0]);
+
+        let mut exact = base.clone();
+        let mut headless = base;
+        let mut exact_mapper = DirectChrMapper::patterned();
+        let mut headless_mapper = DirectChrMapper::patterned();
+        let mut exact_screen = Screen::default();
+        let mut headless_screen = Screen::default();
+
+        for _ in 0..2 {
+            exact.catch_up_visible_scanline_inner::<true, _>(&mut exact_mapper, &mut exact_screen);
+            headless.catch_up_visible_scanline_inner::<false, _>(
+                &mut headless_mapper,
+                &mut headless_screen,
+            );
+            assert_same_observable_state(&exact, &headless);
+        }
+
+        // The second line's sprites are now in the one-line-ahead pipeline.
+        // Consume one visible tile before sprite evaluation for the next line
+        // clears the status bit again.
+        exact.catch_up_visible_tile::<true, _>(1, &mut exact_mapper, &mut exact_screen);
+        headless.catch_up_visible_tile::<false, _>(1, &mut headless_mapper, &mut headless_screen);
+        assert_same_observable_state(&exact, &headless);
+        assert_ne!(exact.status_reg & 0x40, 0);
+        assert_eq!(headless_screen.pixels, Screen::default().pixels);
     }
 }
