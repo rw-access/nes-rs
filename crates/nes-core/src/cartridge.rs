@@ -274,7 +274,7 @@ impl Mapper for MapperInstance {
     #[inline]
     fn clock_scanline(&mut self) {
         match self {
-            Self::Nrom(mapper) => mapper.clock_scanline(),
+            Self::Nrom(_) => {}
             Self::Dynamic(mapper) => mapper.clock_scanline(),
         }
     }
@@ -282,7 +282,7 @@ impl Mapper for MapperInstance {
     #[inline]
     fn clock_cpu(&mut self) {
         match self {
-            Self::Nrom(mapper) => mapper.clock_cpu(),
+            Self::Nrom(_) => {}
             Self::Dynamic(mapper) => mapper.clock_cpu(),
         }
     }
