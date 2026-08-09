@@ -344,6 +344,21 @@ impl PPU {
             return;
         }
 
+        // With rendering enabled, these visible-line dots have no pixel,
+        // sprite, mapper, or VRAM-address work. Keep them as single ticks so
+        // CPU/PPU interleaving remains unchanged, but avoid the full visible
+        // dispatch and its per-cycle event checks.
+        if (0..=239).contains(&self.scanline)
+            && matches!(
+                self.cycle_in_scanline,
+                0 | 258..=259 | 261..=319 | 337..=340
+            )
+            && self.rendering_enabled()
+        {
+            self.update_cycle();
+            return;
+        }
+
         match self.scanline {
             0..=239 => self.step_visible(mapper, screen),
             240 => self.step_post_render(mapper),
