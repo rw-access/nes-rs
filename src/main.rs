@@ -4,11 +4,7 @@ mod sdl2_frontend {
     use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
     use nes::controller::ButtonState;
     use nes::{
-        apu::ChannelMask,
-        cartridge,
-        console::{AudioBlock, AudioQueueAction, AudioQueuePacer, Console},
-        controller::Button,
-        video::NES_PALETTE_RGB,
+        apu::ChannelMask, cartridge, console::Console, controller::Button, video::NES_PALETTE_RGB,
     };
     use sdl2::event::Event;
     use sdl2::keyboard::Keycode;
@@ -20,6 +16,86 @@ mod sdl2_frontend {
 
     const AUDIO_SAMPLE_RATE: usize = 48_000;
     const AUDIO_FRAME_SAMPLES: usize = AUDIO_SAMPLE_RATE / 60;
+
+    /// Samples produced while emulating one video frame for the SDL queue.
+    struct AudioBlock {
+        samples: Vec<f32>,
+    }
+
+    impl AudioBlock {
+        fn with_capacity(capacity: usize) -> Self {
+            Self {
+                samples: Vec::with_capacity(capacity),
+            }
+        }
+
+        fn push(&mut self, sample: f32) {
+            self.samples.push(sample);
+        }
+
+        fn clear(&mut self) {
+            self.samples.clear();
+        }
+
+        fn is_empty(&self) -> bool {
+            self.samples.is_empty()
+        }
+
+        fn as_slice(&self) -> &[f32] {
+            &self.samples
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum AudioQueueAction {
+        WaitForPrefill,
+        Resume,
+        Continue,
+        Pace,
+    }
+
+    /// Keeps the SDL queue within a small latency window without tying emulation to wall-clock time.
+    struct AudioQueuePacer {
+        prefill_samples: usize,
+        target_samples: usize,
+        max_samples: usize,
+        started: bool,
+    }
+
+    impl AudioQueuePacer {
+        fn new(block_samples: usize) -> Self {
+            assert!(block_samples > 0);
+            Self {
+                prefill_samples: block_samples * 3,
+                target_samples: block_samples * 3,
+                max_samples: block_samples * 5,
+                started: false,
+            }
+        }
+
+        fn observe(&mut self, queued_samples: usize) -> AudioQueueAction {
+            if !self.started {
+                if queued_samples < self.prefill_samples {
+                    AudioQueueAction::WaitForPrefill
+                } else {
+                    self.started = true;
+                    AudioQueueAction::Resume
+                }
+            } else if queued_samples >= self.max_samples {
+                AudioQueueAction::Pace
+            } else {
+                AudioQueueAction::Continue
+            }
+        }
+
+        fn target_samples(&self) -> usize {
+            self.target_samples
+        }
+
+        fn reset(&mut self) {
+            self.started = false;
+        }
+    }
 
     fn get_button(keycode: Keycode) -> Option<Button> {
         match keycode {
@@ -293,6 +369,37 @@ mod sdl2_frontend {
                 ppu_ignore_rewind,
             } => play_rom(&rom, cpu_ignore_rewind, ppu_ignore_rewind),
         };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{AudioBlock, AudioQueueAction, AudioQueuePacer};
+
+        #[test]
+        fn audio_block_is_reused_as_one_frame_sized_buffer() {
+            let mut block = AudioBlock::with_capacity(3);
+            block.push(0.25);
+            block.push(-0.5);
+            assert_eq!(block.as_slice(), &[0.25, -0.5]);
+
+            block.clear();
+            assert!(block.is_empty());
+            block.push(1.0);
+            assert_eq!(block.as_slice(), &[1.0]);
+        }
+
+        #[test]
+        fn audio_queue_pacer_prefills_and_limits_queue_depth() {
+            let mut pacer = AudioQueuePacer::new(800);
+            assert_eq!(pacer.observe(799), AudioQueueAction::WaitForPrefill);
+            assert_eq!(pacer.observe(2_400), AudioQueueAction::Resume);
+            assert_eq!(pacer.observe(3_999), AudioQueueAction::Continue);
+            assert_eq!(pacer.observe(4_000), AudioQueueAction::Pace);
+            assert_eq!(pacer.target_samples(), 2_400);
+
+            pacer.reset();
+            assert_eq!(pacer.observe(2_399), AudioQueueAction::WaitForPrefill);
+        }
     }
 }
 

@@ -15,10 +15,7 @@ pub(crate) mod ppu;
 pub mod snapshot;
 pub mod video;
 
-pub use console::{
-    AudioBlock, AudioQueueAction, AudioQueuePacer, Console, ConsoleState, FrameOutput,
-    AUDIO_SAMPLE_RATE,
-};
+pub use console::{Console, ConsoleState, FrameOutput, AUDIO_SAMPLE_RATE};
 pub use video::{
     expand_rgba, FrameBuffer, VideoBuffer, FRAME_HEIGHT, FRAME_PIXELS, FRAME_RGBA_BYTES,
     FRAME_WIDTH, NES_PALETTE_RGB, NES_PALETTE_RGBA, PALETTE_ENTRIES,
