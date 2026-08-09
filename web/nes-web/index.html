@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>nes-rs — browser frontend</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="toolbar">
+        <div>
+          <h1>nes-rs</h1>
+          <p id="status" role="status">Choose an iNES ROM to begin.</p>
+        </div>
+        <label class="file-button">
+          Load ROM
+          <input id="rom-input" type="file" accept=".nes,application/octet-stream">
+        </label>
+        <button id="audio-button" type="button">Enable audio</button>
+        <button id="snapshot-button" type="button" disabled>Save state</button>
+        <button id="restore-button" type="button" disabled>Restore state</button>
+        <button id="rewind-button" type="button" disabled>Rewind</button>
+      </header>
+
+      <section class="screen-wrap" aria-label="NES screen">
+        <canvas id="screen" width="256" height="240"></canvas>
+      </section>
+
+      <section class="controls" aria-label="Touch controls">
+        <div class="dpad">
+          <button data-button="up" aria-label="Up">▲</button>
+          <button data-button="left" aria-label="Left">◀</button>
+          <button data-button="down" aria-label="Down">▼</button>
+          <button data-button="right" aria-label="Right">▶</button>
+        </div>
+        <div class="menu-buttons">
+          <button data-button="select">Select</button>
+          <button data-button="start">Start</button>
+        </div>
+        <div class="face-buttons">
+          <button data-button="b" aria-label="B">B</button>
+          <button data-button="a" aria-label="A">A</button>
+        </div>
+      </section>
+
+      <p class="hint">Keyboard: arrows, Z/X, Shift, Enter. Touch controls work on mobile.</p>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

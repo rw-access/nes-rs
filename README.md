@@ -56,3 +56,48 @@ The original SDL2 frontend remains available as a migration fallback:
 ```text
 cargo run --features sdl2-frontend --bin nes -- play --rom path/to/game.nes
 ```
+
+### WASM/browser frontend
+
+The browser frontend lives under `web/nes-web`. It is a separate frontend for
+the emulator library: Rust is compiled to WebAssembly, and the accompanying
+HTML and JavaScript load the generated package, create the display, load ROMs,
+and translate browser input into NES controller state. The HTML/JS is therefore
+part of the frontend, not just a development convenience.
+
+Prerequisites:
+
+- Rust and Cargo
+- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/)
+- A local HTTP server (browsers generally block WebAssembly modules and ROM
+  resources when the page is opened directly with `file://`)
+
+From the repository root, build the WebAssembly package into the web frontend:
+
+```text
+wasm-pack build web/nes-web --target web --out-dir web/nes-web/pkg
+```
+
+Serve the frontend over HTTP, then open the URL shown by the server. For
+example, with Python installed:
+
+```text
+python3 -m http.server 8000 --directory web/nes-web
+```
+
+Open <http://localhost:8000/> in a browser. Use the frontend's ROM file picker
+to load an iNES `.nes` ROM; the browser reads the selected file and passes its
+bytes to the emulator. ROM files are not bundled into the WASM package.
+
+The default keyboard mapping is:
+
+| NES button | Keyboard |
+| --- | --- |
+| A | `Z` |
+| B | `X` |
+| Select | `Shift` |
+| Start | `Enter` |
+| D-pad | Arrow keys |
+
+The browser frontend should prevent browser actions for keys used by the
+emulator (especially the arrow keys and `Enter`) while the game has focus.

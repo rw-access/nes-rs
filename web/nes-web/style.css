@@ -1,0 +1,91 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #101116;
+  color: #f5f5f5;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-height: 100vh; }
+
+.shell {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.toolbar > div { margin-right: auto; }
+h1 { margin: 0; font-size: 1.25rem; }
+p { margin: .25rem 0 0; color: #a8acb9; font-size: .9rem; }
+
+button, .file-button {
+  border: 1px solid #474c5b;
+  border-radius: .45rem;
+  background: #202532;
+  color: inherit;
+  padding: .55rem .8rem;
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+
+button:hover, .file-button:hover, button:focus-visible, .file-button:focus-within { background: #30394c; }
+button:disabled { cursor: not-allowed; opacity: .45; }
+input { display: none; }
+
+.screen-wrap {
+  display: grid;
+  place-items: center;
+  padding: min(3vw, 2rem);
+  border: 1px solid #303542;
+  border-radius: .75rem;
+  background: #050608;
+}
+
+canvas {
+  width: min(768px, 100%);
+  height: auto;
+  aspect-ratio: 256 / 240;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #000;
+}
+
+.controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem auto;
+  max-width: 620px;
+}
+
+.dpad {
+  display: grid;
+  grid-template: repeat(3, 2.8rem) / repeat(3, 2.8rem);
+  gap: .25rem;
+}
+.dpad button:nth-child(1) { grid-area: 1 / 2; }
+.dpad button:nth-child(2) { grid-area: 2 / 1; }
+.dpad button:nth-child(3) { grid-area: 3 / 2; }
+.dpad button:nth-child(4) { grid-area: 2 / 3; }
+.dpad button, .face-buttons button { padding: 0; }
+.menu-buttons, .face-buttons { display: flex; gap: .4rem; }
+.face-buttons button { width: 2.8rem; height: 2.8rem; border-radius: 50%; }
+.hint { text-align: center; }
+
+@media (max-width: 560px) {
+  .toolbar > div { flex-basis: 100%; }
+  .controls { align-items: end; }
+  .menu-buttons { flex-direction: column; }
+}
