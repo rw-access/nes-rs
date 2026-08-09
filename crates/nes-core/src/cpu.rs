@@ -1419,14 +1419,14 @@ impl CPU {
         opcode: u8,
     ) -> CompactDecodedInstruction {
         let extended_opcode = &EXTENDED_OPCODES[opcode as usize];
-        self.decode_compact_with_metadata(
+        self.decode_compact_with_metadata::<false>(
             bus,
             addr,
             extended_opcode.opcode,
             extended_opcode.addressing_mode,
             extended_opcode.min_cycles,
             extended_opcode.page_boundary_penalty,
-            None,
+            [0; 2],
         )
     }
 
@@ -1438,19 +1438,19 @@ impl CPU {
         addr: u16,
         instruction: TimestampedStaticInstruction,
     ) -> CompactDecodedInstruction {
-        self.decode_compact_with_metadata(
+        self.decode_compact_with_metadata::<true>(
             bus,
             addr,
             instruction.opcode,
             instruction.addressing_mode,
             instruction.min_cycles,
             instruction.page_boundary_penalty,
-            Some(instruction.operand),
+            instruction.operand,
         )
     }
 
     #[inline]
-    fn decode_compact_with_metadata(
+    fn decode_compact_with_metadata<const CACHED_OPERAND: bool>(
         &self,
         bus: &MemoryBus,
         addr: u16,
@@ -1458,15 +1458,15 @@ impl CPU {
         addressing_mode: AddressingMode,
         min_cycles: u8,
         page_boundary_penalty: bool,
-        cached_operand: Option<[u8; 2]>,
+        cached_operand: [u8; 2],
     ) -> CompactDecodedInstruction {
         let operand_addr = addr.wrapping_add(1);
         let read_operand_byte = |offset: usize| {
-            cached_operand
-                .map(|operand| operand[offset])
-                .unwrap_or_else(|| {
-                    self.read_code_byte(bus, operand_addr.wrapping_add(offset as u16))
-                })
+            if CACHED_OPERAND {
+                cached_operand[offset]
+            } else {
+                self.read_code_byte(bus, operand_addr.wrapping_add(offset as u16))
+            }
         };
         let read_operand_address =
             || u16::from_le_bytes([read_operand_byte(0), read_operand_byte(1)]);
