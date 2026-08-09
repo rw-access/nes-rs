@@ -569,6 +569,14 @@ impl PPU {
         mapper: &mut M,
         screen: &mut Screen,
     ) {
+        // In the headless benchmark path, a scanline without sprite zero can
+        // never set sprite-zero-hit. Keep the exact fetch/transition timeline
+        // but avoid all per-pixel background/sprite occupancy work.
+        if !WRITE_OUTPUT && !self.sprite_zero_in_line {
+            self.catch_up_background_tile(tile_start, mapper);
+            return;
+        }
+
         let y = self.scanline as usize;
         let fine_x = self.fine_x;
         let processed_tile = self.processed_tile;
@@ -1380,12 +1388,22 @@ mod timestamped_tests {
         assert_eq!(exact.control_reg, caught_up.control_reg);
         assert_eq!(exact.status_reg, caught_up.status_reg);
         assert_eq!(exact.mask_reg, caught_up.mask_reg);
+        assert_eq!(exact.oam_addr, caught_up.oam_addr);
+        assert_eq!(
+            exact.buffered_ppu_data.get(),
+            caught_up.buffered_ppu_data.get()
+        );
         assert_eq!(exact.v, caught_up.v);
         assert_eq!(exact.t, caught_up.t);
         assert_eq!(exact.w, caught_up.w);
         assert_eq!(exact.in_vblank, caught_up.in_vblank);
         assert_eq!(exact.pending_nmi, caught_up.pending_nmi);
         assert_eq!(exact.last_read.get(), caught_up.last_read.get());
+        assert_eq!(exact.oam, caught_up.oam);
+        assert_eq!(exact.palette_ram, caught_up.palette_ram);
+        assert_eq!(exact.nametables, caught_up.nametables);
+        assert_eq!(exact.nametable_mirroring, caught_up.nametable_mirroring);
+        assert_eq!(exact.nametable_map, caught_up.nametable_map);
         assert_eq!(exact.pending_tile, caught_up.pending_tile);
         assert_eq!(exact.processed_tile, caught_up.processed_tile);
         assert_eq!(exact.secondary_oam, caught_up.secondary_oam);
@@ -1721,6 +1739,62 @@ mod timestamped_tests {
             .flatten()
             .any(|&pixel| pixel != 0));
         assert_eq!(headless_screen.pixels, Screen::default().pixels);
+    }
+
+    #[test]
+    fn timestamped_headless_zero_candidate_skip_preserves_dma_sprite_state() {
+        for zero_candidate in [false, true] {
+            for mask in [0x08, 0x10, 0x18, 0x1e] {
+                let mut ppu = PPU::default();
+                ppu.control_reg = 0x1d;
+                ppu.mask_reg = mask;
+                ppu.v = 0x0417;
+                ppu.t = 0x0417;
+                ppu.fine_x = 5;
+
+                for (index, value) in ppu.nametables.iter_mut().enumerate() {
+                    *value = (index as u8).wrapping_mul(29).rotate_left(1);
+                }
+                for (index, value) in ppu.palette_ram.iter_mut().enumerate() {
+                    *value = 0x40 | (index as u8).wrapping_mul(3);
+                }
+
+                // Install the line's sprites through the same OAM DMA entry
+                // point used by the CPU, including a non-zero sprite that is
+                // present even when sprite zero is not in range.
+                let mut dma_page = [0xff; 256];
+                dma_page[0..4].copy_from_slice(&[
+                    if zero_candidate { 0 } else { 32 },
+                    0x00,
+                    0x00,
+                    0x00,
+                ]);
+                dma_page[4..8].copy_from_slice(&[0, 0x07, 0x21, 0x08]);
+                dma_page[8..12].copy_from_slice(&[0, 0x11, 0x42, 0x20]);
+                ppu.write_dma(Some(&dma_page));
+
+                let mut rendered = ppu.clone();
+                let mut headless = ppu;
+                let mut rendered_mapper = VariedMapper;
+                let mut headless_mapper = VariedMapper;
+                let mut rendered_screen = Screen::default();
+                let mut headless_screen = Screen::default();
+
+                rendered.catch_up_visible_scanline_inner::<true, _>(
+                    &mut rendered_mapper,
+                    &mut rendered_screen,
+                );
+                headless.catch_up_visible_scanline_inner::<false, _>(
+                    &mut headless_mapper,
+                    &mut headless_screen,
+                );
+
+                assert_same_state(&rendered, &headless);
+                assert_eq!(rendered.scanline, 1);
+                assert_eq!(rendered.cycle_in_scanline, 0);
+                assert_eq!(headless_screen.pixels, Screen::default().pixels);
+            }
+        }
     }
 
     #[test]
