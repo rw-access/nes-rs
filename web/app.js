@@ -53,6 +53,7 @@ const WIDTH = 256;
 const HEIGHT = 240;
 const FRAME_MS = 1000 / 60;
 const DISPLAY_MODE_LABELS = ["Background", "Sprites", "Both"];
+const GHOST_RECORD_BYTES = 6;
 
 const BUTTONS = Object.freeze({
   a: 1 << 0,
@@ -210,9 +211,7 @@ function displayModeLabel() {
 function cycleDisplayMode() {
   if (!emulator) return;
   emulator.cycle_display_mode();
-  const rgba = emulator.rgba_buffer();
-  image.data.set(rgba);
-  context.putImageData(image, 0, 0);
+  renderVideo();
   setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${emulator.frame_metadata().frame_number} · ${displayModeLabel()}`);
 }
 
@@ -270,9 +269,7 @@ function rewindFrame() {
 function drawFrame(scheduleAudio = true) {
   if (!emulator) return null;
   const metadata = emulator.step_frame();
-  const rgba = emulator.rgba_buffer();
-  image.data.set(rgba);
-  context.putImageData(image, 0, 0);
+  renderVideo();
   setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number} · ${displayModeLabel()}`);
   if (scheduleAudio) {
     try {
@@ -284,6 +281,33 @@ function drawFrame(scheduleAudio = true) {
     }
   }
   return metadata;
+}
+
+function renderVideo() {
+  const rgba = emulator.rgba_buffer();
+  image.data.set(rgba);
+  if (!rewinding && emulator.display_mode() !== 0) {
+    blendGhosts(image.data, emulator.ghost_buffer());
+  }
+  context.putImageData(image, 0, 0);
+}
+
+function blendGhosts(rgba, records) {
+  if (records.length === 0) return;
+  if (records.length % GHOST_RECORD_BYTES !== 0) {
+    throw new Error("invalid ghost record length");
+  }
+
+  for (let offset = 0; offset < records.length; offset += GHOST_RECORD_BYTES) {
+    const x = records[offset];
+    const y = records[offset + 1];
+    const opacity = records[offset + 5] / 255;
+    const inverse = 1 - opacity;
+    const pixel = (y * WIDTH + x) * 4;
+    rgba[pixel] = Math.round(records[offset + 2] * opacity + rgba[pixel] * inverse);
+    rgba[pixel + 1] = Math.round(records[offset + 3] * opacity + rgba[pixel + 1] * inverse);
+    rgba[pixel + 2] = Math.round(records[offset + 4] * opacity + rgba[pixel + 2] * inverse);
+  }
 }
 
 function tick(now) {
@@ -461,5 +485,5 @@ for (const button of document.querySelectorAll("[data-button]")) {
   }
 }
 
-await init("./pkg/nes_wasm_bg.wasm?v=11");
+await init("./pkg/nes_wasm_bg.wasm?v=12");
 requestAnimationFrame(tick);

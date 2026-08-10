@@ -8,7 +8,8 @@ mod sdl2_frontend {
         cartridge,
         console::Console,
         controller::Button,
-        video::{RenderMode, NES_PALETTE_RGB},
+        video::{RenderMode, FRAME_HEIGHT, NES_PALETTE_RGB},
+        FRAME_WIDTH,
     };
     use sdl2::event::Event;
     use sdl2::keyboard::Keycode;
@@ -131,6 +132,60 @@ mod sdl2_frontend {
                 }
             }
             RenderMode::Both => frame.pixels[y][x],
+        }
+    }
+
+    fn blend_channel(destination: u8, source: u8, opacity: f32) -> u8 {
+        (source as f32 * opacity + destination as f32 * (1.0 - opacity)).round() as u8
+    }
+
+    fn overlay_ghosts(
+        raw_texture: &mut [u8],
+        frame: &nes_core::FrameOutput<'_>,
+        mode: RenderMode,
+        scaling: usize,
+    ) {
+        if mode == RenderMode::Background {
+            return;
+        }
+
+        let texture_width = FRAME_WIDTH * scaling;
+
+        // The core stores layers oldest-to-newest, so later layers naturally
+        // source-over the earlier ones at each overlapping pixel.
+        for layer in frame.ghost_layers {
+            let opacity = layer.opacity().clamp(0.0, 1.0);
+            if opacity <= 0.0 {
+                continue;
+            }
+
+            let Some(ghost_frame) = layer.current_frame() else {
+                continue;
+            };
+
+            for sprite in ghost_frame.sprites() {
+                if sprite.y as usize >= FRAME_HEIGHT {
+                    continue;
+                }
+
+                let [_, source_r, source_g, source_b] =
+                    NES_PALETTE_RGB[sprite.palette_index as usize & 0x3f].to_be_bytes();
+                let x = sprite.x as usize * scaling;
+                let y = sprite.y as usize * scaling;
+
+                for y_offset in 0..scaling {
+                    let row_start = (y + y_offset) * texture_width;
+                    for x_offset in 0..scaling {
+                        let pixel_offset = (row_start + x + x_offset) * 3;
+                        raw_texture[pixel_offset] =
+                            blend_channel(raw_texture[pixel_offset], source_r, opacity);
+                        raw_texture[pixel_offset + 1] =
+                            blend_channel(raw_texture[pixel_offset + 1], source_g, opacity);
+                        raw_texture[pixel_offset + 2] =
+                            blend_channel(raw_texture[pixel_offset + 2], source_b, opacity);
+                    }
+                }
+            }
         }
     }
 
@@ -367,6 +422,10 @@ mod sdl2_frontend {
                 }
             }
 
+            if !rewind {
+                overlay_ghosts(&mut raw_texture, &frame, display_mode, SCALING as usize);
+            }
+
             texture
                 .update(None, &raw_texture, (SCALING * WIDTH * 3) as usize)
                 .unwrap();
@@ -408,7 +467,23 @@ mod sdl2_frontend {
 
     #[cfg(test)]
     mod tests {
-        use super::{AudioBlock, AudioQueueAction, AudioQueuePacer};
+        use super::{blend_channel, AudioBlock, AudioQueueAction, AudioQueuePacer};
+
+        #[test]
+        fn source_over_blend_interpolates_rgb_channels() {
+            assert_eq!(blend_channel(100, 200, 0.25), 125);
+            assert_eq!(blend_channel(100, 50, 0.25), 88);
+            assert_eq!(blend_channel(100, 0, 0.0), 100);
+            assert_eq!(blend_channel(100, 0, 1.0), 0);
+        }
+
+        #[test]
+        fn newer_ghost_layer_is_composited_over_older_layer() {
+            let mut destination = 0;
+            destination = blend_channel(destination, 200, 0.5);
+            destination = blend_channel(destination, 0, 0.5);
+            assert_eq!(destination, 50);
+        }
 
         #[test]
         fn audio_block_is_reused_as_one_frame_sized_buffer() {

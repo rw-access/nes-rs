@@ -23,4 +23,7 @@ pub use video::{
 };
 
 #[cfg(feature = "layered-render")]
+pub use ghost::{GhostFrame, GhostLayer, GhostSprite, GhostTimeline, GHOST_BASE_OPACITY};
+
+#[cfg(feature = "layered-render")]
 pub use video::{FrameLayers, FrameMask, FramePixels, RenderLayer, RenderMode};

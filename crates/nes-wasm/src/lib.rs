@@ -1,7 +1,10 @@
 use std::io::Cursor;
 
 use js_sys::{Float32Array, Uint8Array};
-use nes_core::{cartridge, ines, Console, RenderMode, VideoBuffer, AUDIO_SAMPLE_RATE};
+use nes_core::ghost::GhostLayer;
+use nes_core::{
+    cartridge, ines, Console, RenderMode, VideoBuffer, AUDIO_SAMPLE_RATE, NES_PALETTE_RGBA,
+};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -19,6 +22,8 @@ pub struct NesWeb {
     audio: Vec<f32>,
     rgba_js: Uint8Array,
     audio_js: Float32Array,
+    ghost_buffer: Vec<u8>,
+    ghost_buffer_js: Uint8Array,
     controller_bits: u8,
     audio_discontinuity_pending: bool,
     last_frame: FrameMetadata,
@@ -93,6 +98,8 @@ impl NesWeb {
             audio: Vec::with_capacity((AUDIO_SAMPLE_RATE / 55) as usize + 8),
             rgba_js: Uint8Array::new_with_length(nes_core::video::FRAME_RGBA_BYTES as u32),
             audio_js: Float32Array::new_with_length(4096),
+            ghost_buffer: Vec::new(),
+            ghost_buffer_js: Uint8Array::new_with_length(0),
             controller_bits: 0,
             audio_discontinuity_pending: false,
             last_frame: FrameMetadata {
@@ -118,6 +125,7 @@ impl NesWeb {
             frame.copy_mode_to(self.display_mode, &mut self.video);
             self.audio.clear();
             self.audio.extend_from_slice(frame.audio_samples);
+            collect_ghost_layers(frame.ghost_layers, &mut self.ghost_buffer);
             (
                 frame.frame_number,
                 frame.audio_sample_rate,
@@ -137,6 +145,8 @@ impl NesWeb {
                 .subarray(self.audio.len() as u32, self.audio_js.length())
                 .fill(0.0, 0, self.audio_js.length());
         }
+        self.ghost_buffer_js = Uint8Array::new_with_length(self.ghost_buffer.len() as u32);
+        self.ghost_buffer_js.copy_from(&self.ghost_buffer);
         self.last_frame = FrameMetadata {
             frame_number,
             width: nes_core::video::FRAME_WIDTH as u32,
@@ -162,6 +172,12 @@ impl NesWeb {
     /// as the valid prefix length; it is not a view into WASM memory.
     pub fn audio_buffer(&self) -> Float32Array {
         self.audio_js.clone()
+    }
+
+    /// Return JS-owned sparse [x, y, red, green, blue, alpha] records for the
+    /// current frame of each active replay ghost, ordered oldest to newest.
+    pub fn ghost_buffer(&self) -> Uint8Array {
+        self.ghost_buffer_js.clone()
     }
 
     /// Cycle the display through sprites, background/tiles, and the normal
@@ -220,5 +236,100 @@ impl NesWeb {
 
     pub fn audio_sample_rate(&self) -> u32 {
         AUDIO_SAMPLE_RATE
+    }
+}
+
+fn collect_ghost_layers(layers: &[GhostLayer], buffer: &mut Vec<u8>) {
+    buffer.clear();
+    for layer in layers {
+        let Some(frame) = layer.current_frame() else {
+            continue;
+        };
+        let alpha = (layer.opacity().clamp(0.0, 1.0) * 255.0).round() as u8;
+        for sprite in frame.sprites() {
+            let [red, green, blue, _] = NES_PALETTE_RGBA[sprite.palette_index as usize & 0x3f];
+            buffer.extend_from_slice(&[sprite.x, sprite.y, red, green, blue, alpha]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_ghost_layers;
+    use nes_core::ghost::GhostTimeline;
+    use nes_core::{RenderLayer, FRAME_HEIGHT, FRAME_WIDTH, NES_PALETTE_RGBA};
+
+    #[test]
+    fn ghost_buffer_serializes_current_sparse_layer_with_alpha() {
+        let mut sprite_layer = RenderLayer {
+            pixels: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            coverage: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+        };
+        sprite_layer.pixels[12][34] = 0x3f;
+        sprite_layer.coverage[12][34] = 1;
+
+        let mut timeline = GhostTimeline::default();
+        timeline.capture_frame(&sprite_layer);
+        assert!(timeline.finish_capture());
+        timeline.begin_frame();
+
+        let mut buffer = Vec::new();
+        collect_ghost_layers(timeline.layers(), &mut buffer);
+
+        assert_eq!(buffer.len(), 6);
+        assert_eq!(&buffer[..2], &[34, 12]);
+        assert_eq!(&buffer[2..5], &NES_PALETTE_RGBA[0x3f][..3]);
+        assert_eq!(buffer[5], 128);
+    }
+
+    #[test]
+    fn ghost_buffer_orders_layers_oldest_to_newest_with_independent_opacity() {
+        let mut first = RenderLayer {
+            pixels: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            coverage: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+        };
+        first.pixels[2][1] = 0x01;
+        first.coverage[2][1] = 1;
+        let mut first_next = first.clone();
+        first_next.pixels[2][1] = 0x02;
+
+        let mut second = first.clone();
+        second.pixels[2][1] = 0x03;
+
+        let mut timeline = GhostTimeline::default();
+        timeline.capture_frame(&first);
+        timeline.capture_frame(&first_next);
+        assert!(timeline.finish_capture());
+        timeline.begin_frame();
+        timeline.capture_frame(&second);
+        assert!(timeline.finish_capture());
+        timeline.begin_frame();
+
+        let mut buffer = Vec::new();
+        collect_ghost_layers(timeline.layers(), &mut buffer);
+
+        assert_eq!(buffer.len(), 12);
+        assert_eq!(
+            &buffer[..5],
+            &[
+                1,
+                2,
+                NES_PALETTE_RGBA[0x02][0],
+                NES_PALETTE_RGBA[0x02][1],
+                NES_PALETTE_RGBA[0x02][2]
+            ]
+        );
+        assert_eq!(buffer[5], 64);
+        assert_eq!(
+            &buffer[6..11],
+            &[
+                1,
+                2,
+                NES_PALETTE_RGBA[0x03][0],
+                NES_PALETTE_RGBA[0x03][1],
+                NES_PALETTE_RGBA[0x03][2]
+            ]
+        );
+        assert_eq!(buffer[11], 128);
     }
 }

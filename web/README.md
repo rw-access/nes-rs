@@ -23,6 +23,9 @@ collects browser errors and emulator/audio failures at `/__debug` and prints
 them to its terminal.
 
 The generated wrapper exposes ROM loading, frame stepping, reusable video and
-audio buffers, controller updates, rewind, and save-state objects. Frame
-metadata reports the variable audio block length and marks discontinuities so
-the JavaScript audio scheduler can flush before scheduling post-rewind audio.
+audio buffers, controller updates, rewind, save-state objects, and a compact
+`ghost_buffer()` containing the shared core timeline's active sprite ghosts.
+Frame metadata reports the variable audio block length and marks
+discontinuities so the JavaScript audio scheduler can flush before scheduling
+post-rewind audio. Ghost capture/replay state is owned by `nes-core`; the
+browser only composites the current buffer over Sprites/Both output.

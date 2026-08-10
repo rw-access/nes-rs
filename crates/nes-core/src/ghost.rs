@@ -213,6 +213,8 @@ mod tests {
 
         assert_eq!(timeline.layers().len(), 2);
         assert_eq!(timeline.layers()[0].frame_index(), 1);
+        assert_eq!(timeline.layers()[0].opacity(), GHOST_BASE_OPACITY / 2.0);
         assert_eq!(timeline.layers()[1].frame_index(), 0);
+        assert_eq!(timeline.layers()[1].opacity(), GHOST_BASE_OPACITY);
     }
 }
