@@ -39,6 +39,28 @@ Set `NES_TEST_ROM_ROOT` to use a different checkout of the ROM repository. The
 test is skipped when `NES_RUN_APU_ROM_TESTS` is not set to `1`, so ordinary
 `cargo test` does not require the submodule or execute ROMs.
 
+## FM2 movie to MP4 exporter
+
+The native `fm2_to_mp4` tool replays a plain-text FCEUX version-3 movie against
+the ROM used to record it and streams the resulting NES frames to FFmpeg. It
+uses native 256×240 output by default, includes emulator audio, and prefers a
+hardware H.264 encoder when FFmpeg provides one.
+
+Install FFmpeg, then run:
+
+```text
+cargo run --release -p nes-render --features fm2-cli --bin fm2_to_mp4 -- \
+  path/to/movie.fm2 path/to/game.nes --output movie.mp4
+```
+
+Use `--fps 60` to normalize timing to 60 FPS, `--fps 50` for 50 FPS, and
+`--scale 3` for nearest-neighbor 3× output. `--video-only` omits emulator
+audio, and `--ignore-rom-checksum` bypasses the FM2/ROM identity check.
+
+The first version accepts power-on, text-log FM2 files with one standard
+gamepad. Binary logs, savestate movies, PAL/NewPPU movies, FDS, and other
+peripherals are rejected with an explanatory error.
+
 ## Strict video-off mode
 
 Call `Console::set_video_output(VideoOutput::Disabled)` to suppress only final

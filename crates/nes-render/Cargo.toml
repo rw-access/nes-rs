@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 headless-cli = ["dep:clap"]
+fm2-cli = ["headless-cli", "nes-core/rewind-disabled"]
 apu-disabled = ["nes-core/apu-disabled"]
 rewind-disabled = ["nes-core/rewind-disabled"]
 timestamped-scheduler = ["nes-core/timestamped-scheduler"]
@@ -19,3 +20,8 @@ clap = { version = "4.0.15", features = ["derive"], optional = true }
 name = "headless_test"
 path = "src/bin/headless_test.rs"
 required-features = ["headless-cli"]
+
+[[bin]]
+name = "fm2_to_mp4"
+path = "src/bin/fm2_to_mp4.rs"
+required-features = ["fm2-cli"]
