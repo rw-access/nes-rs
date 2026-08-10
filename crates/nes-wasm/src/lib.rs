@@ -314,9 +314,9 @@ mod tests {
             &[
                 1,
                 2,
-                NES_PALETTE_RGBA[0x02][0],
-                NES_PALETTE_RGBA[0x02][1],
-                NES_PALETTE_RGBA[0x02][2]
+                NES_PALETTE_RGBA[0x01][0],
+                NES_PALETTE_RGBA[0x01][1],
+                NES_PALETTE_RGBA[0x01][2]
             ]
         );
         assert_eq!(buffer[5], 64);
