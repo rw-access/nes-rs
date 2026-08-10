@@ -86,18 +86,63 @@ let rewindStartedAt = 0;
 class AudioScheduler {
   constructor() {
     this.context = null;
+    this.contextConstructor = window.AudioContext || window.webkitAudioContext;
     this.nextTime = 0;
     this.sources = new Set();
     this.prefillSeconds = 0.05;
+    this.muted = false;
+  }
+
+  updateButton() {
+    if (this.muted) {
+      audioButton.textContent = "Audio muted";
+    } else if (this.context?.state === "running") {
+      audioButton.textContent = "Audio enabled";
+    } else {
+      audioButton.textContent = "Enable audio";
+    }
   }
 
   async enable() {
-    if (!this.context) {
-      this.context = new AudioContext();
-      this.nextTime = this.context.currentTime + this.prefillSeconds;
+    if (!this.contextConstructor) {
+      throw new Error("Web Audio is not supported by this browser");
     }
-    await this.context.resume();
-    audioButton.textContent = "Audio enabled";
+
+    // iPadOS otherwise uses the ambient/ringer audio session for Web Audio,
+    // which can be muted while the tab still shows a playing indicator.
+    // `audioSession` is not available on every browser, so keep this optional.
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = "playback"; }
+      catch (error) { reportDebug("audio-session", error); }
+    }
+
+    if (!this.context) {
+      this.context = new this.contextConstructor();
+      this.nextTime = this.context.currentTime + this.prefillSeconds;
+
+      // iPad WebKit can leave a newly-created context silent until a source
+      // has been started during the same user gesture that unlocks audio.
+      // A one-sample silent buffer opens the audio session without adding
+      // anything audible.
+      const unlockBuffer = this.context.createBuffer(1, 1, this.context.sampleRate);
+      const unlockSource = this.context.createBufferSource();
+      unlockSource.buffer = unlockBuffer;
+      unlockSource.connect(this.context.destination);
+      unlockSource.start(0);
+    }
+    if (this.context.state !== "running") await this.context.resume();
+    if (this.context.state !== "running") {
+      throw new Error(`AudioContext is ${this.context.state}`);
+    }
+    this.updateButton();
+    reportDebug("audio-state", this.context.state, this.context.sampleRate);
+  }
+
+  toggleMute() {
+    this.muted = !this.muted;
+    if (this.muted) this.flush();
+    this.updateButton();
+    reportDebug("audio-mute", this.muted);
   }
 
   flush() {
@@ -113,7 +158,7 @@ class AudioScheduler {
 
   schedule(samples, sampleRate, discontinuity) {
     if (discontinuity) this.flush();
-    if (!this.context || samples.length === 0) return;
+    if (!this.context || this.muted || samples.length === 0) return;
 
     // The core emits 48 kHz, while a browser AudioContext may run at 44.1 kHz
     // or another device-selected rate. Resample explicitly so the scheduled
@@ -122,7 +167,12 @@ class AudioScheduler {
       ? samples
       : resample(samples, sampleRate, this.context.sampleRate);
     const buffer = this.context.createBuffer(1, outputSamples.length, this.context.sampleRate);
-    buffer.copyToChannel(outputSamples, 0);
+    if (buffer.copyToChannel) {
+      buffer.copyToChannel(outputSamples, 0);
+    } else {
+      // Older iPad WebKit has AudioBuffer but not copyToChannel.
+      buffer.getChannelData(0).set(outputSamples);
+    }
     const source = this.context.createBufferSource();
     source.buffer = buffer;
     source.connect(this.context.destination);
@@ -295,6 +345,13 @@ audioButton.addEventListener("click", async () => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !audio.context) return;
+  // iPad may interrupt/suspend Web Audio when the tab loses focus or the
+  // device is locked. Re-resume the existing context when it returns.
+  audio.enable().catch((error) => reportDebug("audio-resume", error));
+});
+
 snapshotButton.addEventListener("click", () => {
   if (!emulator) return;
   savedSnapshot = emulator.save_snapshot();
@@ -323,28 +380,36 @@ for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
 }
 
 const keyboard = new Map([
-  ["z", "a"], ["x", "b"], ["Shift", "select"], ["Enter", "start"],
+  ["w", "up"], ["a", "left"], ["s", "down"], ["d", "right"],
+  ["j", "a"], ["k", "b"], ["z", "a"], ["x", "b"], ["Shift", "select"], ["Enter", "start"],
   ["ArrowUp", "up"], ["ArrowDown", "down"], ["ArrowLeft", "left"], ["ArrowRight", "right"],
 ]);
 window.addEventListener("keydown", (event) => {
   reportDebug("keydown", event.key);
-  if (event.key.toLowerCase() === "r") {
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "r") {
     event.preventDefault();
     startRewind();
     return;
   }
-  const name = keyboard.get(event.key);
+  if (key === "m") {
+    event.preventDefault();
+    if (!event.repeat) audio.toggleMute();
+    return;
+  }
+  const name = keyboard.get(key);
   if (!name) return;
   event.preventDefault();
   press(name);
 });
 window.addEventListener("keyup", (event) => {
-  if (event.key.toLowerCase() === "r") {
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "r") {
     event.preventDefault();
     stopRewind();
     return;
   }
-  const name = keyboard.get(event.key);
+  const name = keyboard.get(key);
   if (!name) return;
   event.preventDefault();
   release(name);
