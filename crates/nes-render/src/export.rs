@@ -93,6 +93,7 @@ pub fn export_movie(
 
     let ffmpeg = locate_ffmpeg()?;
     let mut encoder = choose_encoder(&ffmpeg, options.encoder)?;
+    let use_piped_audio = !options.video_only && can_pipe_audio();
     let video_temp = TempPath::new("video.mp4")?;
     let final_temp = TempPath::in_directory(
         options
@@ -102,7 +103,7 @@ pub fn export_movie(
             .unwrap_or_else(|| Path::new(".")),
         "output.mp4",
     )?;
-    let audio_temp = if options.video_only {
+    let audio_temp = if options.video_only || use_piped_audio {
         None
     } else {
         Some(TempPath::new("audio.wav")?)
@@ -110,21 +111,16 @@ pub fn export_movie(
 
     let started = Instant::now();
     let mut console = new_console(rom)?;
-    if let Err(error) = encode_video(
-        &ffmpeg,
-        &encoder,
-        options,
-        &mut console,
-        movie,
-        &video_temp.path,
-        audio_temp.as_ref().map(|path| path.path.as_path()),
-    ) {
-        if options.encoder != EncoderPreference::Auto || encoder == "libx264" {
-            return Err(error);
-        }
-        eprintln!("{encoder} was unavailable at runtime; replaying with libx264 ({error})");
-        encoder = "libx264".to_owned();
-        console = new_console(rom)?;
+    let encode_result = if use_piped_audio {
+        encode_video_with_piped_audio(
+            &ffmpeg,
+            &encoder,
+            options,
+            &mut console,
+            movie,
+            &final_temp.path,
+        )
+    } else {
         encode_video(
             &ffmpeg,
             &encoder,
@@ -133,11 +129,44 @@ pub fn export_movie(
             movie,
             &video_temp.path,
             audio_temp.as_ref().map(|path| path.path.as_path()),
-        )?;
+        )
+    };
+    if let Err(error) = encode_result {
+        if options.encoder != EncoderPreference::Auto || encoder == "libx264" {
+            return Err(error);
+        }
+        eprintln!("{encoder} was unavailable at runtime; replaying with libx264 ({error})");
+        encoder = "libx264".to_owned();
+        console = new_console(rom)?;
+        if use_piped_audio {
+            encode_video_with_piped_audio(
+                &ffmpeg,
+                &encoder,
+                options,
+                &mut console,
+                movie,
+                &final_temp.path,
+            )?;
+        } else {
+            encode_video(
+                &ffmpeg,
+                &encoder,
+                options,
+                &mut console,
+                movie,
+                &video_temp.path,
+                audio_temp.as_ref().map(|path| path.path.as_path()),
+            )?;
+        }
     }
 
-    if options.video_only {
-        finalize_output(&video_temp.path, &final_temp.path, &options.output)?;
+    if options.video_only || use_piped_audio {
+        let source = if use_piped_audio {
+            &final_temp.path
+        } else {
+            &video_temp.path
+        };
+        finalize_output(source, &final_temp.path, &options.output)?;
     } else {
         mux_audio(
             &ffmpeg,
@@ -156,6 +185,212 @@ pub fn export_movie(
         export_fps: movie.frames.len() as f64 / elapsed.max(f64::MIN_POSITIVE),
         encoder,
     })
+}
+
+#[cfg(unix)]
+fn can_pipe_audio() -> bool {
+    true
+}
+
+#[cfg(not(unix))]
+fn can_pipe_audio() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn encode_video_with_piped_audio(
+    ffmpeg: &Path,
+    encoder: &str,
+    options: &ExportOptions,
+    console: &mut Console,
+    movie: &Fm2Movie,
+    output_path: &Path,
+) -> Result<(), ExportError> {
+    let width = FRAME_WIDTH as u32 * options.scale;
+    let height = FRAME_HEIGHT as u32 * options.scale;
+    let audio_fifo = TempPath::new("audio.f32")?;
+    fs::remove_file(&audio_fifo.path)
+        .map_err(|error| ExportError::io("prepare FFmpeg audio FIFO", error))?;
+    let fifo_status = Command::new("mkfifo")
+        .arg(&audio_fifo.path)
+        .status()
+        .map_err(|error| ExportError::io("create FFmpeg audio FIFO", error))?;
+    if !fifo_status.success() {
+        return Err(ExportError::new(
+            "mkfifo could not create the FFmpeg audio FIFO",
+        ));
+    }
+    // Opening a FIFO for writing normally waits for the reader. Keep a
+    // read/write guard while FFmpeg starts so its input-open order cannot
+    // deadlock the independent audio writer.
+    let fifo_guard = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&audio_fifo.path)
+        .map_err(|error| ExportError::io("open FFmpeg audio FIFO guard", error))?;
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("rgb24")
+        .arg("-s:v")
+        .arg(format!("{width}x{height}"))
+        .arg("-framerate")
+        .arg(options.frame_rate.as_ffmpeg_value())
+        .arg("-thread_queue_size")
+        .arg("512")
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-f")
+        .arg("f32le")
+        .arg("-ar")
+        .arg("48000")
+        .arg("-ac")
+        .arg("1")
+        .arg("-thread_queue_size")
+        .arg("512")
+        .arg("-i")
+        .arg(&audio_fifo.path)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-map")
+        .arg("1:a:0")
+        .arg("-c:v")
+        .arg(encoder)
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-af")
+        .arg("apad")
+        .arg("-shortest");
+    if encoder == "libx264" {
+        command
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-crf")
+            .arg("18")
+            .arg("-threads")
+            .arg(
+                std::thread::available_parallelism()
+                    .map(|parallelism| parallelism.get().min(4))
+                    .unwrap_or(1)
+                    .to_string(),
+            );
+    } else {
+        command.arg("-b:v").arg("8M");
+    }
+    command
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(output_path)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(ExportError::io("failed to start FFmpeg", error)),
+    };
+    let video_input = child
+        .stdin
+        .take()
+        .ok_or_else(|| ExportError::new("FFmpeg video input pipe was not available"))?;
+    let audio_fifo_path = audio_fifo.path.clone();
+
+    let (video_tx, video_rx) = sync_channel(2);
+    let (video_free_tx, video_free_rx) = sync_channel(2);
+    let (audio_tx, audio_rx) = sync_channel(2);
+    let (audio_free_tx, audio_free_rx) = sync_channel(2);
+    let video_worker_free_tx = video_free_tx.clone();
+    let audio_worker_free_tx = audio_free_tx.clone();
+    let video_error = Arc::new(Mutex::new(None));
+    let audio_error = Arc::new(Mutex::new(None));
+    let video_error_slot = Arc::clone(&video_error);
+    let audio_error_slot = Arc::clone(&audio_error);
+    let scale = options.scale;
+    let frame_bytes =
+        FRAME_WIDTH * options.scale as usize * FRAME_HEIGHT * options.scale as usize * 3;
+    let video_worker = thread::spawn(move || {
+        let result = piped_video_worker(
+            video_input,
+            video_rx,
+            video_worker_free_tx,
+            scale,
+            frame_bytes,
+        );
+        if let Err(error) = &result {
+            *video_error_slot.lock().unwrap() = Some(error.to_string());
+        }
+        result
+    });
+    let audio_worker = thread::spawn(move || {
+        let result = RawAudioWriter::open(&audio_fifo_path).and_then(|audio_input| {
+            drop(fifo_guard);
+            piped_audio_worker(audio_input, audio_rx, audio_worker_free_tx)
+        });
+        if let Err(error) = &result {
+            *audio_error_slot.lock().unwrap() = Some(error.to_string());
+        }
+        result
+    });
+
+    for _ in 0..2 {
+        video_free_tx
+            .send(IndexedVideoBuffer::new())
+            .map_err(|_| ExportError::new("video worker stopped before encoding began"))?;
+        audio_free_tx
+            .send(Vec::with_capacity(1024))
+            .map_err(|_| ExportError::new("audio worker stopped before encoding began"))?;
+    }
+
+    for frame in &movie.frames {
+        let mut pixels = video_free_rx
+            .recv()
+            .map_err(|_| ExportError::new("video worker stopped while encoding"))?;
+        let mut samples = audio_free_rx
+            .recv()
+            .map_err(|_| ExportError::new("audio worker stopped while encoding"))?;
+        console.update_buttons(frame.buttons);
+        {
+            let output = console.next_frame();
+            pixels.pixels.copy_from_slice(output.pixels);
+        }
+        console.take_audio_samples_into(&mut samples);
+        video_tx
+            .send(pixels)
+            .map_err(|_| ExportError::new("video worker stopped while encoding"))?;
+        audio_tx
+            .send(samples)
+            .map_err(|_| ExportError::new("audio worker stopped while encoding"))?;
+    }
+    drop(video_tx);
+    drop(audio_tx);
+    video_worker
+        .join()
+        .map_err(|_| ExportError::new("video worker thread panicked"))??;
+    audio_worker
+        .join()
+        .map_err(|_| ExportError::new("audio worker thread panicked"))??;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| ExportError::io("failed waiting for FFmpeg", error))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(ExportError::new(if detail.is_empty() {
+            format!("FFmpeg video encoding failed ({})", output.status)
+        } else {
+            format!("FFmpeg video encoding failed: {detail}")
+        }));
+    }
+    Ok(())
 }
 
 fn new_console(rom: &[u8]) -> Result<Console, ExportError> {
@@ -330,6 +565,58 @@ impl FrameBuffer {
             audio: Vec::with_capacity(1024),
         }
     }
+}
+
+#[cfg(unix)]
+struct IndexedVideoBuffer {
+    pixels: Box<[[u8; FRAME_WIDTH]; FRAME_HEIGHT]>,
+}
+
+#[cfg(unix)]
+impl IndexedVideoBuffer {
+    fn new() -> Self {
+        Self {
+            pixels: Box::new([[0; FRAME_WIDTH]; FRAME_HEIGHT]),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn piped_video_worker(
+    video_input: ChildStdin,
+    jobs: Receiver<IndexedVideoBuffer>,
+    free: SyncSender<IndexedVideoBuffer>,
+    scale: u32,
+    frame_bytes: usize,
+) -> Result<(), ExportError> {
+    let mut input = BufWriter::with_capacity(1024 * 1024, video_input);
+    let mut video = Vec::with_capacity(frame_bytes);
+    for buffer in jobs {
+        render_rgb24(&mut video, &buffer.pixels, scale);
+        input
+            .write_all(&video)
+            .map_err(|error| ExportError::io("write FFmpeg video pipe", error))?;
+        free.send(buffer)
+            .map_err(|_| ExportError::new("video producer stopped while encoding"))?;
+    }
+    input
+        .flush()
+        .map_err(|error| ExportError::io("flush FFmpeg video pipe", error))
+}
+
+#[cfg(unix)]
+fn piped_audio_worker(
+    mut audio_input: RawAudioWriter,
+    jobs: Receiver<Vec<f32>>,
+    free: SyncSender<Vec<f32>>,
+) -> Result<(), ExportError> {
+    for mut samples in jobs {
+        audio_input.write_samples(&samples)?;
+        samples.clear();
+        free.send(samples)
+            .map_err(|_| ExportError::new("audio producer stopped while encoding"))?;
+    }
+    audio_input.finish()
 }
 
 fn receive_frame_buffer(
@@ -562,6 +849,53 @@ fn encoder_is_listed(listing: &str, encoder: &str) -> bool {
             .nth(1)
             .is_some_and(|name| name == encoder)
     })
+}
+
+#[cfg(unix)]
+struct RawAudioWriter {
+    file: BufWriter<File>,
+}
+
+#[cfg(unix)]
+impl RawAudioWriter {
+    fn open(path: &Path) -> Result<Self, ExportError> {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|error| ExportError::io("open FFmpeg audio FIFO", error))?;
+        Ok(Self {
+            file: BufWriter::with_capacity(64 * 1024, file),
+        })
+    }
+
+    fn write_samples(&mut self, samples: &[f32]) -> Result<(), ExportError> {
+        #[cfg(target_endian = "little")]
+        {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len() * 4)
+            };
+            self.file
+                .write_all(bytes)
+                .map_err(|error| ExportError::io("write FFmpeg audio pipe", error))?;
+        }
+        #[cfg(target_endian = "big")]
+        {
+            let mut bytes = Vec::with_capacity(samples.len() * 4);
+            for &sample in samples {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            self.file
+                .write_all(&bytes)
+                .map_err(|error| ExportError::io("write FFmpeg audio pipe", error))?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), ExportError> {
+        self.file
+            .flush()
+            .map_err(|error| ExportError::io("finish FFmpeg audio pipe", error))
+    }
 }
 
 struct WavWriter {
