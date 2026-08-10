@@ -51,14 +51,16 @@ impl GhostLayer {
         self.frame_index
     }
 
-    /// Linear opacity: the first frame is `GHOST_BASE_OPACITY`, and opacity is
-    /// exhausted when the captured span has been consumed.
+    /// Ease-out opacity: the first frame is `GHOST_BASE_OPACITY`, the ghost
+    /// remains visible longer through the replay, and opacity is exhausted
+    /// when the captured span has been consumed.
     pub fn opacity(&self) -> f32 {
         let span = self.frames.len();
         if span == 0 || self.frame_index >= span {
             0.0
         } else {
-            GHOST_BASE_OPACITY * (span - self.frame_index) as f32 / span as f32
+            let remaining = (span - self.frame_index) as f32 / span as f32;
+            GHOST_BASE_OPACITY * remaining.sqrt()
         }
     }
 }
@@ -179,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_fade_and_expire_linearly() {
+    fn layers_fade_more_gently_and_expire() {
         let mut timeline = GhostTimeline::default();
         timeline.capture_frame(&frame(0, 0, 1));
         timeline.capture_frame(&frame(1, 0, 2));
@@ -191,10 +193,13 @@ mod tests {
         timeline.begin_frame();
         assert_eq!(
             timeline.layers()[0].opacity(),
-            GHOST_BASE_OPACITY * 2.0 / 3.0
+            GHOST_BASE_OPACITY * (2.0f32 / 3.0).sqrt()
         );
         timeline.begin_frame();
-        assert_eq!(timeline.layers()[0].opacity(), GHOST_BASE_OPACITY / 3.0);
+        assert_eq!(
+            timeline.layers()[0].opacity(),
+            GHOST_BASE_OPACITY * (1.0f32 / 3.0).sqrt()
+        );
         timeline.begin_frame();
         assert!(timeline.layers().is_empty());
     }
@@ -213,7 +218,10 @@ mod tests {
 
         assert_eq!(timeline.layers().len(), 2);
         assert_eq!(timeline.layers()[0].frame_index(), 1);
-        assert_eq!(timeline.layers()[0].opacity(), GHOST_BASE_OPACITY / 2.0);
+        assert_eq!(
+            timeline.layers()[0].opacity(),
+            GHOST_BASE_OPACITY * (1.0f32 / 2.0).sqrt()
+        );
         assert_eq!(timeline.layers()[1].frame_index(), 0);
         assert_eq!(timeline.layers()[1].opacity(), GHOST_BASE_OPACITY);
     }

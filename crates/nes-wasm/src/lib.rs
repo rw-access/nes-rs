@@ -319,7 +319,7 @@ mod tests {
                 NES_PALETTE_RGBA[0x01][2]
             ]
         );
-        assert_eq!(buffer[5], 64);
+        assert_eq!(buffer[5], 90);
         assert_eq!(
             &buffer[6..11],
             &[
