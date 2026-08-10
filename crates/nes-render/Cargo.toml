@@ -6,7 +6,11 @@ edition = "2021"
 [features]
 default = []
 headless-cli = ["dep:clap"]
-fm2-cli = ["headless-cli", "nes-core/rewind-disabled"]
+fm2-cli = [
+    "headless-cli",
+    "nes-core/rewind-disabled",
+    "nes-core/timestamped-scheduler",
+]
 apu-disabled = ["nes-core/apu-disabled"]
 rewind-disabled = ["nes-core/rewind-disabled"]
 timestamped-scheduler = ["nes-core/timestamped-scheduler"]

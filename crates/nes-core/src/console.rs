@@ -555,6 +555,17 @@ impl Console {
         }
     }
 
+    /// Move the most recently produced audio samples into a reusable buffer.
+    ///
+    /// This is intended for producers that hand audio to another thread after
+    /// [`next_frame`](Self::next_frame). It avoids copying the samples while
+    /// leaving the console with the destination buffer's allocation for the
+    /// next frame.
+    pub fn take_audio_samples_into(&mut self, destination: &mut Vec<f32>) {
+        std::mem::swap(&mut self.audio_samples, destination);
+        self.audio_samples.clear();
+    }
+
     /// Compatibility wrapper for callers that consume audio through a callback.
     pub fn next_screen<F: FnMut(f32)>(&mut self, mut process_sample: F) -> &Screen {
         let frame = self.next_frame();

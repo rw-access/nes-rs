@@ -11,8 +11,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{
+        mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,9 +224,10 @@ fn encode_video(
     } else {
         command.arg("-b:v").arg("8M");
     }
+    if audio_path.is_none() {
+        command.arg("-movflags").arg("+faststart");
+    }
     command
-        .arg("-movflags")
-        .arg("+faststart")
         .arg(video_path)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped());
@@ -233,16 +239,135 @@ fn encode_video(
         .stdin
         .take()
         .ok_or_else(|| ExportError::new("FFmpeg video input pipe was not available"))?;
-    // A native NES frame is 184 KiB but write_rgb24 emits one row at a time.
-    // Buffer the pipe so those 240 logical row writes do not become 240 pipe
-    // syscalls per frame.
-    let mut video_input = BufWriter::with_capacity(1024 * 1024, video_input);
-    let mut audio = audio_path.map(WavWriter::create).transpose()?;
+    // Keep the FFmpeg pipe buffered; the output worker writes each converted
+    // frame as one contiguous block.
+    let video_input = BufWriter::with_capacity(1024 * 1024, video_input);
+    let audio = audio_path.map(WavWriter::create).transpose()?;
+    let (jobs_tx, jobs_rx) = sync_channel(2);
+    let (free_tx, free_rx) = sync_channel(2);
+    let worker_free_tx = free_tx.clone();
+    let frame_bytes = FRAME_WIDTH
+        .checked_mul(options.scale as usize)
+        .and_then(|width| {
+            FRAME_HEIGHT
+                .checked_mul(options.scale as usize)
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| ExportError::new("scaled video frame is too large"))?;
+    let scale = options.scale;
+    let worker_error = Arc::new(Mutex::new(None));
+    let worker_error_slot = Arc::clone(&worker_error);
+    let worker = thread::spawn(move || {
+        let result = encode_video_worker(
+            child,
+            video_input,
+            audio,
+            jobs_rx,
+            worker_free_tx,
+            scale,
+            frame_bytes,
+        );
+        if let Err(error) = &result {
+            *worker_error_slot
+                .lock()
+                .expect("worker error mutex poisoned") = Some(error.to_string());
+        }
+        result
+    });
+
+    for _ in 0..2 {
+        free_tx
+            .send(FrameBuffer::new())
+            .map_err(|_| ExportError::new("video worker stopped before encoding began"))?;
+    }
 
     for frame in &movie.frames {
+        let mut buffer = receive_frame_buffer(&free_rx, &worker_error)?;
         console.update_buttons(frame.buttons);
-        let output = console.next_frame();
-        if let Err(error) = write_rgb24(&mut video_input, output.pixels, options.scale) {
+        {
+            let output = console.next_frame();
+            buffer.pixels.copy_from_slice(output.pixels);
+        }
+        if audio_path.is_some() {
+            console.take_audio_samples_into(&mut buffer.audio);
+        } else {
+            buffer.audio.clear();
+        }
+        if jobs_tx.send(buffer).is_err() {
+            let result = worker
+                .join()
+                .map_err(|_| ExportError::new("video worker thread panicked"))?;
+            if let Err(error) = result {
+                return Err(error);
+            }
+            if let Some(error) = worker_error
+                .lock()
+                .map_err(|_| ExportError::new("video worker error mutex poisoned"))?
+                .clone()
+            {
+                return Err(ExportError::new(error));
+            }
+            return Err(ExportError::new("video worker stopped while encoding"));
+        }
+    }
+    drop(jobs_tx);
+    worker
+        .join()
+        .map_err(|_| ExportError::new("video worker thread panicked"))??;
+    Ok(())
+}
+
+struct FrameBuffer {
+    pixels: Box<[[u8; FRAME_WIDTH]; FRAME_HEIGHT]>,
+    audio: Vec<f32>,
+}
+
+impl FrameBuffer {
+    fn new() -> Self {
+        Self {
+            pixels: Box::new([[0; FRAME_WIDTH]; FRAME_HEIGHT]),
+            audio: Vec::with_capacity(1024),
+        }
+    }
+}
+
+fn receive_frame_buffer(
+    free_rx: &Receiver<FrameBuffer>,
+    worker_error: &Arc<Mutex<Option<String>>>,
+) -> Result<FrameBuffer, ExportError> {
+    loop {
+        match free_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(buffer) => return Ok(buffer),
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(error) = worker_error
+                    .lock()
+                    .map_err(|_| ExportError::new("video worker error mutex poisoned"))?
+                    .clone()
+                {
+                    return Err(ExportError::new(error));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ExportError::new("video worker stopped while encoding"));
+            }
+        }
+    }
+}
+
+fn encode_video_worker(
+    mut child: Child,
+    mut video_input: BufWriter<ChildStdin>,
+    mut audio: Option<WavWriter>,
+    jobs_rx: Receiver<FrameBuffer>,
+    free_tx: SyncSender<FrameBuffer>,
+    scale: u32,
+    frame_bytes: usize,
+) -> Result<(), ExportError> {
+    let mut video = Vec::with_capacity(frame_bytes);
+    for mut buffer in jobs_rx {
+        render_rgb24(&mut video, &buffer.pixels, scale);
+        if let Err(error) = video_input.write_all(&video) {
             drop(video_input);
             let ffmpeg_output = child
                 .wait_with_output()
@@ -257,14 +382,19 @@ fn encode_video(
             }));
         }
         if let Some(audio) = audio.as_mut() {
-            if let Err(error) = audio.write_samples(output.audio_samples) {
+            if let Err(error) = audio.write_samples(&buffer.audio) {
                 drop(video_input);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(error);
             }
         }
+        buffer.audio.clear();
+        if free_tx.send(buffer).is_err() {
+            return Err(ExportError::new("video producer stopped while encoding"));
+        }
     }
+
     video_input
         .flush()
         .map_err(|error| ExportError::io("flush video frames", error))?;
@@ -336,9 +466,16 @@ fn write_rgb24<W: Write>(
     pixels: &[[u8; FRAME_WIDTH]; FRAME_HEIGHT],
     scale: u32,
 ) -> io::Result<()> {
+    let mut frame = Vec::new();
+    render_rgb24(&mut frame, pixels, scale);
+    writer.write_all(&frame)
+}
+
+fn render_rgb24(frame: &mut Vec<u8>, pixels: &[[u8; FRAME_WIDTH]; FRAME_HEIGHT], scale: u32) {
     let scale = scale as usize;
+    frame.clear();
+    frame.reserve(FRAME_WIDTH * FRAME_HEIGHT * scale * scale * 3);
     if scale == 1 {
-        let mut frame = Vec::with_capacity(FRAME_WIDTH * FRAME_HEIGHT * 3);
         for source_row in pixels {
             for &palette_index in source_row {
                 let [_, red, green, blue] =
@@ -346,7 +483,7 @@ fn write_rgb24<W: Write>(
                 frame.extend_from_slice(&[red, green, blue]);
             }
         }
-        return writer.write_all(&frame);
+        return;
     }
 
     let mut row = Vec::with_capacity(FRAME_WIDTH * scale * 3);
@@ -360,10 +497,9 @@ fn write_rgb24<W: Write>(
             }
         }
         for _ in 0..scale {
-            writer.write_all(&row)?;
+            frame.extend_from_slice(&row);
         }
     }
-    Ok(())
 }
 
 fn locate_ffmpeg() -> Result<PathBuf, ExportError> {
@@ -446,9 +582,26 @@ impl WavWriter {
     }
 
     fn write_samples(&mut self, samples: &[f32]) -> Result<(), ExportError> {
-        for &sample in samples {
+        #[cfg(target_endian = "little")]
+        {
+            // WAV PCM data is little-endian IEEE-754. The supported native
+            // targets are little-endian, so write the owned sample buffer
+            // directly instead of repacking every f32 one at a time.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), samples.len() * 4)
+            };
             self.file
-                .write_all(&sample.to_le_bytes())
+                .write_all(bytes)
+                .map_err(|error| ExportError::io("write WAV samples", error))?;
+        }
+        #[cfg(target_endian = "big")]
+        {
+            let mut sample_bytes = Vec::with_capacity(samples.len() * 4);
+            for &sample in samples {
+                sample_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            self.file
+                .write_all(&sample_bytes)
                 .map_err(|error| ExportError::io("write WAV samples", error))?;
         }
         self.data_bytes = self
