@@ -10,7 +10,10 @@ use crate::{
 };
 
 #[cfg(feature = "layered-render")]
-use crate::video::{FrameLayers, RenderMode};
+use crate::{
+    ghost::{GhostLayer, GhostTimeline},
+    video::{FrameLayers, RenderMode},
+};
 
 #[cfg(feature = "timestamped-scheduler")]
 use crate::cartridge::NROM;
@@ -38,6 +41,8 @@ pub struct FrameOutput<'a> {
     pub pixels: &'a [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
     #[cfg(feature = "layered-render")]
     pub layers: &'a FrameLayers,
+    #[cfg(feature = "layered-render")]
+    pub ghost_layers: &'a [GhostLayer],
     pub audio_samples: &'a [f32],
     pub audio_sample_rate: u32,
     pub audio_discontinuity: bool,
@@ -59,6 +64,12 @@ impl<'a> FrameOutput<'a> {
             RenderMode::Sprites => buffer.set_layer(&self.layers.sprites),
             RenderMode::Both => self.copy_to(buffer),
         }
+    }
+
+    /// Whether this frame has any sparse sprite replay ghosts to composite.
+    #[cfg(feature = "layered-render")]
+    pub fn ghosts_active(&self) -> bool {
+        !self.ghost_layers.is_empty()
     }
 }
 
@@ -355,6 +366,8 @@ pub struct Console {
     rewind_history_active: bool,
     rewind_exhausted: bool,
     audio_reset: AudioResetSignal,
+    #[cfg(feature = "layered-render")]
+    ghost_timeline: GhostTimeline,
 }
 
 impl Console {
@@ -426,6 +439,8 @@ impl Console {
         self.rewind_exhausted = false;
         self.audio_samples.clear();
         self.audio_reset.mark();
+        #[cfg(feature = "layered-render")]
+        self.ghost_timeline.reset();
     }
 
     pub fn rewind(&mut self) -> bool {
@@ -486,6 +501,8 @@ impl Console {
             rewind_history_active: false,
             rewind_exhausted: false,
             audio_reset: AudioResetSignal::default(),
+            #[cfg(feature = "layered-render")]
+            ghost_timeline: GhostTimeline::default(),
         };
 
         console.state.bus.ppu.reset();
@@ -526,10 +543,22 @@ impl Console {
                 pixels: &self.screen.pixels,
                 #[cfg(feature = "layered-render")]
                 layers: &self.screen.layers,
+                #[cfg(feature = "layered-render")]
+                ghost_layers: self.ghost_timeline.layers(),
                 audio_samples: &self.audio_samples,
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_discontinuity,
             };
+        }
+
+        #[cfg(feature = "layered-render")]
+        {
+            if self.rewind_history_active && !self.in_rewind {
+                self.ghost_timeline.finish_capture();
+            }
+            if !self.in_rewind {
+                self.ghost_timeline.begin_frame();
+            }
         }
 
         {
@@ -562,6 +591,12 @@ impl Console {
             self.rewind_history_active = false;
         }
 
+        #[cfg(feature = "layered-render")]
+        if self.in_rewind {
+            self.ghost_timeline
+                .capture_frame(&self.screen.layers.sprites);
+        }
+
         self.in_rewind = false;
         self.state.frame_number += 1;
         FrameOutput {
@@ -569,6 +604,8 @@ impl Console {
             pixels: &self.screen.pixels,
             #[cfg(feature = "layered-render")]
             layers: &self.screen.layers,
+            #[cfg(feature = "layered-render")]
+            ghost_layers: self.ghost_timeline.layers(),
             audio_samples: &self.audio_samples,
             audio_sample_rate: AUDIO_SAMPLE_RATE,
             audio_discontinuity,
@@ -1074,6 +1111,35 @@ mod tests {
         assert_eq!(buffer.palette_indices().len(), FRAME_WIDTH * FRAME_HEIGHT);
         assert_eq!(buffer.rgba().len(), FRAME_WIDTH * FRAME_HEIGHT * 4);
         assert_eq!(buffer.palette_indices()[0], output.pixels[0][0]);
+    }
+
+    #[cfg(all(feature = "layered-render", not(feature = "rewind-disabled")))]
+    #[test]
+    fn rewind_capture_becomes_a_borrowed_ghost_span_on_resume() {
+        let mut console = Console::new(Box::new(TestMapper));
+        for _ in 0..4 {
+            let _ = console.next_frame();
+        }
+
+        assert!(!console.next_frame().ghosts_active());
+
+        assert!(console.rewind());
+        let _ = console.next_frame();
+        assert!(console.rewind());
+        let _ = console.next_frame();
+
+        let resumed = console.next_frame();
+        assert!(resumed.ghosts_active());
+        assert_eq!(resumed.ghost_layers.len(), 1);
+        assert_eq!(resumed.ghost_layers[0].frames().len(), 2);
+        assert_eq!(resumed.ghost_layers[0].frame_index(), 0);
+        assert_eq!(resumed.ghost_layers[0].opacity(), 0.5);
+        assert!(resumed.ghost_layers[0].current_frame().unwrap().is_empty());
+
+        let next = console.next_frame();
+        assert_eq!(next.ghost_layers.len(), 1);
+        assert_eq!(next.ghost_layers[0].frame_index(), 1);
+        assert!(next.ghost_layers[0].opacity() < 0.5);
     }
 
     #[test]

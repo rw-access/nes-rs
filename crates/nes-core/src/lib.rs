@@ -8,6 +8,8 @@ pub mod console;
 pub mod controller;
 pub mod cpu;
 mod dsp;
+#[cfg(feature = "layered-render")]
+pub mod ghost;
 pub mod ines;
 mod instructions;
 pub(crate) mod ppu;
