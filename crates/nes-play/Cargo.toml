@@ -5,8 +5,9 @@ edition = "2021"
 
 [features]
 default = []
-sdl2-frontend = ["dep:clap", "dep:image", "dep:sdl2"]
-winit-frontend = ["dep:cpal", "dep:softbuffer", "dep:winit"]
+sdl2-frontend = ["dep:clap", "dep:image", "dep:sdl2", "layered-render"]
+winit-frontend = ["dep:cpal", "dep:softbuffer", "dep:winit", "layered-render"]
+layered-render = ["nes-core/layered-render"]
 diagnostic-capture = []
 
 [dependencies]

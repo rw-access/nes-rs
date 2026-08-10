@@ -4,7 +4,11 @@ mod sdl2_frontend {
     use image::{write_buffer_with_format, GrayImage, ImageBuffer, Luma};
     use nes_core::controller::ButtonState;
     use nes_core::{
-        apu::ChannelMask, cartridge, console::Console, controller::Button, video::NES_PALETTE_RGB,
+        apu::ChannelMask,
+        cartridge,
+        console::Console,
+        controller::Button,
+        video::{RenderMode, NES_PALETTE_RGB},
     };
     use sdl2::event::Event;
     use sdl2::keyboard::Keycode;
@@ -108,6 +112,25 @@ mod sdl2_frontend {
             Keycode::Period => Some(Button::Start),
             Keycode::Comma => Some(Button::Select),
             _ => None,
+        }
+    }
+
+    fn display_palette_color(
+        frame: &nes_core::FrameOutput<'_>,
+        mode: RenderMode,
+        x: usize,
+        y: usize,
+    ) -> u8 {
+        match mode {
+            RenderMode::Background => frame.layers.background.pixels[y][x],
+            RenderMode::Sprites => {
+                if frame.layers.sprites.coverage[y][x] != 0 {
+                    frame.layers.sprites.pixels[y][x]
+                } else {
+                    0
+                }
+            }
+            RenderMode::Both => frame.pixels[y][x],
         }
     }
 
@@ -228,6 +251,7 @@ mod sdl2_frontend {
 
         let mut rewind = false;
         let mut button_state = ButtonState::default();
+        let mut display_mode = RenderMode::Both;
         'run_loop: loop {
             for event in event_pump.poll_iter() {
                 match event {
@@ -239,8 +263,14 @@ mod sdl2_frontend {
                         break 'run_loop;
                     }
                     Event::KeyDown {
-                        keycode: Some(k), ..
+                        keycode: Some(k),
+                        repeat,
+                        ..
                     } => {
+                        if k == Keycode::V && !repeat {
+                            display_mode = display_mode.next();
+                        }
+
                         if k == Keycode::I {
                             rewind = true;
                             audio_device.pause();
@@ -316,11 +346,11 @@ mod sdl2_frontend {
                 }
             }
 
-            for (y, row) in frame.pixels.iter().enumerate() {
-                for (x, palette_color) in row.iter().enumerate() {
+            for y in 0..HEIGHT as usize {
+                for x in 0..WIDTH as usize {
+                    let palette_color = display_palette_color(&frame, display_mode, x, y);
                     // decode the palette
-                    let [_, r, g, b] =
-                        NES_PALETTE_RGB[*palette_color as usize & 0x3f].to_be_bytes();
+                    let [_, r, g, b] = NES_PALETTE_RGB[palette_color as usize & 0x3f].to_be_bytes();
 
                     for y_off in 0..SCALING {
                         let row_start =

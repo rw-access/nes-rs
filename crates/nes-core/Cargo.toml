@@ -9,6 +9,7 @@ apu-disabled = []
 rewind-disabled = []
 timestamped-scheduler = []
 headless-render-disabled = []
+layered-render = []
 
 [dependencies]
 arrayvec = "0.7.2"

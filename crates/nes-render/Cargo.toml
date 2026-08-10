@@ -15,6 +15,7 @@ apu-disabled = ["nes-core/apu-disabled"]
 rewind-disabled = ["nes-core/rewind-disabled"]
 timestamped-scheduler = ["nes-core/timestamped-scheduler"]
 headless-render-disabled = ["nes-core/headless-render-disabled"]
+layered-render = ["nes-core/layered-render"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }

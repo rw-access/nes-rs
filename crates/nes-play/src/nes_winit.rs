@@ -18,7 +18,7 @@ use nes_core::cartridge;
 use nes_core::console::Console;
 use nes_core::controller::{Button, ButtonState};
 use nes_core::ines;
-use nes_core::video::{FRAME_HEIGHT, FRAME_WIDTH, NES_PALETTE_RGB};
+use nes_core::video::{RenderMode, FRAME_HEIGHT, FRAME_WIDTH, NES_PALETTE_RGB};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
@@ -304,6 +304,7 @@ struct App {
     rewinding: bool,
     window: Option<RunningWindow>,
     pixels: [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+    display_mode: RenderMode,
     have_frame: bool,
     audio_started: bool,
     fps_throttled: bool,
@@ -323,6 +324,7 @@ impl App {
             rewinding: false,
             window: None,
             pixels: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            display_mode: RenderMode::Both,
             have_frame: false,
             audio_started: false,
             fps_throttled: true,
@@ -379,7 +381,23 @@ impl App {
                 self.audio_started = self.audio.start();
             }
         }
-        self.pixels = *frame.pixels;
+        match self.display_mode {
+            RenderMode::Background => {
+                self.pixels = frame.layers.background.pixels;
+            }
+            RenderMode::Sprites => {
+                for y in 0..FRAME_HEIGHT {
+                    for x in 0..FRAME_WIDTH {
+                        self.pixels[y][x] = if frame.layers.sprites.coverage[y][x] != 0 {
+                            frame.layers.sprites.pixels[y][x]
+                        } else {
+                            0
+                        };
+                    }
+                }
+            }
+            RenderMode::Both => self.pixels = *frame.pixels,
+        }
         self.last_frame_number = frame.frame_number;
         #[cfg(feature = "diagnostic-capture")]
         self.diagnostics
@@ -480,6 +498,11 @@ impl App {
 
         if pressed && code == KeyCode::Escape {
             event_loop.exit();
+            return;
+        }
+
+        if code == KeyCode::KeyV && pressed && !repeat {
+            self.display_mode = self.display_mode.next();
             return;
         }
 
@@ -750,5 +773,14 @@ mod tests {
         toggle_fps_throttle(&mut throttled, &mut next_frame_at, resynchronized);
         assert!(throttled);
         assert_eq!(next_frame_at, resynchronized);
+    }
+
+    #[test]
+    fn display_mode_cycles_sprites_background_both() {
+        use nes_core::video::RenderMode;
+
+        assert_eq!(RenderMode::Both.next(), RenderMode::Sprites);
+        assert_eq!(RenderMode::Sprites.next(), RenderMode::Background);
+        assert_eq!(RenderMode::Background.next(), RenderMode::Both);
     }
 }

@@ -19,3 +19,6 @@ pub use video::{
     expand_rgba, FrameBuffer, VideoBuffer, FRAME_HEIGHT, FRAME_PIXELS, FRAME_RGBA_BYTES,
     FRAME_WIDTH, NES_PALETTE_RGB, NES_PALETTE_RGBA, PALETTE_ENTRIES,
 };
+
+#[cfg(feature = "layered-render")]
+pub use video::{FrameLayers, FrameMask, FramePixels, RenderLayer, RenderMode};

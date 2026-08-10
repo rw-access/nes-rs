@@ -52,6 +52,7 @@ if (debugEnabled) {
 const WIDTH = 256;
 const HEIGHT = 240;
 const FRAME_MS = 1000 / 60;
+const DISPLAY_MODE_LABELS = ["Background", "Sprites", "Both"];
 
 const BUTTONS = Object.freeze({
   a: 1 << 0,
@@ -202,6 +203,19 @@ const audio = new AudioScheduler();
 
 function setStatus(message) { status.textContent = message; }
 
+function displayModeLabel() {
+  return DISPLAY_MODE_LABELS[emulator?.display_mode?.() ?? 2] ?? "Both";
+}
+
+function cycleDisplayMode() {
+  if (!emulator) return;
+  emulator.cycle_display_mode();
+  const rgba = emulator.rgba_buffer();
+  image.data.set(rgba);
+  context.putImageData(image, 0, 0);
+  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${emulator.frame_metadata().frame_number} · ${displayModeLabel()}`);
+}
+
 function updateButtons() {
   if (emulator && !rewinding) emulator.set_controller(heldButtons);
 }
@@ -259,7 +273,7 @@ function drawFrame(scheduleAudio = true) {
   const rgba = emulator.rgba_buffer();
   image.data.set(rgba);
   context.putImageData(image, 0, 0);
-  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number}`);
+  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number} · ${displayModeLabel()}`);
   if (scheduleAudio) {
     try {
       audio.schedule(emulator.audio_buffer().subarray(0, metadata.audio_samples), metadata.audio_sample_rate, metadata.audio_discontinuity);
@@ -312,6 +326,13 @@ async function loadRom(file) {
     setStatus(`Reading ${file.name}…`);
     audio.flush();
     const bytes = new Uint8Array(await file.arrayBuffer());
+    // Layered-render keeps several frame planes in the core. Release the
+    // previous Rust allocation before asking WASM to allocate the next ROM;
+    // otherwise repeated loads can exhaust the module heap before load_rom
+    // gets a chance to return.
+    const previousEmulator = emulator;
+    emulator = null;
+    previousEmulator?.free();
     emulator = NesWeb.load_rom(bytes);
     savedSnapshot = null;
     heldButtons = 0;
@@ -397,6 +418,11 @@ window.addEventListener("keydown", (event) => {
     if (!event.repeat) audio.toggleMute();
     return;
   }
+  if (key === "v") {
+    event.preventDefault();
+    if (!event.repeat) cycleDisplayMode();
+    return;
+  }
   const name = keyboard.get(key);
   if (!name) return;
   event.preventDefault();
@@ -435,5 +461,5 @@ for (const button of document.querySelectorAll("[data-button]")) {
   }
 }
 
-await init("./pkg/nes_wasm_bg.wasm?v=10");
+await init("./pkg/nes_wasm_bg.wasm?v=11");
 requestAnimationFrame(tick);

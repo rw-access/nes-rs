@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use js_sys::{Float32Array, Uint8Array};
-use nes_core::{cartridge, ines, Console, VideoBuffer, AUDIO_SAMPLE_RATE};
+use nes_core::{cartridge, ines, Console, RenderMode, VideoBuffer, AUDIO_SAMPLE_RATE};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -15,6 +15,7 @@ pub fn start() {
 pub struct NesWeb {
     console: Console,
     video: VideoBuffer,
+    display_mode: RenderMode,
     audio: Vec<f32>,
     rgba_js: Uint8Array,
     audio_js: Float32Array,
@@ -88,6 +89,7 @@ impl NesWeb {
         Ok(Self {
             console: Console::new(mapper),
             video: VideoBuffer::new(),
+            display_mode: RenderMode::Both,
             audio: Vec::with_capacity((AUDIO_SAMPLE_RATE / 55) as usize + 8),
             rgba_js: Uint8Array::new_with_length(nes_core::video::FRAME_RGBA_BYTES as u32),
             audio_js: Float32Array::new_with_length(4096),
@@ -111,12 +113,19 @@ impl NesWeb {
 
     /// Emulate one frame and refresh the reusable RGBA/audio buffers.
     pub fn step_frame(&mut self) -> FrameMetadata {
-        let frame = self.console.next_frame();
-        frame.copy_to(&mut self.video);
+        let (frame_number, audio_sample_rate, audio_discontinuity) = {
+            let frame = self.console.next_frame();
+            frame.copy_mode_to(self.display_mode, &mut self.video);
+            self.audio.clear();
+            self.audio.extend_from_slice(frame.audio_samples);
+            (
+                frame.frame_number,
+                frame.audio_sample_rate,
+                frame.audio_discontinuity,
+            )
+        };
         self.rgba_js.copy_from(self.video.rgba());
 
-        self.audio.clear();
-        self.audio.extend_from_slice(frame.audio_samples);
         if self.audio.len() > self.audio_js.length() as usize {
             self.audio_js = Float32Array::new_with_length(self.audio.len() as u32);
         }
@@ -129,12 +138,12 @@ impl NesWeb {
                 .fill(0.0, 0, self.audio_js.length());
         }
         self.last_frame = FrameMetadata {
-            frame_number: frame.frame_number,
+            frame_number,
             width: nes_core::video::FRAME_WIDTH as u32,
             height: nes_core::video::FRAME_HEIGHT as u32,
-            audio_sample_rate: frame.audio_sample_rate,
+            audio_sample_rate,
             audio_samples: self.audio.len(),
-            audio_discontinuity: frame.audio_discontinuity || self.audio_discontinuity_pending,
+            audio_discontinuity: audio_discontinuity || self.audio_discontinuity_pending,
         };
         self.audio_discontinuity_pending = false;
         self.last_frame
@@ -153,6 +162,20 @@ impl NesWeb {
     /// as the valid prefix length; it is not a view into WASM memory.
     pub fn audio_buffer(&self) -> Float32Array {
         self.audio_js.clone()
+    }
+
+    /// Cycle the display through sprites, background/tiles, and the normal
+    /// composite. Returns the numeric mode (0 background, 1 sprites, 2 both).
+    pub fn cycle_display_mode(&mut self) -> u8 {
+        self.display_mode = self.display_mode.next();
+        self.console
+            .copy_last_frame_to(self.display_mode, &mut self.video);
+        self.rgba_js.copy_from(self.video.rgba());
+        self.display_mode as u8
+    }
+
+    pub fn display_mode(&self) -> u8 {
+        self.display_mode as u8
     }
 
     pub fn set_controller(&mut self, bits: u8) {

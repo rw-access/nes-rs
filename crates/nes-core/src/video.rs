@@ -11,6 +11,100 @@ pub const FRAME_RGBA_BYTES: usize = FRAME_PIXELS * 4;
 /// Number of entries in the NES master palette.
 pub const PALETTE_ENTRIES: usize = 64;
 
+/// A row-major palette-indexed NES frame.
+pub type FramePixels = [[u8; FRAME_WIDTH]; FRAME_HEIGHT];
+
+/// A row-major per-pixel coverage mask. Entries are `0` or `1`.
+///
+/// This is deliberately a byte mask rather than a palette sentinel: palette
+/// index zero is a real NES color and cannot also mean transparent.
+#[cfg(feature = "layered-render")]
+pub type FrameMask = [[u8; FRAME_WIDTH]; FRAME_HEIGHT];
+
+/// Selects which independently rendered layer a frontend displays.
+#[cfg(feature = "layered-render")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+    Background,
+    Sprites,
+    Both,
+}
+
+#[cfg(feature = "layered-render")]
+impl RenderMode {
+    /// Cycle through the display modes in the order useful for a simple key
+    /// binding: sprites, background, then both.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Sprites => Self::Background,
+            Self::Background => Self::Both,
+            Self::Both => Self::Sprites,
+        }
+    }
+}
+
+/// One palette-indexed render layer and its independent transparency mask.
+#[cfg(feature = "layered-render")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderLayer {
+    pub pixels: FramePixels,
+    pub coverage: FrameMask,
+}
+
+#[cfg(feature = "layered-render")]
+impl Default for RenderLayer {
+    fn default() -> Self {
+        Self {
+            pixels: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            coverage: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+        }
+    }
+}
+
+#[cfg(feature = "layered-render")]
+impl RenderLayer {
+    pub fn clear(&mut self) {
+        self.pixels = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
+        self.coverage = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
+    }
+}
+
+/// The optional intermediate PPU output used by rendering-oriented frontends.
+///
+/// `background` and `sprites` contain the palette-RAM-resolved color for the
+/// top background pixel and top-priority sprite pixel respectively. Their
+/// coverage masks preserve transparency without overloading palette index
+/// zero. `visible_sprites` marks the pixels where the NES compositor selected
+/// the sprite over the background; it is useful when a frontend wants to
+/// visualize true NES priority rather than simply show sprite coverage.
+#[cfg(feature = "layered-render")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameLayers {
+    pub background: RenderLayer,
+    pub sprites: RenderLayer,
+    pub visible_sprites: FrameMask,
+}
+
+#[cfg(feature = "layered-render")]
+impl Default for FrameLayers {
+    fn default() -> Self {
+        Self {
+            background: RenderLayer::default(),
+            sprites: RenderLayer::default(),
+            visible_sprites: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+        }
+    }
+}
+
+#[cfg(feature = "layered-render")]
+impl FrameLayers {
+    pub fn clear(&mut self) {
+        self.background.clear();
+        self.sprites.clear();
+        self.visible_sprites = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
+    }
+}
+
 /// The commonly used NES master palette, packed as `0x00RRGGBB` values.
 ///
 /// Palette indices emitted by the PPU address this table directly. The
@@ -120,6 +214,26 @@ impl VideoBuffer {
         self.update_rgba();
     }
 
+    /// Replace the indexed frame with a covered layer, clearing transparent
+    /// pixels. This is used for sprite-only presentation without allocating a
+    /// second full-frame scratch buffer.
+    #[cfg(feature = "layered-render")]
+    pub fn set_layer(&mut self, layer: &RenderLayer) {
+        for ((destination, pixels), coverage) in self
+            .palette_indices
+            .chunks_exact_mut(FRAME_WIDTH)
+            .zip(&layer.pixels)
+            .zip(&layer.coverage)
+        {
+            for ((destination, &pixel), &covered) in
+                destination.iter_mut().zip(pixels).zip(coverage)
+            {
+                *destination = if covered != 0 { pixel } else { 0 };
+            }
+        }
+        self.update_rgba();
+    }
+
     /// Expand the current palette-indexed frame into RGBA bytes.
     pub fn update_rgba(&mut self) {
         expand_rgba(&self.palette_indices, &mut self.rgba);
@@ -186,5 +300,24 @@ mod tests {
         assert!(rgba
             .chunks_exact(4)
             .all(|pixel| pixel == super::NES_PALETTE_RGBA[0x1d]));
+    }
+
+    #[cfg(feature = "layered-render")]
+    #[test]
+    fn layered_output_starts_clear_and_cycles_display_modes() {
+        let layers = super::FrameLayers::default();
+        assert_eq!(layers.background.coverage[0][0], 0);
+        assert_eq!(layers.sprites.coverage[0][0], 0);
+        assert_eq!(layers.visible_sprites[0][0], 0);
+
+        assert_eq!(
+            super::RenderMode::Sprites.next(),
+            super::RenderMode::Background
+        );
+        assert_eq!(
+            super::RenderMode::Background.next(),
+            super::RenderMode::Both
+        );
+        assert_eq!(super::RenderMode::Both.next(), super::RenderMode::Sprites);
     }
 }

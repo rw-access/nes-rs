@@ -1,6 +1,8 @@
 use std::cell::Cell;
 
 use crate::cartridge::{Mapper, MirroringMode};
+#[cfg(feature = "layered-render")]
+use crate::video::FrameLayers;
 
 struct PPUControl {
     base_nametable: u8, // two bits
@@ -29,6 +31,56 @@ mod scroll_tests {
         ppu.v = 0x041f;
         ppu.update_vram_addr();
         assert_eq!(ppu.v, 0x0000);
+    }
+}
+
+#[cfg(all(test, feature = "layered-render"))]
+mod layered_render_tests {
+    use super::{Screen, SpritePixel, TileData, PPU};
+
+    #[test]
+    fn captures_independent_layers_and_compositor_visibility() {
+        let mut ppu = PPU::default();
+        ppu.mask_reg = 0x18;
+        ppu.palette_ram[1] = 0x21;
+        ppu.palette_ram[0x16] = 0x42;
+        ppu.processed_tile[0] = TileData {
+            palette: 0,
+            pattern_low: 0xff,
+            pattern_high: 0,
+            ..TileData::default()
+        };
+        ppu.sprite_pixels[0] = SpritePixel {
+            palette: 2,
+            palette_offset: 4,
+            ..SpritePixel::default()
+        };
+        ppu.cycle_in_scanline = 1;
+
+        let mut screen = Screen::default();
+        ppu.render_pixel_inner::<true>(&mut screen);
+
+        assert_eq!(screen.pixels[0][0], 0x42);
+        assert_eq!(screen.layers.background.pixels[0][0], 0x21);
+        assert_eq!(screen.layers.background.coverage[0][0], 1);
+        assert_eq!(screen.layers.sprites.pixels[0][0], 0x42);
+        assert_eq!(screen.layers.sprites.coverage[0][0], 1);
+        assert_eq!(screen.layers.visible_sprites[0][0], 1);
+
+        // A behind-background sprite remains present in the sprite layer but
+        // is not marked as the compositor winner.
+        ppu.sprite_pixels[1] = SpritePixel {
+            palette: 2,
+            palette_offset: 4,
+            behind_background: true,
+            ..SpritePixel::default()
+        };
+        ppu.cycle_in_scanline = 2;
+        ppu.render_pixel_inner::<true>(&mut screen);
+
+        assert_eq!(screen.pixels[0][1], 0x21);
+        assert_eq!(screen.layers.sprites.coverage[0][1], 1);
+        assert_eq!(screen.layers.visible_sprites[0][1], 0);
     }
 }
 
@@ -200,12 +252,16 @@ struct SpritePixel {
 pub struct Screen {
     // indexes into the palette
     pub pixels: [[u8; 256]; 240],
+    #[cfg(feature = "layered-render")]
+    pub(crate) layers: Box<FrameLayers>,
 }
 
 impl Default for Screen {
     fn default() -> Self {
         Self {
             pixels: [[0; 256]; 240],
+            #[cfg(feature = "layered-render")]
+            layers: Box::new(FrameLayers::default()),
         }
     }
 }
@@ -794,6 +850,16 @@ impl PPU {
                     sprite.behind_background,
                 );
                 self.write_pixel::<true>(screen, y, x, color);
+                #[cfg(feature = "layered-render")]
+                self.write_layer_pixels(
+                    screen,
+                    y,
+                    x,
+                    tile_palette,
+                    tile_palette_offset,
+                    sprite,
+                    decision == MultiplexerDecision::DrawSprite,
+                );
                 decision == MultiplexerDecision::DrawSprite
             } else {
                 // The headless path only needs the pixel occupancy and the
@@ -955,6 +1021,16 @@ impl PPU {
                         sprite.behind_background,
                     );
                     self.write_pixel::<true>(screen, y, x, color);
+                    #[cfg(feature = "layered-render")]
+                    self.write_layer_pixels(
+                        screen,
+                        y,
+                        x,
+                        tile_palette,
+                        tile_palette_offset,
+                        sprite,
+                        decision == MultiplexerDecision::DrawSprite,
+                    );
                     decision == MultiplexerDecision::DrawSprite
                 } else {
                     let background_nonzero = tile_palette != 0;
@@ -1186,6 +1262,16 @@ impl PPU {
                 sprite.behind_background,
             );
             self.write_pixel::<true>(screen, y as usize, x as usize, color);
+            #[cfg(feature = "layered-render")]
+            self.write_layer_pixels(
+                screen,
+                y as usize,
+                x as usize,
+                tile_palette,
+                tile_palette_offset,
+                sprite,
+                decision == MultiplexerDecision::DrawSprite,
+            );
             decision == MultiplexerDecision::DrawSprite
         } else {
             let background_nonzero = tile_palette != 0;
@@ -1209,6 +1295,30 @@ impl PPU {
         if WRITE_OUTPUT {
             screen.pixels[y][x] = self.palette_ram[PPU::mirror_palette(color) as usize];
         }
+    }
+
+    #[cfg(feature = "layered-render")]
+    #[inline(always)]
+    fn write_layer_pixels(
+        &self,
+        screen: &mut Screen,
+        y: usize,
+        x: usize,
+        tile_palette: u8,
+        tile_palette_offset: u8,
+        sprite: SpritePixel,
+        sprite_visible: bool,
+    ) {
+        let palette = &self.palette_ram;
+        let background_color = tile_palette_offset | tile_palette;
+        let sprite_color = 0x10 | sprite.palette_offset | sprite.palette;
+
+        screen.layers.background.pixels[y][x] =
+            palette[PPU::mirror_palette(background_color) as usize];
+        screen.layers.background.coverage[y][x] = (tile_palette != 0) as u8;
+        screen.layers.sprites.pixels[y][x] = palette[PPU::mirror_palette(sprite_color) as usize];
+        screen.layers.sprites.coverage[y][x] = (sprite.palette != 0) as u8;
+        screen.layers.visible_sprites[y][x] = sprite_visible as u8;
     }
 
     fn step_visible_with_output<const WRITE_OUTPUT: bool, M: Mapper + ?Sized>(

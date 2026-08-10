@@ -9,6 +9,9 @@ use crate::{
     video::VideoBuffer,
 };
 
+#[cfg(feature = "layered-render")]
+use crate::video::{FrameLayers, RenderMode};
+
 #[cfg(feature = "timestamped-scheduler")]
 use crate::cartridge::NROM;
 
@@ -33,6 +36,8 @@ pub enum VideoOutput {
 pub struct FrameOutput<'a> {
     pub frame_number: u64,
     pub pixels: &'a [[u8; FRAME_WIDTH]; FRAME_HEIGHT],
+    #[cfg(feature = "layered-render")]
+    pub layers: &'a FrameLayers,
     pub audio_samples: &'a [f32],
     pub audio_sample_rate: u32,
     pub audio_discontinuity: bool,
@@ -45,6 +50,15 @@ impl<'a> FrameOutput<'a> {
     /// `FrameOutput` borrow ends. The copy also refreshes its RGBA view.
     pub fn copy_to(&self, buffer: &mut VideoBuffer) {
         buffer.set_screen(self.pixels);
+    }
+
+    #[cfg(feature = "layered-render")]
+    pub fn copy_mode_to(&self, mode: RenderMode, buffer: &mut VideoBuffer) {
+        match mode {
+            RenderMode::Background => buffer.set_screen(&self.layers.background.pixels),
+            RenderMode::Sprites => buffer.set_layer(&self.layers.sprites),
+            RenderMode::Both => self.copy_to(buffer),
+        }
     }
 }
 
@@ -501,6 +515,8 @@ impl Console {
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
         let audio_discontinuity = self.audio_reset.take();
         self.audio_samples.clear();
+        #[cfg(feature = "layered-render")]
+        self.screen.layers.clear();
 
         if self.rewind_exhausted {
             self.in_rewind = false;
@@ -508,6 +524,8 @@ impl Console {
             return FrameOutput {
                 frame_number: self.state.frame_number,
                 pixels: &self.screen.pixels,
+                #[cfg(feature = "layered-render")]
+                layers: &self.screen.layers,
                 audio_samples: &self.audio_samples,
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_discontinuity,
@@ -549,9 +567,22 @@ impl Console {
         FrameOutput {
             frame_number: self.state.frame_number,
             pixels: &self.screen.pixels,
+            #[cfg(feature = "layered-render")]
+            layers: &self.screen.layers,
             audio_samples: &self.audio_samples,
             audio_sample_rate: AUDIO_SAMPLE_RATE,
             audio_discontinuity,
+        }
+    }
+
+    /// Copy the most recently rendered frame in a selected mode without
+    /// emulating another frame or allocating another full-frame buffer.
+    #[cfg(feature = "layered-render")]
+    pub fn copy_last_frame_to(&self, mode: RenderMode, buffer: &mut VideoBuffer) {
+        match mode {
+            RenderMode::Background => buffer.set_screen(&self.screen.layers.background.pixels),
+            RenderMode::Sprites => buffer.set_layer(&self.screen.layers.sprites),
+            RenderMode::Both => buffer.set_screen(&self.screen.pixels),
         }
     }
 
