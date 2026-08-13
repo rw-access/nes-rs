@@ -53,6 +53,7 @@ shared library is present:
 ```powershell
 uv run --directory python pytest
 uv run --directory python python examples/random_episode.py "..\roms\Super Mario Bros. (World).nes"
+```
 
 Save and verify a trace, then export only its episode frames through the
 in-process framebuffer and FFmpeg:
@@ -67,25 +68,25 @@ uv run --directory python python examples/random_episode.py `
 ```
 
 The PPO smoke entry point uses Stable-Baselines3 and supports both CPU and
-CUDA devices:
+CUDA devices. On 64-bit Windows, the project is configured to resolve the
+official CUDA 12.8 PyTorch index; other platforms use the normal PyPI build:
 
 ```powershell
+uv sync --directory python
 uv run --directory python python examples/train_ppo.py `
   "..\roms\Super Mario Bros. (World).nes" `
   --total-timesteps 2048 --device cpu
+
+uv run --directory python python examples/train_ppo.py `
+  "..\roms\Super Mario Bros. (World).nes" `
+  --total-timesteps 2048 --device cuda
 ```
 
-On this Windows host, the installed PyTorch wheel is currently blocked at
-import time by Application Control (`torch_global_deps.dll`), so the training
-command reports that issue clearly until the policy is adjusted.
+Use `--device auto` to select CUDA when it is available, or `--device cpu` to
+force CPU execution. Stable-Baselines3 may warn that a small MLP workload has
+low GPU utilization; that is expected until rollout and batch sizes grow.
 
-The required remediation is administrative: allow the PyTorch DLLs in the
-Python environment (or use an approved Python environment whose PyTorch
-installation is permitted). Do not disable Application Control or weaken the
-machine-wide policy for this project.
-
-On the development host, Code Integrity events 3033 and 3077 confirm that
-`torch_global_deps.dll` fails the enterprise signing-level requirement under
-the active application-control policy. This occurs before Python can query
-CUDA, so both CPU and CUDA PPO tests remain pending that administrative fix.
-```
+If an enterprise application-control policy blocks the PyTorch DLLs, the
+required remediation is administrative: allow the PyTorch DLLs in the Python
+environment (or use an approved Python environment). Do not disable
+Application Control or weaken the machine-wide policy for this project.
