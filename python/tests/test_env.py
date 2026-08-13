@@ -138,3 +138,33 @@ def test_rewind_action_is_delayed_terminal_and_replayable():
         assert int(env.ram[0]) == 0
     finally:
         env.close()
+
+
+def test_successful_rewind_resets_death_grace_while_raw_death_lingers():
+    class LingeringDeathEnv(NesEnv):
+        def is_terminal(self):
+            return self.elapsed_frames > 0
+
+        def terminal_reason(self):
+            return "death" if self.is_terminal() else None
+
+    env = LingeringDeathEnv(
+        core=RewindCore(),
+        actions=(0, REWIND_INPUT),
+        rewind_enabled=True,
+        rewind_grace_frames=60,
+        max_episode_frames=200,
+    )
+    try:
+        env.reset()
+        for _ in range(10):
+            _, _, terminated, _, info = env.step(0)
+            assert not terminated
+        assert info["death_pending_frames"] == 10
+
+        _, reward, terminated, truncated, info = env.step(1)
+        assert reward == 0
+        assert not terminated and not truncated
+        assert info["death_pending_frames"] == 0
+    finally:
+        env.close()

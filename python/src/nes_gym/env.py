@@ -156,8 +156,10 @@ class NesEnv(gym.Env[np.ndarray, int]):
                 self._elapsed_frames = max(0, self._elapsed_frames - 1)
                 actual_frames += 1
                 current = dict(self.metrics())
-                if not self.is_terminal():
-                    self._death_pending_frames = 0
+                # Rewinding is an explicit recovery attempt. Start a fresh
+                # grace window even if the game's RAM death flag lingers for a
+                # few frames after restoring the older emulator state.
+                self._death_pending_frames = 0
         else:
             for _ in range(frames_to_advance):
                 self.core.advance_frames(controller, 1)
