@@ -14,6 +14,11 @@ Cargo.lock
 /roms
 .DS_Store
 /web/pkg/
+/artifacts/
+/.tools/
+/python/.venv/
+**/__pycache__/
+**/*.egg-info/
 
 # Added by cargo
 

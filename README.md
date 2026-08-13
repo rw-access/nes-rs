@@ -79,6 +79,28 @@ cargo run --release -p nes-render --bin perf_bench --features \
 
 ## Frontends
 
+### Gymnasium / RL integration
+
+The `nes-ffi` workspace crate exposes the emulator through an opaque C ABI for
+the Python Gymnasium layer. The Python project lives under `python/` and uses
+`uv` for its environment and lockfile. Build the native library and run the
+headless SMB smoke tests with:
+
+```text
+cargo build --release -p nes-ffi
+uv run --directory python pytest -q
+uv run --directory python python examples/random_episode.py \
+  "../roms/Super Mario Bros. (World).nes" \
+  --frames 600 --verify-replay \
+  --trace "../artifacts/episode.json" \
+  --video "../artifacts/episode.mp4"
+```
+
+The initial environment observes only the reusable 2 KiB CPU RAM view and
+starts SMB World 1-1 from the verified `NOOP × 60, START × 1, NOOP × 105`
+root checkpoint. PPO support is provided through Stable-Baselines3 in
+`python/examples/train_ppo.py`; it accepts `--device cpu` or `--device cuda`.
+
 The library and headless paths build without native presentation dependencies:
 
 ```text

@@ -1101,6 +1101,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nes-ffi"
+version = "0.1.0"
+dependencies = [
+ "nes-core",
+]
+
+[[package]]
 name = "nes-play"
 version = "0.1.0"
 dependencies = [

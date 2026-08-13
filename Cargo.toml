@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/nes-core",
+    "crates/nes-ffi",
     "crates/nes-play",
     "crates/nes-render",
     "crates/nes-wasm",
