@@ -553,6 +553,20 @@ fn encode_video(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn encode_video_with_piped_audio(
+    _ffmpeg: &Path,
+    _encoder: &str,
+    _options: &ExportOptions,
+    _console: &mut Console,
+    _movie: &Fm2Movie,
+    _output_path: &Path,
+) -> Result<(), ExportError> {
+    Err(ExportError::new(
+        "piped FFmpeg audio is unavailable on this platform",
+    ))
+}
+
 struct FrameBuffer {
     pixels: Box<[[u8; FRAME_WIDTH]; FRAME_HEIGHT]>,
     audio: Vec<f32>,
