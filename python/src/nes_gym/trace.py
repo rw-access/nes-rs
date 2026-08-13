@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 import json
 from typing import Iterable, Iterator, Sequence
 
+# A value above the NES uint8 controller range represents a framework input.
+# REWIND_INPUT is mutually exclusive with all controller buttons.
+REWIND_INPUT = 0x100
 InputRLE = tuple[tuple[int, int], ...]
 
 
@@ -13,8 +16,8 @@ def normalize_rle(runs: Iterable[tuple[int, int]]) -> InputRLE:
     normalized: list[tuple[int, int]] = []
     for controller, count in runs:
         controller, count = int(controller), int(count)
-        if not 0 <= controller <= 0xFF:
-            raise ValueError("controller state must fit in uint8_t")
+        if not 0 <= controller <= REWIND_INPUT:
+            raise ValueError("input must be a NES uint8 controller state or REWIND_INPUT")
         if count <= 0:
             raise ValueError("RLE counts must be positive")
         if normalized and normalized[-1][0] == controller:

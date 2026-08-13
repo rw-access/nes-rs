@@ -7,6 +7,6 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Training snapshots are explicit FFI-owned clones; the interactive rewind
-# history is both unnecessary and undesirable for long RL rollouts.
-nes-core = { path = "../nes-core", features = ["rewind-disabled"] }
+# The rewind tape is compiled into the shared library once. Python controls
+# whether the Gym action is exposed at runtime.
+nes-core = { path = "../nes-core", features = ["layered-render"] }

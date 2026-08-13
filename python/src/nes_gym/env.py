@@ -10,7 +10,7 @@ import gymnasium as gym
 import numpy as np
 
 from .core import NesCore, NesSnapshot
-from .trace import CheckpointRef, EpisodeTrace, EpisodeTraceBuilder
+from .trace import CheckpointRef, EpisodeTrace, EpisodeTraceBuilder, REWIND_INPUT
 
 
 class NesEnv(gym.Env[np.ndarray, int]):
@@ -31,6 +31,8 @@ class NesEnv(gym.Env[np.ndarray, int]):
         actions: Sequence[int] = (0,),
         frame_skip: int = 1,
         max_episode_frames: int = 18_000,
+        rewind_enabled: bool = False,
+        rewind_grace_frames: int = 60,
         core: NesCore | Any | None = None,
         library: str | None = None,
     ):
@@ -39,17 +41,23 @@ class NesEnv(gym.Env[np.ndarray, int]):
             raise ValueError("frame_skip must be positive")
         if max_episode_frames <= 0:
             raise ValueError("max_episode_frames must be positive")
+        if rewind_grace_frames <= 0:
+            raise ValueError("rewind_grace_frames must be positive")
         if core is None and rom is None:
             raise ValueError("rom is required when core is not supplied")
         self.core = core if core is not None else NesCore(rom, library=library)
         self.init_sequence = tuple((int(controller), int(frames)) for controller, frames in init_sequence)
         self.frame_skip = int(frame_skip)
         self.max_episode_frames = int(max_episode_frames)
+        self.rewind_enabled = bool(rewind_enabled)
+        self.rewind_grace_frames = int(rewind_grace_frames)
         self.action_mapping = tuple(int(value) for value in actions)
         if not self.action_mapping:
             raise ValueError("actions cannot be empty")
-        if any(not 0 <= value <= 0xFF for value in self.action_mapping):
-            raise ValueError("action controller states must fit in uint8_t")
+        if any(not 0 <= value <= REWIND_INPUT for value in self.action_mapping):
+            raise ValueError("actions must be NES controller states or REWIND_INPUT")
+        if REWIND_INPUT in self.action_mapping and not self.rewind_enabled:
+            raise ValueError("REWIND_INPUT requires rewind_enabled=True")
         self.action_space = gym.spaces.Discrete(len(self.action_mapping))
         self.observation_space = gym.spaces.Box(
             low=0, high=255, shape=(2048,), dtype=np.uint8
@@ -65,6 +73,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         self._elapsed_frames = 0
         self._episode_done = False
         self._episode_truncated = False
+        self._death_pending_frames = 0
         self._previous_metrics: dict[str, Any] = {}
         self._last_trace: EpisodeTrace | None = None
 
@@ -97,6 +106,8 @@ class NesEnv(gym.Env[np.ndarray, int]):
         info: dict[str, Any] = {
             "episode_frames": self._elapsed_frames,
             "frame_skip": self.frame_skip,
+            "rewind_enabled": self.rewind_enabled,
+            "death_pending_frames": self._death_pending_frames,
             "checkpoint": self.root_checkpoint,
             "metrics": metrics,
         }
@@ -115,6 +126,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         self._elapsed_frames = 0
         self._episode_done = False
         self._episode_truncated = False
+        self._death_pending_frames = 0
         self._trace = EpisodeTraceBuilder(self.root_checkpoint)
         self._previous_metrics = dict(self.metrics())
         self._last_trace = None
@@ -127,27 +139,49 @@ class NesEnv(gym.Env[np.ndarray, int]):
         if not self.action_space.contains(action):
             raise ValueError(f"invalid action {action}")
         controller = self.action_mapping[action]
+        is_rewind = controller == REWIND_INPUT
         previous = self._previous_metrics
-        frames_to_advance = min(self.frame_skip, self.max_episode_frames - self._elapsed_frames)
-        if frames_to_advance <= 0:
+        if is_rewind:
+            frames_to_advance = min(self.frame_skip, self._elapsed_frames)
+        else:
+            frames_to_advance = min(self.frame_skip, self.max_episode_frames - self._elapsed_frames)
+        if frames_to_advance <= 0 and not is_rewind:
             raise RuntimeError("episode frame budget is exhausted; call reset() first")
         actual_frames = 0
         current = dict(previous)
-        for _ in range(frames_to_advance):
-            self.core.advance_frames(controller, 1)
-            self._elapsed_frames += 1
-            actual_frames += 1
-            current = dict(self.metrics())
-            if self.is_terminal():
-                break
-        reward = float(self.reward(previous, current))
+        if is_rewind:
+            for _ in range(frames_to_advance):
+                if not self.core.rewind():
+                    break
+                self._elapsed_frames = max(0, self._elapsed_frames - 1)
+                actual_frames += 1
+                current = dict(self.metrics())
+                if not self.is_terminal():
+                    self._death_pending_frames = 0
+        else:
+            for _ in range(frames_to_advance):
+                self.core.advance_frames(controller, 1)
+                self._elapsed_frames += 1
+                actual_frames += 1
+                current = dict(self.metrics())
+                raw_reason = self.terminal_reason() if self.is_terminal() else None
+                if raw_reason == "death" and self.rewind_enabled:
+                    self._death_pending_frames += 1
+                elif raw_reason != "death":
+                    self._death_pending_frames = 0
+                if self._effective_terminal_reason() is not None:
+                    break
+        reward = 0.0 if is_rewind else float(self.reward(previous, current))
         assert self._trace is not None
-        self._trace.append(controller, actual_frames)
+        # A failed rewind leaves no emulator timeline to reproduce, so omit it
+        # from the trace. Successful rewinds record one run per restored frame.
+        if actual_frames:
+            self._trace.append(controller, actual_frames)
         self._trace.add_reward(reward)
         self._previous_metrics = current
 
-        terminated = bool(self.is_terminal())
-        reason = self.terminal_reason() if terminated else None
+        reason = self._effective_terminal_reason()
+        terminated = reason is not None
         truncated = not terminated and self._elapsed_frames >= self.max_episode_frames
         if truncated:
             reason = "max_frames"
@@ -165,7 +199,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         if self._trace is None:
             raise RuntimeError("reset() must be called before requesting a trace")
         return self._trace.finish(
-            terminal_reason=self.terminal_reason() if self._episode_done else None,
+            terminal_reason=self._effective_terminal_reason() if self._episode_done else None,
             truncated=self._episode_truncated,
             final_metrics=self._previous_metrics,
         )
@@ -176,8 +210,22 @@ class NesEnv(gym.Env[np.ndarray, int]):
             raise ValueError("trace checkpoint does not belong to this environment root")
         self.core.restore(self._root_snapshot)
         for controller, frames in trace.inputs_rle:
-            self.core.advance_frames(controller, frames)
+            if controller == REWIND_INPUT:
+                for _ in range(frames):
+                    self.core.rewind()
+            else:
+                self.core.advance_frames(controller, frames)
         return self.ram
+
+    def _effective_terminal_reason(self) -> str | None:
+        raw_reason = self.terminal_reason() if self.is_terminal() else None
+        if (
+            raw_reason == "death"
+            and self.rewind_enabled
+            and self._death_pending_frames <= self.rewind_grace_frames
+        ):
+            return None
+        return raw_reason
 
     def close(self) -> None:
         root = getattr(self, "_root_snapshot", None)

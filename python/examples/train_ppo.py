@@ -40,6 +40,8 @@ def main() -> None:
     parser.add_argument("--death-penalty", type=float, default=0.0)
     parser.add_argument("--completion-bonus", type=float, default=0.0)
     parser.add_argument("--score-coef", type=float, default=0.0)
+    parser.add_argument("--rewind-enabled", action="store_true")
+    parser.add_argument("--rewind-grace-frames", type=int, default=60)
     parser.add_argument("--ent-coef", type=float, default=0.0)
     parser.add_argument("--model-output", type=Path, default=None)
     parser.add_argument("--resume-model", type=Path, default=None)
@@ -49,8 +51,8 @@ def main() -> None:
     parser.add_argument("--stochastic-eval", action="store_true")
     parser.add_argument("--verbose", type=int, choices=(0, 1), default=1)
     args = parser.parse_args()
-    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0 or args.ent_coef < 0 or args.eval_episodes <= 0:
-        parser.error("timesteps, max episode frames, frame skip, and eval episodes must be positive; entropy coefficient cannot be negative")
+    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0 or args.ent_coef < 0 or args.eval_episodes <= 0 or args.rewind_grace_frames <= 0:
+        parser.error("timesteps, max episode frames, frame skip, eval episodes, and rewind grace must be positive; entropy coefficient cannot be negative")
 
     try:
         import torch
@@ -83,6 +85,8 @@ def main() -> None:
         death_penalty=args.death_penalty,
         completion_bonus=args.completion_bonus,
         score_coef=args.score_coef,
+        rewind_enabled=args.rewind_enabled,
+        rewind_grace_frames=args.rewind_grace_frames,
     ) as base_env:
         env = NormalizeRamObservation(base_env)
         if args.resume_model is not None:

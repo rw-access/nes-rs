@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env import NesEnv
+from .trace import REWIND_INPUT
 
 # Keep this in lockstep with nes_core::Button.
 NOOP = 0x00
@@ -33,17 +34,24 @@ class SuperMarioBros1_1Env(NesEnv):
         completion_bonus: float = 0.0,
         score_coef: float = 0.0,
         score_delta_clip: float = 1000.0,
+        rewind_enabled: bool = False,
+        rewind_grace_frames: int = 60,
         **kwargs: Any,
     ):
         kwargs.setdefault("init_sequence", INIT_SEQUENCE)
-        kwargs.setdefault("actions", ACTIONS)
+        kwargs.setdefault("actions", ACTIONS + ((REWIND_INPUT,) if rewind_enabled else ()))
         self.death_penalty = float(death_penalty)
         self.completion_bonus = float(completion_bonus)
         self.score_coef = float(score_coef)
         self.score_delta_clip = float(score_delta_clip)
         if self.score_delta_clip <= 0:
             raise ValueError("score_delta_clip must be positive")
-        super().__init__(rom, **kwargs)
+        super().__init__(
+            rom,
+            rewind_enabled=rewind_enabled,
+            rewind_grace_frames=rewind_grace_frames,
+            **kwargs,
+        )
 
     @staticmethod
     def _bcd(data: bytes | bytearray) -> int:

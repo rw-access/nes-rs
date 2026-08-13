@@ -186,6 +186,11 @@ impl VideoBuffer {
         &self.rgba
     }
 
+    /// Return the mutable RGBA view for a frontend compositor.
+    pub fn rgba_mut(&mut self) -> &mut [u8] {
+        &mut self.rgba
+    }
+
     /// Replace the indexed frame and refresh the RGBA view.
     ///
     /// The input must contain exactly [`FRAME_PIXELS`] bytes.

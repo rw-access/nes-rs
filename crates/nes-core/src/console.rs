@@ -467,6 +467,11 @@ impl Console {
         }
     }
 
+    /// Whether the most recent rewind attempt reached the oldest tape frame.
+    pub fn rewind_exhausted(&self) -> bool {
+        self.rewind_exhausted
+    }
+
     /// Returns and clears the pending audio discontinuity notification.
     ///
     /// Most frontends should consume `FrameOutput::audio_discontinuity` from

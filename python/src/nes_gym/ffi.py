@@ -29,6 +29,7 @@ NesStatus nes_create(const uint8_t *rom_ptr, size_t rom_len,
 void nes_destroy(NesHandle *handle);
 NesStatus nes_advance_frames(NesHandle *handle, uint8_t controller_bits,
                              uint32_t frames);
+NesStatus nes_rewind(NesHandle *handle, bool *out_rewound);
 NesStatus nes_snapshot(const NesHandle *handle, NesSnapshot **out_snapshot);
 NesStatus nes_restore(NesHandle *handle, const NesSnapshot *snapshot);
 void nes_snapshot_destroy(NesSnapshot *snapshot);
@@ -38,6 +39,9 @@ const char *nes_last_error(void);
 NesStatus nes_set_video_output(NesHandle *handle, bool enabled);
 const uint8_t *nes_framebuffer_view(const NesHandle *handle);
 size_t nes_framebuffer_view_len(void);
+const float *nes_audio_view(const NesHandle *handle);
+size_t nes_audio_view_len(const NesHandle *handle);
+uint32_t nes_audio_sample_rate(void);
 """
 
 

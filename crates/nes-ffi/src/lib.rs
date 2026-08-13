@@ -15,8 +15,8 @@ use std::{
 };
 
 use nes_core::{
-    cartridge, controller::ButtonState, ines, Console, ConsoleState, VideoBuffer, VideoOutput,
-    FRAME_RGBA_BYTES,
+    cartridge, controller::ButtonState, ines, Console, ConsoleState, RenderMode, VideoBuffer,
+    VideoOutput, FRAME_HEIGHT, FRAME_RGBA_BYTES, FRAME_WIDTH, NES_PALETTE_RGBA,
 };
 
 /// Number of bytes in the CPU's internal RAM, mirrored at $0000-$1fff.
@@ -42,6 +42,7 @@ pub struct NesHandle {
     console: Console,
     ram_view: [u8; NES_RAM_BYTES],
     framebuffer: VideoBuffer,
+    audio_view: Vec<f32>,
     video_enabled: bool,
 }
 
@@ -155,6 +156,30 @@ pub extern "C" fn nes_framebuffer_view_len() -> usize {
     NES_FRAMEBUFFER_RGBA_BYTES
 }
 
+/// Return the number of mono f32 samples produced by the most recent frame.
+#[no_mangle]
+pub unsafe extern "C" fn nes_audio_view_len(handle: *const NesHandle) -> usize {
+    match handle_ref(handle) {
+        Ok(handle) => handle.audio_view.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Return the fixed audio sample rate used by nes-core.
+#[no_mangle]
+pub extern "C" fn nes_audio_sample_rate() -> u32 {
+    nes_core::AUDIO_SAMPLE_RATE
+}
+
+/// Return the most recent frame's borrowed mono f32 audio samples.
+#[no_mangle]
+pub unsafe extern "C" fn nes_audio_view(handle: *const NesHandle) -> *const f32 {
+    match handle_ref(handle) {
+        Ok(handle) => handle.audio_view.as_ptr(),
+        Err(_) => ptr::null(),
+    }
+}
+
 /// Create an emulator from an in-memory iNES ROM.
 ///
 /// The newly created emulator is headless by default. Set video output to
@@ -200,6 +225,7 @@ pub unsafe extern "C" fn nes_create(
             console: Console::new(mapper),
             ram_view: [0; NES_RAM_BYTES],
             framebuffer: VideoBuffer::new(),
+            audio_view: Vec::with_capacity((nes_core::AUDIO_SAMPLE_RATE / 50) as usize),
             video_enabled: false,
         });
         handle.console.set_video_output(VideoOutput::Disabled);
@@ -231,10 +257,46 @@ impl NesHandle {
         self.console
             .update_buttons(ButtonState::from_bits(controller_state));
         let frame = self.console.next_frame();
+        self.audio_view.clear();
+        self.audio_view.extend_from_slice(frame.audio_samples);
         if self.video_enabled {
             frame.copy_to(&mut self.framebuffer);
+            overlay_ghosts(&frame, &mut self.framebuffer);
         }
         self.refresh_ram_view();
+    }
+
+    fn refresh_last_video_frame(&mut self) {
+        if self.video_enabled {
+            self.console
+                .copy_last_frame_to(RenderMode::Both, &mut self.framebuffer);
+        }
+    }
+}
+
+fn blend_channel(destination: u8, source: u8, opacity: f32) -> u8 {
+    (source as f32 * opacity + destination as f32 * (1.0 - opacity)).round() as u8
+}
+
+fn overlay_ghosts(frame: &nes_core::FrameOutput<'_>, buffer: &mut VideoBuffer) {
+    let rgba = buffer.rgba_mut();
+    for layer in frame.ghost_layers {
+        let opacity = layer.opacity().clamp(0.0, 1.0);
+        let Some(ghost_frame) = layer.current_frame() else {
+            continue;
+        };
+        for sprite in ghost_frame.sprites() {
+            let x = sprite.x as usize;
+            let y = sprite.y as usize;
+            if x >= FRAME_WIDTH || y >= FRAME_HEIGHT {
+                continue;
+            }
+            let [red, green, blue, _] = NES_PALETTE_RGBA[sprite.palette_index as usize & 0x3f];
+            let offset = (y * FRAME_WIDTH + x) * 4;
+            rgba[offset] = blend_channel(rgba[offset], red, opacity);
+            rgba[offset + 1] = blend_channel(rgba[offset + 1], green, opacity);
+            rgba[offset + 2] = blend_channel(rgba[offset + 2], blue, opacity);
+        }
     }
 }
 
@@ -254,6 +316,38 @@ pub unsafe extern "C" fn nes_advance_frames(
         for _ in 0..frames {
             handle.advance_one_frame(controller_state);
         }
+        NesStatus::Ok
+    })
+}
+
+/// Rewind one completed frame using the emulator's in-memory rewind tape.
+/// `out_rewound` is false when the tape has no older frame; that condition is
+/// normal for a runtime-enabled RL action and is not an ABI error.
+#[no_mangle]
+pub unsafe extern "C" fn nes_rewind(handle: *mut NesHandle, out_rewound: *mut bool) -> NesStatus {
+    ffi_status(|| {
+        if out_rewound.is_null() {
+            return invalid_argument("output rewind result is null");
+        }
+        *out_rewound = false;
+        let handle = match mutable_handle(handle) {
+            Ok(handle) => handle,
+            Err(status) => return status,
+        };
+        *out_rewound = handle.console.rewind();
+        handle.audio_view.clear();
+        if *out_rewound {
+            handle.refresh_last_video_frame();
+        } else if handle.console.rewind_exhausted() {
+            // Consume Console's oldest-frame hold marker so the next normal
+            // FFI advance is never silently discarded.
+            let frame = handle.console.next_frame();
+            if handle.video_enabled {
+                frame.copy_to(&mut handle.framebuffer);
+                overlay_ghosts(&frame, &mut handle.framebuffer);
+            }
+        }
+        handle.refresh_ram_view();
         NesStatus::Ok
     })
 }
@@ -423,6 +517,25 @@ mod tests {
             assert_eq!(first, second);
 
             nes_snapshot_destroy(snapshot);
+            nes_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn rewind_restores_previous_ram_without_unwinding() {
+        let rom = test_rom();
+        unsafe {
+            let handle = create_test_handle(&rom);
+            assert_eq!(nes_advance_frames(handle, 0x81, 3), NesStatus::Ok);
+            let mut rewound = false;
+            assert_eq!(nes_rewind(handle, &mut rewound), NesStatus::Ok);
+            assert!(rewound);
+            assert_eq!(nes_rewind(handle, &mut rewound), NesStatus::Ok);
+            assert!(rewound);
+            assert_eq!(nes_rewind(handle, &mut rewound), NesStatus::Ok);
+            assert!(rewound);
+            assert_eq!(nes_rewind(handle, &mut rewound), NesStatus::Ok);
+            assert!(!rewound);
             nes_destroy(handle);
         }
     }

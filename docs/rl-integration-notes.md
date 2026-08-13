@@ -56,6 +56,66 @@ Suggested terminal reasons are `"death"`, `"level_complete"`, and
 `"max_frames"`. Death should normally terminate at the beginning of the death
 animation rather than spending rollout frames on the full animation.
 
+## Runtime rewind variant
+
+The native rewind tape is compiled into the FFI library, but rewind is exposed
+to Python only when `rewind_enabled=True` (or `--rewind-enabled` in the PPO
+examples). The SMB action mapping then appends the sentinel `REWIND_INPUT =
+0x100`, which is outside the NES controller byte range and cannot be combined
+accidentally with buttons. A rewind action rewinds one completed frame per
+frame in the configured `frame_skip` budget and receives zero reward.
+
+When enabled, a raw SMB death is held pending for 60 forward frames by default
+(configurable as `rewind_grace_frames`). Rewinding clears that pending death if
+the emulator returns to a non-death state. The sentinel is stored in the RLE
+episode trace, and the Python replay helpers understand it.
+
+## Trace video export, audio, and rewind ghosts
+
+`python/src/nes_gym/replay.py:export_trace_video` restores the materialized
+checkpoint, enables native video output, replays the exact RLE input trace,
+and pipes one RGBA frame per emulated frame to FFmpeg. The FFI now exposes a
+reusable per-frame audio view at 48 kHz; the exporter writes a temporary WAV
+and muxes it into the final AAC MP4. Rewind frames contribute silence because
+they are state navigation rather than newly emulated audio.
+
+The FFI build enables `layered-render`. The existing core rewind timeline
+captures rewound sprite frames and fades them over subsequent normal frames;
+the FFI compositor overlays those sparse ghost sprites in the exported RGBA
+frame, so rewind-triggered traces retain the visual tape effect.
+
+## Evenly split rewind/no-rewind PPO runs
+
+`python/examples/staged_ppo.py` is a single resumable training chain, not a
+combined A/B runner. For an even comparison, run two independent chains with
+identical segment counts, per-segment timesteps, seed, horizon/reward options,
+and evaluation settings. Give each chain its own repository-local workdir and
+allocate half of the total timestep budget to each. For example, this gives
+1,080,000 training steps to each variant and 2,160,000 combined:
+
+```powershell
+$rom = "roms\Super Mario Bros. (World).nes"
+
+uv run --directory python python examples/staged_ppo.py $rom `
+  --workdir "artifacts\staged-ppo-no-rewind" `
+  --segments 6 --segment-timesteps 180000 `
+  --seed 0 --device cpu
+
+uv run --directory python python examples/staged_ppo.py $rom `
+  --workdir "artifacts\staged-ppo-rewind" `
+  --segments 6 --segment-timesteps 180000 `
+  --seed 0 --device cpu `
+  --rewind-enabled --rewind-grace-frames 60
+```
+
+Do not resume the rewind chain from a non-rewind checkpoint, or vice versa:
+the policies have different action heads (7 actions versus 6). The staged
+runner's default `--workdir ../artifacts/staged-ppo` is relative to the
+process working directory, so explicit paths are recommended. Its current
+`--stochastic-eval` declaration is effectively enabled by default; use the
+same evaluation mode for both runs, and treat the resulting sampled evaluation
+trace/video as comparison artifacts rather than deterministic policy scores.
+
 The RAM interpretation is consistent with the established
 `gym-super-mario-bros` implementation:
 

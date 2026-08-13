@@ -20,6 +20,8 @@ def experiment_metadata(env: Any) -> dict[str, object]:
         "root_checkpoint": env.root_checkpoint.identifier,
         "action_mapping": list(env.action_mapping),
         "frame_skip": env.frame_skip,
+        "rewind_enabled": getattr(env, "rewind_enabled", False),
+        "rewind_grace_frames": getattr(env, "rewind_grace_frames", None),
         "observation": {
             "kind": "cpu_ram",
             "shape": [2048],

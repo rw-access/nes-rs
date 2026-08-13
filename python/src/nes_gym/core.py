@@ -148,6 +148,29 @@ class NesCore:
         return np.frombuffer(self.ffi.buffer(pointer, length), dtype=np.uint8, count=length)
 
     @property
+    def audio_sample_rate(self) -> int:
+        try:
+            return int(self.lib.nes_audio_sample_rate())
+        except AttributeError as exc:
+            raise NesCoreError("nes_audio_sample_rate is required by the Python ABI") from exc
+
+    @property
+    def audio(self) -> np.ndarray:
+        """Return the most recent frame's borrowed mono f32 audio samples."""
+
+        self._require_open()
+        try:
+            length = int(self.lib.nes_audio_view_len(self._handle))
+            pointer = self.lib.nes_audio_view(self._handle)
+        except AttributeError as exc:
+            raise NesCoreError("audio views are required by the Python ABI") from exc
+        if length == 0:
+            return np.empty(0, dtype=np.float32)
+        if pointer == self.ffi.NULL:
+            raise NesCoreError(f"nes_audio_view failed: {last_error(self.ffi, self.lib)}")
+        return np.frombuffer(self.ffi.buffer(pointer, length * 4), dtype=np.float32, count=length)
+
+    @property
     def rom_sha256(self) -> str:
         return hashlib.sha256(self._rom).hexdigest()
 
@@ -182,6 +205,18 @@ class NesCore:
             self._handle, int(controller_bits), int(frames)
         )
         self._check_status("nes_advance_frames", result)
+
+    def rewind(self) -> bool:
+        """Move the native rewind tape back by one completed frame."""
+
+        self._require_open()
+        out_rewound = self.ffi.new("bool *", False)
+        try:
+            result = self.lib.nes_rewind(self._handle, out_rewound)
+        except AttributeError as exc:
+            raise NesCoreError("nes_rewind is required by the Python ABI") from exc
+        self._check_status("nes_rewind", result)
+        return bool(out_rewound[0])
 
     def snapshot(self) -> NesSnapshot:
         self._require_open()

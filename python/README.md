@@ -16,6 +16,7 @@ typedef _Bool bool;
 NesStatus nes_create(const uint8_t *rom_ptr, size_t rom_len, NesHandle **out_handle);
 void nes_destroy(NesHandle *handle);
 NesStatus nes_advance_frames(NesHandle *handle, uint8_t controller_bits, uint32_t frames);
+NesStatus nes_rewind(NesHandle *handle, bool *out_rewound);
 NesStatus nes_snapshot(const NesHandle *handle, NesSnapshot **out_snapshot);
 NesStatus nes_restore(NesHandle *handle, const NesSnapshot *snapshot);
 void nes_snapshot_destroy(NesSnapshot *snapshot);
@@ -40,6 +41,18 @@ Reset restores the snapshot. Actions are
 `[NOOP, LEFT, RIGHT, A, LEFT|A, RIGHT|A]`; each action is held for
 `frame_skip` complete frames (default 1).
 
+Pass `--rewind-enabled` to add a seventh, mutually exclusive rewind action.
+It moves the native rewind tape back one frame per requested frame, contributes
+zero reward, and records the sentinel `0x100` in the episode trace rather than
+pretending it is a controller bitmask. Death termination is delayed by
+`--rewind-grace-frames` (default 60) while rewind is enabled, giving the policy
+about one second to recover. This is a runtime flag; no separate emulator build
+is required.
+
+Rewind-enabled policies have seven action logits, so a six-action checkpoint
+cannot be loaded directly without changing the policy head. Keep rewind and
+non-rewind comparisons as separate runs or explicitly expand the head.
+
 Each episode records the actual controller state for every emulated frame in
 RLE form. `env.last_trace` can be replayed with `env.replay_trace(trace)`.
 Terminal reasons are `death` or `level_complete`; the external frame limit is
@@ -56,7 +69,9 @@ uv run --directory python python examples/random_episode.py "..\roms\Super Mario
 ```
 
 Save and verify a trace, then export only its episode frames through the
-in-process framebuffer and FFmpeg:
+in-process framebuffer and FFmpeg. Exported MP4s include the emulator audio;
+rewind-enabled traces also include the faded sprite ghosts produced by the
+native rewind timeline:
 
 ```powershell
 uv run --directory python python examples/random_episode.py `
@@ -95,6 +110,15 @@ uv run --directory python python examples/train_ppo.py `
   --model-output "..\artifacts\ppo-model" `
   --trace-output "..\artifacts\ppo-eval.json" `
   --video-output "..\artifacts\ppo-eval.mp4"
+```
+
+The same entry point can train the rewind variant:
+
+```powershell
+uv run --directory python python examples/train_ppo.py `
+  "..\roms\Super Mario Bros. (World).nes" `
+  --rewind-enabled --rewind-grace-frames 60 `
+  --total-timesteps 180000 --device cpu
 ```
 
 For recoverable longer experiments, `examples/staged_ppo.py` trains in

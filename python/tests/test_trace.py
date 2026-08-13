@@ -1,4 +1,4 @@
-from nes_gym.trace import CheckpointRef, EpisodeTrace, EpisodeTraceBuilder, expand_rle
+from nes_gym.trace import CheckpointRef, EpisodeTrace, EpisodeTraceBuilder, REWIND_INPUT, expand_rle
 from nes_gym.metadata import experiment_metadata
 
 
@@ -19,6 +19,12 @@ def test_trace_serialization_contains_provenance():
     assert data["checkpoint"]["parent"] == "r"
     assert data["episode_frames"] == 3
     assert list(expand_rle(data["inputs_rle"])) == [2, 2, 2]
+
+
+def test_rewind_input_is_serializable_and_separate_from_controller_bits():
+    trace = EpisodeTrace(CheckpointRef.root("root"), ((REWIND_INPUT, 2),))
+    assert trace.to_dict()["inputs_rle"] == [[REWIND_INPUT, 2]]
+    assert list(trace.inputs()) == [REWIND_INPUT, REWIND_INPUT]
 
 
 def test_experiment_metadata_identifies_reproduction_configuration():

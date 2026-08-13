@@ -17,7 +17,7 @@ from .smb import (
     SuperMarioBros1_1Env,
     UP,
 )
-from .trace import CheckpointRef, EpisodeTrace, InputRLE, expand_rle
+from .trace import CheckpointRef, EpisodeTrace, InputRLE, REWIND_INPUT, expand_rle
 from .metadata import experiment_metadata
 
 __all__ = [
@@ -36,6 +36,7 @@ __all__ = [
     "NesSnapshot",
     "NOOP",
     "RIGHT",
+    "REWIND_INPUT",
     "SELECT",
     "START",
     "SuperMarioBros1_1Env",
