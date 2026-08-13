@@ -44,10 +44,12 @@ def main() -> None:
     parser.add_argument("--resume-model", type=Path, default=None)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--video-output", type=Path, default=None)
+    parser.add_argument("--eval-episodes", type=int, default=1)
+    parser.add_argument("--stochastic-eval", action="store_true")
     parser.add_argument("--verbose", type=int, choices=(0, 1), default=1)
     args = parser.parse_args()
-    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0 or args.ent_coef < 0:
-        parser.error("timesteps, max episode frames, and frame skip must be positive; entropy coefficient cannot be negative")
+    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0 or args.ent_coef < 0 or args.eval_episodes <= 0:
+        parser.error("timesteps, max episode frames, frame skip, and eval episodes must be positive; entropy coefficient cannot be negative")
 
     try:
         import torch
@@ -112,28 +114,45 @@ def main() -> None:
                 args.model_output.parent.mkdir(parents=True, exist_ok=True)
                 model.save(str(args.model_output))
 
-            observation, _ = env.reset(seed=args.seed)
-            while True:
-                action, _ = model.predict(observation, deterministic=True)
-                action = int(action.item()) if hasattr(action, "item") else int(action)
-                observation, _, terminated, truncated, info = env.step(action)
-                if terminated or truncated:
-                    break
-
-            trace = base_env.last_trace
-            assert trace is not None
-            if args.trace_output is not None:
-                args.trace_output.parent.mkdir(parents=True, exist_ok=True)
-                args.trace_output.write_text(trace.to_json() + "\n", encoding="utf-8")
-            if args.video_output is not None:
-                export_trace_video(base_env.core, trace, base_env._root_snapshot, args.video_output)
-            print({
-                "evaluation": {
+            evaluations = []
+            best_trace = None
+            best_key = None
+            for episode in range(args.eval_episodes):
+                observation, _ = env.reset(seed=args.seed + episode)
+                while True:
+                    action, _ = model.predict(
+                        observation, deterministic=not args.stochastic_eval
+                    )
+                    action = int(action.item()) if hasattr(action, "item") else int(action)
+                    observation, _, terminated, truncated, info = env.step(action)
+                    if terminated or truncated:
+                        break
+                trace = base_env.last_trace
+                assert trace is not None
+                evaluation = {
+                    "episode": episode,
                     "episode_frames": trace.episode_frames,
                     "total_reward": trace.total_reward,
                     "terminal_reason": trace.terminal_reason,
                     "final_metrics": trace.final_metrics,
-                },
+                }
+                evaluations.append(evaluation)
+                world_x = int(trace.final_metrics.get("world_x", 0))
+                key = (world_x, trace.total_reward, trace.episode_frames)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_trace = trace
+
+            assert best_trace is not None
+            if args.trace_output is not None:
+                args.trace_output.parent.mkdir(parents=True, exist_ok=True)
+                args.trace_output.write_text(best_trace.to_json() + "\n", encoding="utf-8")
+            if args.video_output is not None:
+                export_trace_video(base_env.core, best_trace, base_env._root_snapshot, args.video_output)
+            print({
+                "evaluation": evaluations,
+                "selected_evaluation": best_trace.to_dict(),
+                "stochastic_evaluation": args.stochastic_eval,
                 "model_output": str(args.model_output) if args.model_output is not None else None,
                 "trace_output": str(args.trace_output) if args.trace_output is not None else None,
                 "video_output": str(args.video_output) if args.video_output is not None else None,

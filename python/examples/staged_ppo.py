@@ -20,11 +20,13 @@ def main() -> None:
     parser.add_argument("--death-penalty", type=float, default=100.0)
     parser.add_argument("--completion-bonus", type=float, default=1_000.0)
     parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--eval-episodes", type=int, default=8)
+    parser.add_argument("--stochastic-eval", action="store_true", default=True)
     parser.add_argument("--resume-model", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
-    if args.segments <= 0 or args.segment_timesteps <= 0 or args.initial_horizon <= 0 or args.frame_skip <= 0 or args.ent_coef < 0:
+    if args.segments <= 0 or args.segment_timesteps <= 0 or args.initial_horizon <= 0 or args.frame_skip <= 0 or args.ent_coef < 0 or args.eval_episodes <= 0:
         parser.error("segments, segment timesteps, initial horizon, and frame skip must be positive; entropy coefficient cannot be negative")
 
     args.workdir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +53,7 @@ def main() -> None:
             "--death-penalty", str(args.death_penalty),
             "--completion-bonus", str(args.completion_bonus),
             "--ent-coef", str(args.ent_coef),
+            "--eval-episodes", str(args.eval_episodes),
             "--device", args.device,
             "--seed", str(args.seed),
             "--verbose", "0",
