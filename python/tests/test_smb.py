@@ -64,6 +64,26 @@ def test_optional_terminal_reward_shaping():
     env.close()
 
 
+def test_rewind_death_penalty_waits_for_committed_death():
+    core = FakeCore()
+    env = SuperMarioBros1_1Env(
+        core=core,
+        rewind_enabled=True,
+        rewind_grace_frames=60,
+        death_penalty=100,
+    )
+    env.reset()
+    core.ram[0x000E] = 0x06
+
+    # A raw death is still recoverable during the grace window.
+    assert env.reward({"world_x": 10}, {"world_x": 12}) == 2
+
+    # Once the grace window expires, the committed death is penalized once.
+    env._death_pending_frames = 61
+    assert env.reward({"world_x": 10}, {"world_x": 12}) == -98
+    env.close()
+
+
 def test_optional_score_reward_shaping():
     core = FakeCore()
     env = SuperMarioBros1_1Env(core=core, score_coef=0.1)

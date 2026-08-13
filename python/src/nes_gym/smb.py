@@ -79,11 +79,11 @@ class SuperMarioBros1_1Env(NesEnv):
         previous_score = float(previous_metrics.get("score", current_score))
         score_delta = max(0.0, current_score - previous_score)
         reward += self.score_coef * min(score_delta, self.score_delta_clip)
-        if self.is_terminal():
-            if self._is_level_complete():
-                reward += self.completion_bonus
-            elif self._is_dying_or_dead():
-                reward -= self.death_penalty
+        reason = self._effective_terminal_reason()
+        if reason == "level_complete":
+            reward += self.completion_bonus
+        elif reason == "death":
+            reward -= self.death_penalty
         return reward
 
     def _is_dying_or_dead(self) -> bool:
