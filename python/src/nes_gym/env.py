@@ -64,6 +64,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         self._trace: EpisodeTraceBuilder | None = None
         self._elapsed_frames = 0
         self._episode_done = False
+        self._episode_truncated = False
         self._previous_metrics: dict[str, Any] = {}
         self._last_trace: EpisodeTrace | None = None
 
@@ -113,6 +114,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         self.core.restore(self._root_snapshot)
         self._elapsed_frames = 0
         self._episode_done = False
+        self._episode_truncated = False
         self._trace = EpisodeTraceBuilder(self.root_checkpoint)
         self._previous_metrics = dict(self.metrics())
         self._last_trace = None
@@ -151,6 +153,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
             reason = "max_frames"
         if terminated or truncated:
             self._episode_done = True
+            self._episode_truncated = truncated
             self._last_trace = self._trace.finish(
                 terminal_reason=reason,
                 truncated=truncated,
@@ -163,7 +166,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
             raise RuntimeError("reset() must be called before requesting a trace")
         return self._trace.finish(
             terminal_reason=self.terminal_reason() if self._episode_done else None,
-            truncated=self._episode_done and self._elapsed_frames >= self.max_episode_frames,
+            truncated=self._episode_truncated,
             final_metrics=self._previous_metrics,
         )
 

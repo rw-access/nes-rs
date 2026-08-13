@@ -64,3 +64,24 @@ def test_replay_uses_root_and_preserves_view_identity():
     assert id(replayed) == view_id
     assert int(replayed[0]) == 2
     env.close()
+
+
+def test_semantic_terminal_at_frame_limit_is_not_truncation():
+    class TerminalEnv(NesEnv):
+        def is_terminal(self):
+            return self.elapsed_frames >= 1
+
+        def terminal_reason(self):
+            return "test_terminal" if self.is_terminal() else None
+
+    env = TerminalEnv(core=FakeCore(), actions=(0,), max_episode_frames=1)
+    try:
+        env.reset()
+        _, _, terminated, truncated, info = env.step(0)
+        assert terminated
+        assert not truncated
+        assert info["terminal_reason"] == "test_terminal"
+        assert env.current_trace().terminal_reason == "test_terminal"
+        assert not env.current_trace().truncated
+    finally:
+        env.close()
