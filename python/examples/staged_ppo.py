@@ -61,6 +61,8 @@ def main() -> None:
             "--trace-output", str(trace_path),
             "--video-output", str(video_path),
         ]
+        if args.stochastic_eval:
+            command.append("--stochastic-eval")
         if previous_model is not None:
             command.extend(("--resume-model", str(previous_model)))
         with log_path.open("w", encoding="utf-8") as log:
