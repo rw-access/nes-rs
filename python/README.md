@@ -86,6 +86,22 @@ Use `--device auto` to select CUDA when it is available, or `--device cpu` to
 force CPU execution. Stable-Baselines3 may warn that a small MLP workload has
 low GPU utilization; that is expected until rollout and batch sizes grow.
 
+Training can save a model and a deterministic evaluation trace/video:
+
+```powershell
+uv run --directory python python examples/train_ppo.py `
+  "..\roms\Super Mario Bros. (World).nes" `
+  --total-timesteps 180000 --device cpu `
+  --model-output "..\artifacts\ppo-model" `
+  --trace-output "..\artifacts\ppo-eval.json" `
+  --video-output "..\artifacts\ppo-eval.mp4"
+```
+
+For recoverable longer experiments, `examples/staged_ppo.py` trains in
+segments, resumes the previous PPO checkpoint, evaluates after every segment,
+and writes a manifest plus one trace/video per segment. Its episode horizon
+increases automatically after the policy establishes more horizontal progress.
+
 If an enterprise application-control policy blocks the PyTorch DLLs, the
 required remediation is administrative: allow the PyTorch DLLs in the Python
 environment (or use an approved Python environment). Do not disable

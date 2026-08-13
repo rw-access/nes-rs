@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
 
+import gymnasium as gym
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+class NormalizeRamObservation(gym.ObservationWrapper):
+    """Keep the uint8 environment contract but feed PPO float RAM in [0, 1]."""
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        shape = env.observation_space.shape
+        assert shape is not None
+        self.observation_space = gym.spaces.Box(
+            low=0.0, high=1.0, shape=shape, dtype=np.float32
+        )
+
+    def observation(self, observation: np.ndarray) -> np.ndarray:
+        return np.asarray(observation, dtype=np.float32) / 255.0
 
 
 def main() -> None:
@@ -19,12 +36,15 @@ def main() -> None:
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-episode-frames", type=int, default=600)
+    parser.add_argument("--frame-skip", type=int, default=1)
     parser.add_argument("--model-output", type=Path, default=None)
+    parser.add_argument("--resume-model", type=Path, default=None)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--video-output", type=Path, default=None)
+    parser.add_argument("--verbose", type=int, choices=(0, 1), default=1)
     args = parser.parse_args()
-    if args.total_timesteps <= 0 or args.max_episode_frames <= 0:
-        parser.error("timesteps and max episode frames must be positive")
+    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0:
+        parser.error("timesteps, max episode frames, and frame skip must be positive")
 
     try:
         import torch
@@ -52,20 +72,28 @@ def main() -> None:
     with SuperMarioBros1_1Env(
         args.rom,
         library=args.library,
+        frame_skip=args.frame_skip,
         max_episode_frames=args.max_episode_frames,
-    ) as env:
-        model = PPO(
-            "MlpPolicy",
-            env,
-            n_steps=128,
-            batch_size=64,
-            learning_rate=2.5e-4,
-            seed=args.seed,
-            device=resolved_device,
-            verbose=1,
-        )
+    ) as base_env:
+        env = NormalizeRamObservation(base_env)
+        if args.resume_model is not None:
+            model = PPO.load(str(args.resume_model), env=env, device=resolved_device)
+        else:
+            model = PPO(
+                "MlpPolicy",
+                env,
+                n_steps=128,
+                batch_size=64,
+                learning_rate=2.5e-4,
+                seed=args.seed,
+                device=resolved_device,
+                verbose=args.verbose,
+            )
         started = time.perf_counter()
-        model.learn(total_timesteps=args.total_timesteps)
+        model.learn(
+            total_timesteps=args.total_timesteps,
+            reset_num_timesteps=args.resume_model is None,
+        )
         elapsed = time.perf_counter() - started
         print({
             "total_timesteps": args.total_timesteps,
@@ -86,13 +114,13 @@ def main() -> None:
                 if terminated or truncated:
                     break
 
-            trace = env.last_trace
+            trace = base_env.last_trace
             assert trace is not None
             if args.trace_output is not None:
                 args.trace_output.parent.mkdir(parents=True, exist_ok=True)
                 args.trace_output.write_text(trace.to_json() + "\n", encoding="utf-8")
             if args.video_output is not None:
-                export_trace_video(env.core, trace, env._root_snapshot, args.video_output)
+                export_trace_video(base_env.core, trace, base_env._root_snapshot, args.video_output)
             print({
                 "evaluation": {
                     "episode_frames": trace.episode_frames,
