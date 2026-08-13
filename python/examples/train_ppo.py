@@ -39,6 +39,7 @@ def main() -> None:
     parser.add_argument("--frame-skip", type=int, default=1)
     parser.add_argument("--death-penalty", type=float, default=0.0)
     parser.add_argument("--completion-bonus", type=float, default=0.0)
+    parser.add_argument("--score-coef", type=float, default=0.0)
     parser.add_argument("--ent-coef", type=float, default=0.0)
     parser.add_argument("--model-output", type=Path, default=None)
     parser.add_argument("--resume-model", type=Path, default=None)
@@ -81,6 +82,7 @@ def main() -> None:
         max_episode_frames=args.max_episode_frames,
         death_penalty=args.death_penalty,
         completion_bonus=args.completion_bonus,
+        score_coef=args.score_coef,
     ) as base_env:
         env = NormalizeRamObservation(base_env)
         if args.resume_model is not None:

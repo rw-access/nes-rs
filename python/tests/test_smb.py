@@ -62,3 +62,11 @@ def test_optional_terminal_reward_shaping():
     core.ram[0x001D] = 3
     assert env.reward({"world_x": 10}, {"world_x": 12}) == 1002
     env.close()
+
+
+def test_optional_score_reward_shaping():
+    core = FakeCore()
+    env = SuperMarioBros1_1Env(core=core, score_coef=0.1)
+    env.reset()
+    assert env.reward({"world_x": 10, "score": 0}, {"world_x": 12, "score": 100}) == 12
+    env.close()

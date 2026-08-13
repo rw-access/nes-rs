@@ -31,12 +31,18 @@ class SuperMarioBros1_1Env(NesEnv):
         *,
         death_penalty: float = 0.0,
         completion_bonus: float = 0.0,
+        score_coef: float = 0.0,
+        score_delta_clip: float = 1000.0,
         **kwargs: Any,
     ):
         kwargs.setdefault("init_sequence", INIT_SEQUENCE)
         kwargs.setdefault("actions", ACTIONS)
         self.death_penalty = float(death_penalty)
         self.completion_bonus = float(completion_bonus)
+        self.score_coef = float(score_coef)
+        self.score_delta_clip = float(score_delta_clip)
+        if self.score_delta_clip <= 0:
+            raise ValueError("score_delta_clip must be positive")
         super().__init__(rom, **kwargs)
 
     @staticmethod
@@ -61,6 +67,10 @@ class SuperMarioBros1_1Env(NesEnv):
 
     def reward(self, previous_metrics: Mapping[str, Any], current_metrics: Mapping[str, Any]) -> float:
         reward = float(current_metrics["world_x"] - previous_metrics.get("world_x", current_metrics["world_x"]))
+        current_score = float(current_metrics.get("score", previous_metrics.get("score", 0.0)))
+        previous_score = float(previous_metrics.get("score", current_score))
+        score_delta = max(0.0, current_score - previous_score)
+        reward += self.score_coef * min(score_delta, self.score_delta_clip)
         if self.is_terminal():
             if self._is_level_complete():
                 reward += self.completion_bonus

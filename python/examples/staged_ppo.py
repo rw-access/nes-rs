@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--frame-skip", type=int, default=1)
     parser.add_argument("--death-penalty", type=float, default=100.0)
     parser.add_argument("--completion-bonus", type=float, default=1_000.0)
+    parser.add_argument("--score-coef", type=float, default=0.1)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--eval-episodes", type=int, default=8)
     parser.add_argument("--stochastic-eval", action="store_true", default=True)
@@ -52,6 +53,7 @@ def main() -> None:
             "--frame-skip", str(args.frame_skip),
             "--death-penalty", str(args.death_penalty),
             "--completion-bonus", str(args.completion_bonus),
+            "--score-coef", str(args.score_coef),
             "--ent-coef", str(args.ent_coef),
             "--eval-episodes", str(args.eval_episodes),
             "--device", args.device,

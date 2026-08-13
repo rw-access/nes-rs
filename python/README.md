@@ -107,6 +107,8 @@ shaping and no entropy bonus so the original horizontal-progress baseline
 remains available. The staged runner also uses an entropy coefficient of
 `0.01` to discourage premature collapse to one controller action and evaluates
 eight sampled episodes per checkpoint, exporting the best sampled trace/video.
+Its score coefficient defaults to `0.1`: positive score deltas provide a small
+auxiliary reward while horizontal progress remains primary.
 
 If an enterprise application-control policy blocks the PyTorch DLLs, the
 required remediation is administrative: allow the PyTorch DLLs in the Python
