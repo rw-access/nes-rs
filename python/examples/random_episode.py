@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from nes_gym import SuperMarioBros1_1Env
+from nes_gym import SuperMarioBros1_1Env, experiment_metadata
 from nes_gym.replay import export_trace_video
 
 
@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--trace", type=Path, default=None)
     parser.add_argument("--video", type=Path, default=None)
     parser.add_argument("--verify-replay", action="store_true")
+    parser.add_argument("--metadata", type=Path, default=None)
     args = parser.parse_args()
     with SuperMarioBros1_1Env(args.rom, library=args.library, max_episode_frames=args.frames) as env:
         observation, info = env.reset(seed=0)
@@ -40,6 +41,12 @@ def main() -> None:
         if args.trace is not None:
             args.trace.parent.mkdir(parents=True, exist_ok=True)
             args.trace.write_text(trace.to_json() + "\n", encoding="utf-8")
+        if args.metadata is not None:
+            args.metadata.parent.mkdir(parents=True, exist_ok=True)
+            args.metadata.write_text(
+                json.dumps(experiment_metadata(env), sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
         if args.video is not None:
             export_trace_video(env.core, trace, env._root_snapshot, args.video)
         print({"trace": trace.to_dict(), "info": info})

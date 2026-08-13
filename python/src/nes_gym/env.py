@@ -42,6 +42,7 @@ class NesEnv(gym.Env[np.ndarray, int]):
         if core is None and rom is None:
             raise ValueError("rom is required when core is not supplied")
         self.core = core if core is not None else NesCore(rom, library=library)
+        self.init_sequence = tuple((int(controller), int(frames)) for controller, frames in init_sequence)
         self.frame_skip = int(frame_skip)
         self.max_episode_frames = int(max_episode_frames)
         self.action_mapping = tuple(int(value) for value in actions)
@@ -53,11 +54,11 @@ class NesEnv(gym.Env[np.ndarray, int]):
         self.observation_space = gym.spaces.Box(
             low=0, high=255, shape=(2048,), dtype=np.uint8
         )
-        for controller, frames in init_sequence:
-            self.core.advance_frames(int(controller), int(frames))
+        for controller, frames in self.init_sequence:
+            self.core.advance_frames(controller, frames)
         self._root_snapshot: NesSnapshot = self.core.snapshot()
         rom_hash = getattr(self.core, "rom_sha256", "unknown")
-        init_bytes = repr(tuple((int(c), int(n)) for c, n in init_sequence)).encode()
+        init_bytes = repr(self.init_sequence).encode()
         checkpoint_id = hashlib.sha256(rom_hash.encode() + init_bytes + bytes(self.core.ram)).hexdigest()
         self.root_checkpoint = CheckpointRef.root(checkpoint_id)
         self._trace: EpisodeTraceBuilder | None = None

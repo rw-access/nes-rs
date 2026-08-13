@@ -224,9 +224,7 @@ pub unsafe extern "C" fn nes_destroy(handle: *mut NesHandle) {
 
 impl NesHandle {
     fn refresh_ram_view(&mut self) {
-        for (offset, byte) in self.ram_view.iter_mut().enumerate() {
-            *byte = self.console.read_memory(offset as u16);
-        }
+        self.console.copy_cpu_ram(&mut self.ram_view);
     }
 
     fn advance_one_frame(&mut self, controller_state: u8) {

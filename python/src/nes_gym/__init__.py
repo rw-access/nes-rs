@@ -18,6 +18,7 @@ from .smb import (
     UP,
 )
 from .trace import CheckpointRef, EpisodeTrace, InputRLE, expand_rle
+from .metadata import experiment_metadata
 
 __all__ = [
     "A",
@@ -40,5 +41,6 @@ __all__ = [
     "SuperMarioBros1_1Env",
     "UP",
     "expand_rle",
+    "experiment_metadata",
     "find_library",
 ]

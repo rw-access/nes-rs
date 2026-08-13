@@ -1,4 +1,5 @@
 from nes_gym.trace import CheckpointRef, EpisodeTrace, EpisodeTraceBuilder, expand_rle
+from nes_gym.metadata import experiment_metadata
 
 
 def test_rle_merges_and_expands_exact_frames():
@@ -18,3 +19,21 @@ def test_trace_serialization_contains_provenance():
     assert data["checkpoint"]["parent"] == "r"
     assert data["episode_frames"] == 3
     assert list(expand_rle(data["inputs_rle"])) == [2, 2, 2]
+
+
+def test_experiment_metadata_identifies_reproduction_configuration():
+    class Core:
+        rom_sha256 = "rom-hash"
+        library_path = "nes_ffi.dll"
+
+    class Env:
+        core = Core()
+        init_sequence = ((0, 60), (8, 1), (0, 105))
+        root_checkpoint = CheckpointRef.root("root-id")
+        action_mapping = (0, 64, 128)
+        frame_skip = 1
+
+    metadata = experiment_metadata(Env())
+    assert metadata["rom_sha256"] == "rom-hash"
+    assert metadata["root_checkpoint"] == "root-id"
+    assert metadata["initialization_sequence"] == [[0, 60], [8, 1], [0, 105]]

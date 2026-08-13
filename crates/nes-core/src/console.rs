@@ -21,6 +21,7 @@ use crate::cartridge::NROM;
 pub use crate::video::{FRAME_HEIGHT, FRAME_WIDTH};
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+pub const CPU_RAM_BYTES: usize = 0x800;
 
 /// Selects whether the PPU writes final palette values to the framebuffer.
 /// Disabled output retains the complete emulation timeline and CPU-visible
@@ -380,6 +381,12 @@ impl Console {
     /// Reads a byte through the CPU memory map without exposing mutable state.
     pub fn read_memory(&self, address: u16) -> u8 {
         self.state.cpu.read_byte(&self.state.bus, address)
+    }
+
+    /// Copy the CPU's internal 2 KiB RAM into a caller-owned observation
+    /// buffer without traversing the CPU memory map for each byte.
+    pub fn copy_cpu_ram(&self, destination: &mut [u8; CPU_RAM_BYTES]) {
+        destination.copy_from_slice(&self.state.cpu.ram);
     }
 
     pub fn restore_snapshot(
