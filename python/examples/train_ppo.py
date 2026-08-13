@@ -39,14 +39,15 @@ def main() -> None:
     parser.add_argument("--frame-skip", type=int, default=1)
     parser.add_argument("--death-penalty", type=float, default=0.0)
     parser.add_argument("--completion-bonus", type=float, default=0.0)
+    parser.add_argument("--ent-coef", type=float, default=0.0)
     parser.add_argument("--model-output", type=Path, default=None)
     parser.add_argument("--resume-model", type=Path, default=None)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--video-output", type=Path, default=None)
     parser.add_argument("--verbose", type=int, choices=(0, 1), default=1)
     args = parser.parse_args()
-    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0:
-        parser.error("timesteps, max episode frames, and frame skip must be positive")
+    if args.total_timesteps <= 0 or args.max_episode_frames <= 0 or args.frame_skip <= 0 or args.ent_coef < 0:
+        parser.error("timesteps, max episode frames, and frame skip must be positive; entropy coefficient cannot be negative")
 
     try:
         import torch
@@ -89,6 +90,7 @@ def main() -> None:
                 n_steps=128,
                 batch_size=64,
                 learning_rate=2.5e-4,
+                ent_coef=args.ent_coef,
                 seed=args.seed,
                 device=resolved_device,
                 verbose=args.verbose,

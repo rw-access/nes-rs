@@ -103,7 +103,9 @@ and writes a manifest plus one trace/video per segment. Its episode horizon
 increases automatically after the policy establishes more horizontal progress.
 The staged runner defaults to a `100`-point death penalty and `1000`-point
 level-completion bonus; direct `train_ppo.py` runs default to zero terminal
-shaping so the original horizontal-progress baseline remains available.
+shaping and no entropy bonus so the original horizontal-progress baseline
+remains available. The staged runner also uses an entropy coefficient of
+`0.01` to discourage premature collapse to one controller action.
 
 If an enterprise application-control policy blocks the PyTorch DLLs, the
 required remediation is administrative: allow the PyTorch DLLs in the Python
