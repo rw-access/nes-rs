@@ -15,8 +15,8 @@ use std::{
 };
 
 use nes_core::{
-    cartridge, controller::ButtonState, ines, Console, ConsoleState, RenderMode, VideoBuffer,
-    VideoOutput, FRAME_HEIGHT, FRAME_RGBA_BYTES, FRAME_WIDTH, NES_PALETTE_RGBA,
+    cartridge, controller::ButtonState, ines, Console, ConsoleState, VideoBuffer, VideoOutput,
+    FRAME_HEIGHT, FRAME_RGBA_BYTES, FRAME_WIDTH, NES_PALETTE_RGBA,
 };
 
 /// Number of bytes in the CPU's internal RAM, mirrored at $0000-$1fff.
@@ -265,13 +265,6 @@ impl NesHandle {
         }
         self.refresh_ram_view();
     }
-
-    fn refresh_last_video_frame(&mut self) {
-        if self.video_enabled {
-            self.console
-                .copy_last_frame_to(RenderMode::Both, &mut self.framebuffer);
-        }
-    }
 }
 
 fn blend_channel(destination: u8, source: u8, opacity: f32) -> u8 {
@@ -337,7 +330,17 @@ pub unsafe extern "C" fn nes_rewind(handle: *mut NesHandle, out_rewound: *mut bo
         *out_rewound = handle.console.rewind();
         handle.audio_view.clear();
         if *out_rewound {
-            handle.refresh_last_video_frame();
+            // Match the existing interactive frontends: rewind selects the
+            // historical state, then next_frame renders that state through
+            // the canonical frame boundary. Calling rewind alone leaves the
+            // FFI framebuffer stale until a periodic tape checkpoint is
+            // crossed, which produces visible snaps in replay video.
+            handle.console.update_buttons(ButtonState::default());
+            let frame = handle.console.next_frame();
+            if handle.video_enabled {
+                frame.copy_to(&mut handle.framebuffer);
+                overlay_ghosts(&frame, &mut handle.framebuffer);
+            }
         } else if handle.console.rewind_exhausted() {
             // Consume Console's oldest-frame hold marker so the next normal
             // FFI advance is never silently discarded.

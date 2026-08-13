@@ -89,6 +89,7 @@ def export_trace_video(
     )
     assert process.stdin is not None
     audio_samples: list[float] = []
+    video_frames = 0
     try:
         for controller, count in trace.inputs_rle:
             for _ in range(count):
@@ -107,10 +108,23 @@ def export_trace_video(
                     rgba = frame.reshape(240, 256, 4)
                     scaled = rgba.repeat(scale, axis=0).repeat(scale, axis=1)
                     process.stdin.write(scaled.tobytes())
+                video_frames += 1
         process.stdin.close()
         return_code = process.wait()
         if return_code != 0:
             raise RuntimeError(f"ffmpeg failed with exit code {return_code}")
+
+        # The emulator's audio callback can return 799/800/801 samples at a
+        # 60 Hz frame boundary.  Letting that small rounding error accumulate
+        # makes the WAV shorter or longer than the raw video; `-shortest` then
+        # silently drops a few video frames from the final replay.  Normalize
+        # the complete track once so one replay frame always has the intended
+        # duration, including rewind frames (which contribute silence).
+        target_audio_samples = round(video_frames * core.audio_sample_rate / fps)
+        if len(audio_samples) < target_audio_samples:
+            audio_samples.extend([0.0] * (target_audio_samples - len(audio_samples)))
+        else:
+            del audio_samples[target_audio_samples:]
 
         pcm = bytearray()
         for sample in audio_samples:
