@@ -101,6 +101,9 @@ For recoverable longer experiments, `examples/staged_ppo.py` trains in
 segments, resumes the previous PPO checkpoint, evaluates after every segment,
 and writes a manifest plus one trace/video per segment. Its episode horizon
 increases automatically after the policy establishes more horizontal progress.
+The staged runner defaults to a `100`-point death penalty and `1000`-point
+level-completion bonus; direct `train_ppo.py` runs default to zero terminal
+shaping so the original horizontal-progress baseline remains available.
 
 If an enterprise application-control policy blocks the PyTorch DLLs, the
 required remediation is administrative: allow the PyTorch DLLs in the Python

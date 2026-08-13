@@ -49,3 +49,16 @@ def test_smb_terminal_ram_map():
     assert env.is_terminal()
     assert env.terminal_reason() == "level_complete"
     env.close()
+
+
+def test_optional_terminal_reward_shaping():
+    core = FakeCore()
+    env = SuperMarioBros1_1Env(core=core, death_penalty=100, completion_bonus=1000)
+    env.reset()
+    core.ram[0x000E] = 0x06
+    assert env.reward({"world_x": 10}, {"world_x": 12}) == -98
+    core.ram[0x000E] = 0
+    core.ram[0x0016] = 0x31
+    core.ram[0x001D] = 3
+    assert env.reward({"world_x": 10}, {"world_x": 12}) == 1002
+    env.close()

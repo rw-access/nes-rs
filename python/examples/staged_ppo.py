@@ -17,6 +17,8 @@ def main() -> None:
     parser.add_argument("--segment-timesteps", type=int, default=180_000)
     parser.add_argument("--initial-horizon", type=int, default=1_800)
     parser.add_argument("--frame-skip", type=int, default=1)
+    parser.add_argument("--death-penalty", type=float, default=100.0)
+    parser.add_argument("--completion-bonus", type=float, default=1_000.0)
     parser.add_argument("--resume-model", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--seed", type=int, default=0)
@@ -45,6 +47,8 @@ def main() -> None:
             "--total-timesteps", str(args.segment_timesteps),
             "--max-episode-frames", str(horizon),
             "--frame-skip", str(args.frame_skip),
+            "--death-penalty", str(args.death_penalty),
+            "--completion-bonus", str(args.completion_bonus),
             "--device", args.device,
             "--seed", str(args.seed),
             "--verbose", "0",

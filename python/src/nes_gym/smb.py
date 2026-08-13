@@ -25,9 +25,18 @@ INIT_SEQUENCE = ((NOOP, 60), (START, 1), (NOOP, 105))
 class SuperMarioBros1_1Env(NesEnv):
     """One-level SMB environment with a deliberately simple progress reward."""
 
-    def __init__(self, rom: str | bytes | bytearray | memoryview | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        rom: str | bytes | bytearray | memoryview | None = None,
+        *,
+        death_penalty: float = 0.0,
+        completion_bonus: float = 0.0,
+        **kwargs: Any,
+    ):
         kwargs.setdefault("init_sequence", INIT_SEQUENCE)
         kwargs.setdefault("actions", ACTIONS)
+        self.death_penalty = float(death_penalty)
+        self.completion_bonus = float(completion_bonus)
         super().__init__(rom, **kwargs)
 
     @staticmethod
@@ -51,7 +60,13 @@ class SuperMarioBros1_1Env(NesEnv):
         }
 
     def reward(self, previous_metrics: Mapping[str, Any], current_metrics: Mapping[str, Any]) -> float:
-        return float(current_metrics["world_x"] - previous_metrics.get("world_x", current_metrics["world_x"]))
+        reward = float(current_metrics["world_x"] - previous_metrics.get("world_x", current_metrics["world_x"]))
+        if self.is_terminal():
+            if self._is_level_complete():
+                reward += self.completion_bonus
+            elif self._is_dying_or_dead():
+                reward -= self.death_penalty
+        return reward
 
     def _is_dying_or_dead(self) -> bool:
         ram = self.ram
