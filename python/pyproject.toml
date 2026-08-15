@@ -8,29 +8,30 @@ dependencies = [
     "gymnasium>=1.0,<2",
     "numpy>=2.0,<3",
     "stable-baselines3>=2.4,<3",
-    "torch>=2.5,<3",
+    "torch>=2.13,<3",
 ]
 
 [build-system]
-requires = ["setuptools>=75,<81"]
+requires = ["setuptools>=83,<86"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0,<9",
+    "pytest>=9.0.3,<10",
 ]
 
 [tool.uv]
 package = true
+override-dependencies = ["setuptools>=83,<86"]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu128", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'" },
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'" },
 ]
 
 [tool.setuptools.packages.find]

@@ -84,7 +84,7 @@ uv run --directory python python examples/random_episode.py `
 
 The PPO smoke entry point uses Stable-Baselines3 and supports both CPU and
 CUDA devices. On 64-bit Windows, the project is configured to resolve the
-official CUDA 12.8 PyTorch index; other platforms use the normal PyPI build:
+official CUDA 13.0 PyTorch index; other platforms use the normal PyPI build:
 
 ```powershell
 uv sync --directory python
