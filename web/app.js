@@ -4,6 +4,7 @@ const NesWeb = wasm.NesWasm ?? wasm.NesWeb;
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
 const debugEndpoint = debugEnabled ? new URL("__debug", document.baseURI).href : null;
+const recordEndpoint = new URL("__record", document.baseURI).href;
 
 function debugValue(value) {
   if (value instanceof Error) {
@@ -75,8 +76,12 @@ const audioButton = document.querySelector("#audio-button");
 const snapshotButton = document.querySelector("#snapshot-button");
 const restoreButton = document.querySelector("#restore-button");
 const rewindButton = document.querySelector("#rewind-button");
+const recordButton = document.querySelector("#record-button");
+const stopRecordButton = document.querySelector("#stop-record-button");
+const recordingStatus = document.querySelector("#recording-status");
 
 let emulator = null;
+let romName = null;
 let savedSnapshot = null;
 let heldButtons = 0;
 let previousTime = 0;
@@ -84,6 +89,95 @@ let accumulator = 0;
 let rewinding = false;
 let rewindFrames = 0;
 let rewindStartedAt = 0;
+let recording = null;
+
+function recordingTime() {
+  return recording ? Math.max(0, Math.round(performance.now() - recording.started_perf_at)) : 0;
+}
+
+function jsonNumber(value) {
+  if (value == null) return null;
+  return typeof value === "bigint" ? Number(value) : value;
+}
+
+function recordInputEvent(type, details = {}) {
+  if (!recording) return;
+  recording.input_events.push({
+    t_ms: recordingTime(),
+    type,
+    buttons: heldButtons,
+    ...details,
+  });
+}
+
+function recordFrame(kind, metadata, details = {}) {
+  if (!recording) return;
+  recording.frames.push({
+    index: recording.frames.length,
+    t_ms: recordingTime(),
+    kind,
+    buttons: heldButtons,
+    emulator_frame: jsonNumber(metadata?.frame_number),
+    ...details,
+  });
+  const seconds = (recordingTime() / 1000).toFixed(1);
+  recordingStatus.textContent = `Recording · ${seconds}s · ${recording.frames.length} frames`;
+}
+
+function setRecordingButtons(active) {
+  recordButton.disabled = !emulator || active;
+  stopRecordButton.disabled = !active;
+  recordButton.classList.toggle("recording", active);
+}
+
+function startRecording() {
+  if (!emulator || recording) return;
+  recording = {
+    version: 1,
+    source: "nes-rs-browser",
+    rom_name: romName,
+    frame_rate: 60,
+    started_at: new Date().toISOString(),
+    started_perf_at: performance.now(),
+    started_frame: jsonNumber(emulator.frame_metadata().frame_number),
+    frames: [],
+    input_events: [],
+  };
+  recordInputEvent("record-start");
+  setRecordingButtons(true);
+  recordingStatus.textContent = "Recording · 0.0s · 0 frames";
+}
+
+async function stopRecording() {
+  if (!recording) return;
+  if (rewinding) stopRewind();
+  const payload = {
+    ...recording,
+    stopped_at: new Date().toISOString(),
+    stopped_frame: jsonNumber(emulator?.frame_metadata().frame_number),
+  };
+  window.lastRecordingPayload = payload;
+  recording = null;
+  setRecordingButtons(false);
+  recordingStatus.textContent = "Uploading…";
+  try {
+    const response = await fetch(recordEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.text();
+    let result = {};
+    try { result = JSON.parse(body); } catch (_) {}
+    if (!response.ok || !result.ok) throw new Error(result.error || body || `HTTP ${response.status}`);
+    recordingStatus.textContent = `Saved · ${result.frames} frames`;
+    setStatus(`Recording saved on server as ${result.filename}`);
+  } catch (error) {
+    reportDebug("record-upload", error);
+    recordingStatus.textContent = `Upload failed — retry: ${error?.message ?? error}`;
+    setStatus(`Could not upload recording: ${error}`);
+  }
+}
 
 class AudioScheduler {
   constructor() {
@@ -221,11 +315,13 @@ function updateButtons() {
 
 function press(name) {
   heldButtons |= BUTTONS[name];
+  recordInputEvent("button-down", { button: name });
   updateButtons();
 }
 
 function release(name) {
   heldButtons &= ~BUTTONS[name];
+  recordInputEvent("button-up", { button: name });
   updateButtons();
 }
 
@@ -234,6 +330,7 @@ function startRewind() {
   rewinding = true;
   rewindFrames = 0;
   rewindStartedAt = performance.now();
+  recordInputEvent("rewind-start");
   audio.flush();
   accumulator = 0;
   setStatus("Rewinding…");
@@ -246,6 +343,7 @@ function stopRewind() {
   updateButtons();
   previousTime = performance.now();
   accumulator = 0;
+  recordInputEvent("rewind-stop");
   reportDebug("rewind-stop");
 }
 
@@ -253,6 +351,7 @@ function rewindFrame() {
   if (!emulator) return null;
   const available = emulator.rewind();
   const metadata = drawFrame(false);
+  recordFrame("rewind", metadata, { available });
   rewindFrames += 1;
   if (debugEnabled && (rewindFrames === 1 || rewindFrames % 30 === 0 || !available)) {
     reportDebug("rewind-frame", {
@@ -280,6 +379,7 @@ function drawFrame(scheduleAudio = true) {
       setStatus(`Frame ${metadata.frame_number} · audio unavailable`);
     }
   }
+  recordFrame("frame", metadata);
   return metadata;
 }
 
@@ -358,11 +458,15 @@ async function loadRom(file) {
     emulator = null;
     previousEmulator?.free();
     emulator = NesWeb.load_rom(bytes);
+    romName = file.name;
     savedSnapshot = null;
     heldButtons = 0;
     snapshotButton.disabled = false;
     restoreButton.disabled = true;
     rewindButton.disabled = false;
+    recordButton.disabled = false;
+    stopRecordButton.disabled = true;
+    recordingStatus.textContent = "Recording is off";
     rewinding = false;
     previousTime = performance.now();
     accumulator = FRAME_MS;
@@ -417,6 +521,9 @@ rewindButton.addEventListener("pointerdown", (event) => {
   rewindButton.setPointerCapture(event.pointerId);
   startRewind();
 });
+
+recordButton.addEventListener("click", startRecording);
+stopRecordButton.addEventListener("click", () => { void stopRecording(); });
 for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
   rewindButton.addEventListener(eventName, (event) => {
     event.preventDefault();

@@ -22,6 +22,15 @@ For LAN debugging, append `?debug=1` to the URL. The development server
 collects browser errors and emulator/audio failures at `/__debug` and prints
 them to its terminal.
 
+## Capturing a play sequence
+
+Load the ROM, press `● Record`, play normally, and include any rewind with `R`
+or the on-screen Rewind button. Press `Stop & upload` when finished. The server
+saves one JSON transcript outside the repository, by default under
+`/tmp/nes-rs-captures/`. Each transcript contains the controller state for each
+emulated frame plus button and rewind events, so it can be replayed later and
+rendered into a video.
+
 The generated wrapper exposes ROM loading, frame stepping, reusable video and
 audio buffers, controller updates, rewind, save-state objects, and a compact
 `ghost_buffer()` containing the shared core timeline's active sprite ghosts.
