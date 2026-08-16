@@ -473,7 +473,10 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
             EdgeOrientation::DiagonalDown | EdgeOrientation::DiagonalUp
                 if edge > 0.40 && cell.contrast > 0.12 =>
             {
-                (corner_glyph(cell.gradient_x, cell.gradient_y), GlyphRole::Corner)
+                (
+                    corner_glyph(cell.gradient_x, cell.gradient_y),
+                    GlyphRole::Corner,
+                )
             }
             EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
             EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
