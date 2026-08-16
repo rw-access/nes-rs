@@ -19,6 +19,7 @@ layered-render = ["nes-core/layered-render"]
 
 [dependencies]
 nes-core = { path = "../nes-core" }
+image = "0.24.0"
 clap = { version = "4.0.15", features = ["derive"], optional = true }
 
 [[bin]]
@@ -30,3 +31,11 @@ required-features = ["headless-cli"]
 name = "fm2_to_mp4"
 path = "src/bin/fm2_to_mp4.rs"
 required-features = ["fm2-cli"]
+
+[[bin]]
+name = "capture_png"
+path = "src/bin/capture_png.rs"
+
+[[bin]]
+name = "probe_inputs"
+path = "src/bin/probe_inputs.rs"

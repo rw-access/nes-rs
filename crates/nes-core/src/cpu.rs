@@ -195,7 +195,10 @@ impl TimestampedLocalCpu {
                 let page = Self::read_dma_page(ram, bus, data).copied();
                 bus.ppu.write_dma(page.as_ref());
             }
-            0x4016 => bus.controller.write(data),
+            0x4016 => {
+                bus.controller.write(data);
+                bus.mapper.write(addr, data);
+            }
             0x4018..=0x401f => {}
             _ => {
                 bus.mapper.write(addr, data);
@@ -1808,7 +1811,10 @@ impl CPU {
                 let page = self.read_page(&bus.mapper, data);
                 bus.ppu.write_dma(page);
             } // DMA
-            0x4016 => bus.controller.write(data),                                   // controller 1
+            0x4016 => {
+                bus.controller.write(data); // controller 1
+                bus.mapper.write(addr, data);
+            }
             0x4018..=0x401F => {} // disabled test mode
             _ => {
                 bus.mapper.write(addr, data);

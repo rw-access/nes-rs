@@ -1,0 +1,25 @@
+[package]
+name = "nes-asm"
+version = "0.1.0"
+edition = "2021"
+description = "A small ca65-like 6502 assembler and mapper-0 image writer"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "nes_asm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nes-asm"
+path = "src/bin/nes-asm.rs"
+
+[features]
+default = []
+unofficial-opcodes = []
+
+[dependencies]
+nes-isa = { path = "../nes-isa" }
+
+[dev-dependencies]
+nes-core = { path = "../nes-core" }
+nes-render = { path = "../nes-render" }

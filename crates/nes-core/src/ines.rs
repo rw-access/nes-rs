@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::rc::Rc;
 
 use crate::cartridge::{ChrBank, ProgBank, CHR, PRG};
@@ -114,8 +115,172 @@ impl INESHeader {
 }
 
 pub fn load<R: std::io::Read>(reader: &mut R) -> Option<(cartridge::Cartridge, u8)> {
-    let header = INESHeader::parse(reader)?;
-    let cartridge = header.read(reader)?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
 
+    if bytes.starts_with(&MAGIC) {
+        return load_ines(&bytes);
+    }
+    if bytes.starts_with(b"UNIF") {
+        return load_unif(&bytes);
+    }
+    None
+}
+
+fn load_ines(bytes: &[u8]) -> Option<(cartridge::Cartridge, u8)> {
+    let mut header = INESHeader::parse(&mut Cursor::new(bytes))?;
+    let payload_len = bytes.len().checked_sub(16)?;
+    let declared_payload_len = (header.prg_banks as usize)
+        .checked_mul(0x4000)?
+        .checked_add((header.chr_banks as usize).checked_mul(0x2000)?)
+        .and_then(|size| size.checked_add(if header.has_trainer { 512 } else { 0 }))?;
+
+    // A few ROMs in the collection set the trainer bit but omit the trainer
+    // bytes. Accept that common bad-dump variant when the untrained payload
+    // exactly matches the file size.
+    if header.has_trainer
+        && declared_payload_len >= 512
+        && payload_len + 512 == declared_payload_len
+    {
+        header.has_trainer = false;
+    }
+
+    // Some old dumps have a zeroed size field, or use mapper 20 as an iNES
+    // wrapper around a 64 KiB FDS side. Infer the available 16 KiB PRG size
+    // when there is no ambiguity in the payload.
+    let payload_without_trainer = payload_len - usize::from(header.has_trainer) * 512;
+    if (header.prg_banks == 0 && header.chr_banks == 0)
+        || (header.mapper == 20 && declared_payload_len > payload_len)
+    {
+        if payload_without_trainer % 0x4000 == 0 {
+            header.prg_banks = (payload_without_trainer / 0x4000) as u8;
+        }
+    }
+
+    // The header parser consumed the first 16 bytes conceptually, but the
+    // cartridge reader must start at the payload immediately after it.
+    let cartridge = header.read(&mut Cursor::new(&bytes[16..]))?;
     Some((cartridge, header.mapper))
+}
+
+fn load_unif(bytes: &[u8]) -> Option<(cartridge::Cartridge, u8)> {
+    // UNIF has a fixed 32-byte header followed by id/length/data chunks.
+    if bytes.len() < 32 {
+        return None;
+    }
+
+    let mut prg = Vec::new();
+    let mut chr = Vec::new();
+    let mut mirror = cartridge::MirroringMode::Horizontal;
+    let mut offset = 32;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        offset += 8;
+
+        // Early UNIF writers emitted NAME# with a zero length and stored the
+        // text inline anyway. Skip that legacy text until the next chunk.
+        if id == b"NAME#" && length == 0 {
+            let next = bytes[offset..]
+                .windows(4)
+                .position(|candidate| candidate == b"CTRL")?;
+            offset += next;
+            continue;
+        }
+
+        let end = offset.checked_add(length)?;
+        let data = bytes.get(offset..end)?;
+        match id {
+            b"PRG0" | b"PRG1" | b"PRG2" | b"PRG3" => prg.extend_from_slice(data),
+            b"CHR0" | b"CHR1" | b"CHR2" | b"CHR3" => chr.extend_from_slice(data),
+            b"MIRR" if data.first().copied().unwrap_or(0) != 0 => {
+                mirror = cartridge::MirroringMode::Vertical
+            }
+            _ => {}
+        }
+        offset = end;
+    }
+
+    // A legacy dump may include a small auxiliary PRG chunk after the real
+    // 16 KiB-aligned program data. Keep the complete aligned portion.
+    prg.truncate(prg.len() / 0x4000 * 0x4000);
+    if prg.is_empty() || (!chr.is_empty() && chr.len() % 0x2000 != 0) {
+        return None;
+    }
+
+    let prg_banks = prg
+        .chunks_exact(0x4000)
+        .map(|bank| bank.try_into().ok())
+        .collect::<Option<Vec<ProgBank>>>()?;
+    let chr = if chr.is_empty() {
+        CHR::RAM(vec![[0; 0x2000]])
+    } else {
+        CHR::ROM(Rc::new(
+            chr.chunks_exact(0x2000)
+                .map(|bank| bank.try_into().ok())
+                .collect::<Option<Vec<ChrBank>>>()?,
+        ))
+    };
+
+    Some((
+        Cartridge {
+            prg: Rc::new(crate::cartridge::PRG { banks: prg_banks }),
+            chr,
+            sram: vec![[0; 0x2000]],
+            mirror,
+        },
+        0,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unif_chunk(bytes: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
+        bytes.extend_from_slice(id);
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(data);
+    }
+
+    #[test]
+    fn loads_minimal_unif_program_and_chr() {
+        let mut bytes = vec![0; 32];
+        bytes[..4].copy_from_slice(b"UNIF");
+        unif_chunk(&mut bytes, b"PRG0", &[0; 0x4000]);
+        unif_chunk(&mut bytes, b"CHR0", &[0; 0x2000]);
+
+        let (cartridge, mapper) = load(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(mapper, 0);
+        assert_eq!(cartridge.prg.banks.len(), 1);
+        assert_eq!(cartridge.chr.get_banks().len(), 1);
+    }
+
+    #[test]
+    fn accepts_a_trainer_flag_when_the_trainer_is_missing() {
+        let mut bytes = vec![0; 16 + 0x4000 + 0x2000];
+        bytes[..4].copy_from_slice(&MAGIC);
+        bytes[4] = 1;
+        bytes[5] = 1;
+        bytes[6] = 0x04;
+
+        let (cartridge, mapper) = load(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(mapper, 0);
+        assert_eq!(cartridge.prg.banks.len(), 1);
+    }
+
+    #[test]
+    fn starts_prg_reading_after_the_ines_header() {
+        let mut bytes = vec![0; 16 + 0x4000];
+        bytes[..4].copy_from_slice(&MAGIC);
+        bytes[4] = 1;
+        bytes[16] = 0xa9;
+        bytes[16 + 0x3ffc] = 0x00;
+        bytes[16 + 0x3ffd] = 0x80;
+
+        let (cartridge, mapper) = load(&mut Cursor::new(bytes)).unwrap();
+        assert_eq!(mapper, 0);
+        assert_eq!(cartridge.prg.banks[0][0], 0xa9);
+        assert_eq!(&cartridge.prg.banks[0][0x3ffc..0x3ffe], &[0x00, 0x80]);
+    }
 }

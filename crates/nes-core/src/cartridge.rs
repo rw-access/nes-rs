@@ -358,6 +358,247 @@ struct CNROM {
     selected_bank: usize,
 }
 
+#[derive(Clone)]
+struct Mapper15 {
+    cartridge: Cartridge,
+    banks: [usize; 4],
+    mirror: MirroringMode,
+}
+
+impl Mapper15 {
+    fn new(cartridge: Cartridge) -> Self {
+        let mirror = cartridge.mirror;
+        Self {
+            cartridge,
+            banks: [0, 1, 2, 3],
+            mirror,
+        }
+    }
+}
+
+impl Mapper for Mapper15 {
+    fn mirror(&self) -> MirroringMode {
+        self.mirror
+    }
+
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x6000..=0x7fff => read_sram(&self.cartridge, address),
+            0x8000..=0xffff => prg_8k(
+                &self.cartridge,
+                self.banks[(address as usize - 0x8000) / 0x2000],
+                address as usize - 0x8000,
+            ),
+            _ => 0,
+        }
+    }
+
+    fn write(&mut self, address: u16, data: u8) {
+        match address {
+            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
+            0x8000..=0xffff => {
+                let mode = (address & 3) as usize;
+                let bank = (data & 0x3f) as usize * 2;
+                let swap = usize::from(data & 0x80 != 0);
+                match mode {
+                    0 => {
+                        self.banks = [
+                            bank + swap,
+                            bank + (swap ^ 1),
+                            bank + 2 + swap,
+                            bank + 2 + (swap ^ 1),
+                        ];
+                    }
+                    1 | 3 => {
+                        self.banks[2] = bank + swap;
+                        self.banks[3] = bank + (swap ^ 1);
+                    }
+                    2 => self.banks = [bank + swap; 4],
+                    _ => unreachable!(),
+                }
+                if mode == 0 || mode == 3 {
+                    self.mirror = if data & 0x40 != 0 {
+                        MirroringMode::Horizontal
+                    } else {
+                        MirroringMode::Vertical
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match page {
+            0x80..=0xff => prg_page_8k(
+                &self.cartridge,
+                self.banks[(page as usize - 0x80) / 0x20],
+                page,
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Mapper50 {
+    cartridge: Cartridge,
+    prg_bank: usize,
+    irq_enabled: bool,
+    irq_counter: u16,
+    irq_pending: bool,
+}
+
+impl Mapper50 {
+    fn new(cartridge: Cartridge) -> Self {
+        Self {
+            cartridge,
+            prg_bank: 0,
+            irq_enabled: false,
+            irq_counter: 0,
+            irq_pending: false,
+        }
+    }
+
+    fn fixed_bank(&self, slot: usize) -> usize {
+        match slot {
+            0 => 0x0f,
+            1 => 8,
+            2 => 9,
+            3 => self.prg_bank,
+            _ => 0x0b,
+        }
+    }
+}
+
+impl Mapper for Mapper50 {
+    fn mirror(&self) -> MirroringMode {
+        self.cartridge.mirror
+    }
+
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x6000..=0x7fff => prg_8k(
+                &self.cartridge,
+                self.fixed_bank(0),
+                address as usize - 0x6000,
+            ),
+            0x8000..=0xffff => prg_8k(
+                &self.cartridge,
+                self.fixed_bank((address as usize - 0x8000) / 0x2000 + 1),
+                address as usize - 0x8000,
+            ),
+            _ => 0,
+        }
+    }
+
+    fn write(&mut self, address: u16, data: u8) {
+        match address {
+            0x4020..=0x5fff if address & 0x60 == 0x20 => {
+                if address & 0x100 != 0 {
+                    if data & 1 != 0 {
+                        self.irq_enabled = true;
+                    } else {
+                        self.irq_enabled = false;
+                        self.irq_counter = 0;
+                        self.irq_pending = false;
+                    }
+                } else {
+                    self.prg_bank = usize::from(
+                        (data & 0x08)
+                            | ((data & 0x04) >> 1)
+                            | ((data & 0x02) >> 1)
+                            | ((data & 0x01) << 2),
+                    );
+                }
+            }
+            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            _ => {}
+        }
+    }
+
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match page {
+            0x60..=0xff => prg_page_8k(
+                &self.cartridge,
+                self.fixed_bank((page as usize - 0x60) / 0x20),
+                page,
+            ),
+            _ => None,
+        }
+    }
+
+    fn clock_cpu(&mut self) {
+        if self.irq_enabled {
+            self.irq_counter = self.irq_counter.wrapping_add(1);
+            if self.irq_counter & 0x1000 != 0 {
+                self.irq_enabled = false;
+                self.irq_pending = true;
+            }
+        }
+    }
+
+    fn irq_pending(&self) -> bool {
+        self.irq_pending
+    }
+}
+
+#[derive(Clone)]
+struct VsSystem {
+    cartridge: Cartridge,
+    bank: usize,
+}
+
+impl VsSystem {
+    fn new(cartridge: Cartridge) -> Self {
+        Self { cartridge, bank: 0 }
+    }
+}
+
+impl Mapper for VsSystem {
+    fn mirror(&self) -> MirroringMode {
+        MirroringMode::FourScreen
+    }
+
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x1fff => read_chr_1k(&self.cartridge, self.bank * 8, address as usize),
+            0x6000..=0x7fff => read_sram(&self.cartridge, address),
+            0x8000..=0xffff => {
+                let slot = (address as usize - 0x8000) / 0x2000;
+                let bank = if slot == 0 { self.bank } else { slot };
+                prg_8k(&self.cartridge, bank, address as usize - 0x8000)
+            }
+            _ => 0,
+        }
+    }
+
+    fn write(&mut self, address: u16, data: u8) {
+        match address {
+            0x4016 => self.bank = usize::from(data & 4 != 0),
+            0x0000..=0x1fff => {
+                write_chr_1k(&mut self.cartridge, self.bank * 8, address as usize, data)
+            }
+            0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
+            _ => {}
+        }
+    }
+
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match page {
+            0x80..=0xff => {
+                let slot = (page as usize - 0x80) / 0x20;
+                let bank = if slot == 0 { self.bank } else { slot };
+                prg_page_8k(&self.cartridge, bank, page)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl CNROM {
     fn new(cartridge: Cartridge) -> Self {
         Self {
@@ -1724,6 +1965,18 @@ pub fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
     if cartridge.prg.banks.is_empty() || cartridge.chr.get_banks().is_empty() {
         return None;
     }
+
+    // A number of bad iNES dumps in the wild carry a mapper number in the
+    // header even though their 32 KiB payload is a plain NROM image.  Keep
+    // those images usable while still selecting the real mapper for images
+    // large enough to need banking.
+    if matches!(mapper, 64 | 96 | 224)
+        && cartridge.prg.banks.len() <= 2
+        && cartridge.chr.get_banks().len() <= 1
+    {
+        return Some(Box::new(NROM::new(cartridge)));
+    }
+
     Some(match mapper {
         0 => Box::new(NROM::new(cartridge)) as Box<dyn Mapper>,
         1 => Box::new(MMC1::new(cartridge)),
@@ -1735,12 +1988,23 @@ pub fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
         9 => Box::new(MMC2::new(cartridge, false)),
         10 => Box::new(MMC2::new(cartridge, true)),
         11 => Box::new(ColorDreams::new(cartridge)),
+        15 => Box::new(Mapper15::new(cartridge)),
+        // Mapper 20 is an FDS image convention in iNES. The current core
+        // has no disk-side I/O, but treating its loaded PRG payload as a
+        // cartridge keeps the image loadable for tools that only inspect or
+        // disassemble it.
+        20 => Box::new(NROM::new(cartridge)),
+        50 => Box::new(Mapper50::new(cartridge)),
         21 | 22 | 23 | 25 => Box::new(VRC::new(cartridge, mapper)),
         24 | 26 => Box::new(VRC::new(cartridge, mapper)),
+        64 => Box::new(MMC3::new(cartridge)),
         34 => Box::new(BNROM::new(cartridge)),
         66 => Box::new(GxROM::new(cartridge)),
         69 => Box::new(FME7::new(cartridge)),
         19 => Box::new(Namco163::new(cartridge)),
+        96 => Box::new(CNROM::new(cartridge)),
+        99 => Box::new(VsSystem::new(cartridge)),
+        224 => Box::new(MMC3::new(cartridge)),
         _ => return None,
     })
 }
@@ -1766,6 +2030,37 @@ mod tests {
             sram: vec![[0; 0x2000]],
             mirror: MirroringMode::Horizontal,
         }
+    }
+
+    #[test]
+    fn collection_mapper_ids_have_factories() {
+        for mapper in [15, 20, 50, 64, 96, 99, 224] {
+            assert!(
+                new(cartridge(8, 4), mapper).is_some(),
+                "mapper {mapper} has no cartridge factory"
+            );
+        }
+    }
+
+    #[test]
+    fn mapper15_preserves_lower_windows_in_modes_one_and_three() {
+        let mut mapper = new(cartridge(8, 1), 15).unwrap();
+        mapper.write(0x8000, 1);
+        assert_eq!(mapper.read(0x8000), 1);
+        assert_eq!(mapper.read(0xc000), 2);
+
+        mapper.write(0x8001, 2);
+        assert_eq!(mapper.read(0x8000), 1);
+        assert_eq!(mapper.read(0xc000), 2);
+    }
+
+    #[test]
+    fn vs_system_switches_chr_at_4016_and_uses_four_screen_mirroring() {
+        let mut mapper = new(cartridge(2, 2), 99).unwrap();
+        assert_eq!(mapper.mirror(), MirroringMode::FourScreen);
+        assert_eq!(mapper.read(0x0000), 0);
+        mapper.write(0x4016, 4);
+        assert_eq!(mapper.read(0x0000), 1);
     }
 
     fn write_mmc1(mapper: &mut dyn Mapper, address: u16, value: u8) {

@@ -1092,12 +1092,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nes-asm"
+version = "0.1.0"
+dependencies = [
+ "nes-core",
+ "nes-isa",
+ "nes-render",
+]
+
+[[package]]
 name = "nes-core"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
  "dyn-clone",
  "lazy_static",
+ "nes-isa",
 ]
 
 [[package]]
@@ -1106,6 +1116,10 @@ version = "0.1.0"
 dependencies = [
  "nes-core",
 ]
+
+[[package]]
+name = "nes-isa"
+version = "0.1.0"
 
 [[package]]
 name = "nes-play"
@@ -1125,6 +1139,7 @@ name = "nes-render"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "image",
  "nes-core",
 ]
 
