@@ -8,7 +8,10 @@ use tui_renderer::Renderer;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{
@@ -75,10 +78,12 @@ impl TerminalGuard {
             EnterAlternateScreen,
             Hide,
             DisableLineWrap,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
             Clear(ClearType::All),
             MoveTo(0, 0)
         ) {
             guard.active = false;
+            let _ = execute!(stdout, PopKeyboardEnhancementFlags);
             let _ = terminal::disable_raw_mode();
             return Err(error);
         }
@@ -97,6 +102,7 @@ impl Drop for TerminalGuard {
             ResetColor,
             Show,
             EnableLineWrap,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         );
         let _ = terminal::disable_raw_mode();
@@ -125,23 +131,26 @@ fn drain_events(buttons: &mut ButtonState) -> io::Result<bool> {
     let mut quit = false;
     while event::poll(Duration::ZERO)? {
         let event = event::read()?;
-        let Event::Key(key) = event else {
-            continue;
-        };
+        match event {
+            Event::FocusLost => *buttons = ButtonState::default(),
+            Event::Key(key) => {
+                if key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    quit = true;
+                    continue;
+                }
 
-        if key.code == KeyCode::Esc
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
-            quit = true;
-            continue;
-        }
-
-        if let Some(button) = key_button(key.code) {
-            if key.kind == KeyEventKind::Release {
-                buttons.unset(button);
-            } else {
-                buttons.set(button);
+                if let Some(button) = key_button(key.code) {
+                    if key.kind == KeyEventKind::Release {
+                        buttons.unset(button);
+                    } else {
+                        buttons.set(button);
+                    }
+                }
             }
+            _ => {}
         }
     }
     Ok(quit)
@@ -163,20 +172,24 @@ fn wait_for_frame(deadline: Instant, buttons: &mut ButtonState) -> io::Result<bo
         let remaining = deadline.saturating_duration_since(now);
         if event::poll(remaining.min(Duration::from_millis(5)))? {
             let event = event::read()?;
-            let Event::Key(key) = event else {
-                continue;
-            };
-            if key.code == KeyCode::Esc
-                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-            {
-                return Ok(true);
-            }
-            if let Some(button) = key_button(key.code) {
-                if key.kind == KeyEventKind::Release {
-                    buttons.unset(button);
-                } else {
-                    buttons.set(button);
+            match event {
+                Event::FocusLost => *buttons = ButtonState::default(),
+                Event::Key(key) => {
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        return Ok(true);
+                    }
+                    if let Some(button) = key_button(key.code) {
+                        if key.kind == KeyEventKind::Release {
+                            buttons.unset(button);
+                        } else {
+                            buttons.set(button);
+                        }
+                    }
                 }
+                _ => {}
             }
         }
     }
