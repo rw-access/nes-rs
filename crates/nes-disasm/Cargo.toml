@@ -1,0 +1,17 @@
+[package]
+name = "nes-disasm"
+version = "0.1.0"
+edition = "2021"
+description = "Conservative 6502/NES disassembly and ROM analysis"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "nes-disasm"
+path = "src/bin/nes-disasm.rs"
+
+[lib]
+name = "nes_disasm"
+path = "src/lib.rs"
+
+[dependencies]
+nes-isa = { path = "../nes-isa" }
