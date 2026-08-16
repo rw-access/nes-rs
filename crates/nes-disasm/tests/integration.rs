@@ -101,7 +101,7 @@ fn recursive_traversal_follows_branches_calls_and_fallthrough_but_not_indirect_j
 fn nrom_16k_mirroring_and_vectors_are_discovered() {
     let mut rom = nrom_image(0x4000);
     let prg = 16;
-    rom[prg + 0x0000] = 0xa9;
+    rom[prg] = 0xa9;
     rom[prg + 0x3ffa..prg + 0x4000].copy_from_slice(&[
         0x34, 0x12, // NMI
         0x78, 0x56, // RESET

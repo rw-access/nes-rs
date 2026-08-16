@@ -1111,6 +1111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nes-disasm"
+version = "0.1.0"
+dependencies = [
+ "nes-isa",
+]
+
+[[package]]
 name = "nes-ffi"
 version = "0.1.0"
 dependencies = [

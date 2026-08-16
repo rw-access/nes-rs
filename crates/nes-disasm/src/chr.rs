@@ -185,9 +185,9 @@ pub fn decode_tile(bytes: &[u8]) -> Result<Tile, ChrError> {
     for y in 0..TILE_HEIGHT {
         let plane_zero = bytes[y];
         let plane_one = bytes[y + TILE_HEIGHT];
-        for x in 0..TILE_WIDTH {
+        for (x, pixel) in pixels[y].iter_mut().enumerate() {
             let bit = 7 - x;
-            pixels[y][x] = ((plane_zero >> bit) & 1) | (((plane_one >> bit) & 1) << 1);
+            *pixel = ((plane_zero >> bit) & 1) | (((plane_one >> bit) & 1) << 1);
         }
     }
     // Decoding produces only values in 0..=3, so validation cannot fail here.
@@ -213,7 +213,7 @@ pub fn encode_tile(tile: &Tile) -> Result<[u8; TILE_BYTES], ChrError> {
 
 /// Decode a byte slice containing only complete 8x8 tiles.
 pub fn decode_tiles(bytes: &[u8]) -> Result<Vec<Tile>, ChrError> {
-    if bytes.len() % TILE_BYTES != 0 {
+    if !bytes.len().is_multiple_of(TILE_BYTES) {
         return Err(ChrError::IncompleteTileData {
             actual: bytes.len(),
         });

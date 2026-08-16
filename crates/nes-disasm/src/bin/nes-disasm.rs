@@ -91,7 +91,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let source = fs::read(&input)?;
-    if let Ok(image) = InesImage::parse(&source) {
+    let image = if source.starts_with(b"NES\x1a") {
+        Some(InesImage::parse(&source)?)
+    } else {
+        None
+    };
+    if let Some(image) = image {
         eprintln!(
             "format={:?} PRG={} CHR={} mapper={} trainer={} mode={}",
             image.header.format,
@@ -191,8 +196,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if end < start || usize::from(end - start) > source.len() {
             return Err("range is outside the raw input".into());
         }
+        if start < cpu_origin {
+            return Err("range starts below the raw origin".into());
+        }
         let offset = usize::from(start - cpu_origin);
-        let bytes = &source[offset..offset + usize::from(end - start)];
+        let length = usize::from(end - start);
+        if offset > source.len() || length > source.len() - offset {
+            return Err("range is outside the raw input".into());
+        }
+        let bytes = &source[offset..offset + length];
         let decode = DecodeOptions {
             cpu: Cpu::Ricoh2A03,
             dialect: if unofficial {
