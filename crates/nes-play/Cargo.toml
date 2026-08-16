@@ -7,6 +7,7 @@ edition = "2021"
 default = []
 sdl2-frontend = ["dep:clap", "dep:image", "dep:sdl2", "layered-render"]
 winit-frontend = ["dep:cpal", "dep:softbuffer", "dep:winit", "layered-render"]
+tui-frontend = ["dep:crossterm", "layered-render"]
 layered-render = ["nes-core/layered-render"]
 diagnostic-capture = []
 
@@ -18,6 +19,7 @@ clap = { version = "4.0.15", features = ["derive"], optional = true }
 cpal = { version = "0.16.0", optional = true }
 softbuffer = { version = "0.4.8", optional = true }
 winit = { version = "0.30.13", optional = true }
+crossterm = { version = "0.29.0", optional = true }
 
 [[bin]]
 name = "nes"
@@ -28,3 +30,8 @@ required-features = ["sdl2-frontend"]
 name = "nes-winit"
 path = "src/nes_winit.rs"
 required-features = ["winit-frontend"]
+
+[[bin]]
+name = "nes-tui"
+path = "src/nes_tui.rs"
+required-features = ["tui-frontend"]
