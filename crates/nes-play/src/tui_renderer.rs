@@ -32,21 +32,56 @@ pub struct TextAtlas {
 impl TextAtlas {
     pub fn from_chr(banks: &[nes_core::cartridge::ChrBank]) -> Option<Self> {
         let chr = banks.first()?;
-        let mut glyphs = [[0u8; 8]; 95];
-        let duplicate_tiles = (0..95)
-            .filter(|&index| {
-                let offset = (0x20 + index) * 16;
-                chr.get(offset..offset + 8) == chr.get(offset + 8..offset + 16)
-            })
-            .count();
-        if duplicate_tiles < 90 {
-            return None;
+        for pattern_table in [0, 0x1000] {
+            let duplicate_tiles = (0..95)
+                .filter(|&index| {
+                    let offset = pattern_table + (0x20 + index) * 16;
+                    match (
+                        chr.get(offset..offset + 8),
+                        chr.get(offset + 8..offset + 16),
+                    ) {
+                        (Some(first), Some(second)) => {
+                            first == second && first.iter().any(|&row| row != 0)
+                        }
+                        _ => false,
+                    }
+                })
+                .count();
+            if duplicate_tiles >= 90 {
+                let mut glyphs = [[0u8; 8]; 95];
+                for (index, glyph) in glyphs.iter_mut().enumerate() {
+                    *glyph = chr_glyph(chr, pattern_table, 0x20 + index);
+                }
+                return Some(Self { glyphs });
+            }
         }
-        for (index, glyph) in glyphs.iter_mut().enumerate() {
-            let offset = (0x20 + index) * 16;
-            glyph.copy_from_slice(chr.get(offset..offset + 8)?);
+
+        // A common NES font layout stores digits and uppercase letters in
+        // tile order rather than at their ASCII byte values. SMB and several
+        // other cartridges use this layout in pattern table 1.
+        for pattern_table in [0, 0x1000] {
+            let letter_count = (0..26)
+                .filter(|&index| !glyph_is_blank(&chr_glyph(chr, pattern_table, 0x0a + index)))
+                .count();
+            let space = chr_glyph(chr, pattern_table, 0x24);
+            if letter_count < 24 || !glyph_is_blank(&space) {
+                continue;
+            }
+
+            let mut glyphs = [[0u8; 8]; 95];
+            for digit in 0..10 {
+                glyphs[(b'0' - b' ' + digit as u8) as usize] = chr_glyph(chr, pattern_table, digit);
+            }
+            for letter in 0..26 {
+                glyphs[(b'A' - b' ' + letter as u8) as usize] =
+                    chr_glyph(chr, pattern_table, 0x0a + letter);
+            }
+            glyphs[(b'-' - b' ') as usize] = chr_glyph(chr, pattern_table, 0x28);
+            glyphs[(b'!' - b' ') as usize] = chr_glyph(chr, pattern_table, 0x2b);
+            return Some(Self { glyphs });
         }
-        Some(Self { glyphs })
+
+        None
     }
 
     fn recognize(&self, pixels: &Pixels, x0: usize, y0: usize) -> Option<char> {
@@ -108,12 +143,27 @@ impl TextAtlas {
                 }
             }
         }
-        if best_distance <= 24 {
+        // Near matches are usually game art, not a slightly distorted font.
+        // Requiring an exact tile mask keeps the Braille fallback intact.
+        if best_distance <= MAX_TEXT_GLYPH_DISTANCE {
             best.map(|(index, _)| (0x20 + index) as u8 as char)
         } else {
             None
         }
     }
+}
+
+fn chr_glyph(chr: &[u8], pattern_table: usize, tile: usize) -> [u8; 8] {
+    let offset = pattern_table + tile * 16;
+    let mut glyph = [0u8; 8];
+    for (row, value) in glyph.iter_mut().enumerate() {
+        *value = chr[offset + row] | chr[offset + 8 + row];
+    }
+    glyph
+}
+
+fn glyph_is_blank(glyph: &[u8; 8]) -> bool {
+    glyph.iter().all(|&row| row == 0)
 }
 
 const DEFAULT_COLUMNS: usize = 80;
@@ -122,6 +172,7 @@ const DEFAULT_HYSTERESIS: f32 = 0.0;
 const EDGE_THRESHOLD: f32 = 0.18;
 const QUIET_BACKGROUND_SPRITE: f32 = 0.42;
 const TEXT_CONTRAST_THRESHOLD: f32 = 0.08;
+const MAX_TEXT_GLYPH_DISTANCE: u32 = 0;
 
 /// The coarse orientation of a cell's strongest contour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -817,6 +868,28 @@ mod tests {
 
         assert_eq!(atlas.recognize(&light_on_dark, 0, 0), Some('R'));
         assert_eq!(atlas.recognize(&dark_on_light, 0, 0), Some('R'));
+    }
+
+    #[test]
+    fn text_atlas_recognizes_standard_nes_font_layout() {
+        let mut chr = [0u8; 0x2000];
+        let pattern_table = 0x1000;
+        for tile in 0..6 {
+            let offset = (0x20 + tile) * 16;
+            chr[offset] = 1;
+            chr[offset + 8] = 2;
+        }
+        for tile in 0x0a..=0x23 {
+            let offset = pattern_table + tile * 16;
+            chr[offset] = tile as u8;
+        }
+
+        let atlas = TextAtlas::from_chr(&[chr]).expect("standard NES font");
+        assert_eq!(atlas.glyphs[(b'A' - b' ') as usize][0], 0x0a);
+        assert_eq!(atlas.glyphs[(b'Z' - b' ') as usize][0], 0x23);
+        assert!(atlas.glyphs[(b' ' - b' ') as usize]
+            .iter()
+            .all(|&row| row == 0));
     }
 
     #[test]
