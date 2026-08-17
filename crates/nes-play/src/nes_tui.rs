@@ -257,21 +257,21 @@ fn draw(
         SetForegroundColor(Color::AnsiValue(252)),
         SetAttribute(Attribute::NormalIntensity)
     )?;
+    let mut intensity = CellIntensity::Normal;
     for (y, row) in rendered.rows().enumerate() {
         queue!(stdout, MoveTo(0, y as u16), Clear(ClearType::CurrentLine))?;
-        let mut bold = false;
         for cell in row {
-            if cell.role == tui_renderer::GlyphRole::Text && !bold {
-                queue!(stdout, SetAttribute(Attribute::Bold))?;
-                bold = true;
-            } else if cell.role != tui_renderer::GlyphRole::Text && bold {
+            let next_intensity = cell_intensity(cell.role);
+            if next_intensity != intensity {
                 queue!(stdout, SetAttribute(Attribute::NormalIntensity))?;
-                bold = false;
+                if let CellIntensity::Dim = next_intensity {
+                    queue!(stdout, SetAttribute(Attribute::Dim))?;
+                } else if let CellIntensity::Bold = next_intensity {
+                    queue!(stdout, SetAttribute(Attribute::Bold))?;
+                }
+                intensity = next_intensity;
             }
             queue!(stdout, Print(cell.glyph))?;
-        }
-        if bold {
-            queue!(stdout, SetAttribute(Attribute::NormalIntensity))?;
         }
     }
 
@@ -297,6 +297,23 @@ fn draw(
         ResetColor
     )?;
     stdout.flush()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellIntensity {
+    Normal,
+    Dim,
+    Bold,
+}
+
+fn cell_intensity(role: tui_renderer::GlyphRole) -> CellIntensity {
+    match role {
+        tui_renderer::GlyphRole::Detail => CellIntensity::Dim,
+        tui_renderer::GlyphRole::Text | tui_renderer::GlyphRole::Sprite => CellIntensity::Bold,
+        tui_renderer::GlyphRole::Fill
+        | tui_renderer::GlyphRole::Edge
+        | tui_renderer::GlyphRole::Corner => CellIntensity::Normal,
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
