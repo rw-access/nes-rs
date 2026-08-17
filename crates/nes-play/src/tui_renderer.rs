@@ -700,14 +700,14 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
     let mut tone = (cell.tone + cell.sprite_weight * config.sprite_boost).clamp(0.0, 1.0);
     tone = (tone + cell.contrast * 0.04).clamp(0.0, 1.0);
     let edge = (cell.edge_strength * config.edge_boost).clamp(0.0, 1.0);
-    // Text has strong local contrast. Once a cell has a literal bitmap
-    // reconstruction, it must take priority over the generic contour grammar;
-    // otherwise a single vertical edge erases the rest of the character.
+    // ROM-backed OCR takes priority over the generic contour grammar. For
+    // ordinary game graphics, keep high-contrast texture in the shape grammar
+    // instead of leaking the diagnostic Braille reconstruction into gameplay.
     let text_like = cell.text_glyph != ' ' && cell.contrast >= TEXT_CONTRAST_THRESHOLD;
     let (glyph, role) = if let Some(glyph) = cell.ocr_glyph {
         (glyph, GlyphRole::Fill)
     } else if text_like && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
-        (cell.text_glyph, GlyphRole::Fill)
+        (fill_glyph((tone + 0.18).min(1.0)), GlyphRole::Fill)
     } else if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
         // A terminal cell can always fall back to a blank. Preserve visual
         // hierarchy by reserving dense fill glyphs for texture, sprites, and
