@@ -515,7 +515,7 @@ impl App {
             return;
         }
 
-        if code == KeyCode::KeyI {
+        if is_rewind_key(code) {
             self.set_rewinding(pressed);
             if !pressed {
                 self.console.update_buttons(self.buttons);
@@ -573,6 +573,10 @@ fn button_for_key(code: KeyCode) -> Option<Button> {
         KeyCode::Period => Some(Button::Start),
         _ => None,
     }
+}
+
+fn is_rewind_key(code: KeyCode) -> bool {
+    matches!(code, KeyCode::KeyI | KeyCode::KeyR)
 }
 
 impl ApplicationHandler for App {
@@ -710,7 +714,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{button_for_key, should_toggle_fps_throttle, toggle_fps_throttle};
+    use super::{button_for_key, is_rewind_key, should_toggle_fps_throttle, toggle_fps_throttle};
     use nes_core::controller::Button;
     use std::time::{Duration, Instant};
     use winit::event::ElementState;
@@ -733,6 +737,13 @@ mod tests {
             assert_eq!(button_for_key(key), Some(button));
         }
         assert_eq!(button_for_key(KeyCode::Escape), None);
+    }
+
+    #[test]
+    fn both_documented_rewind_keys_are_accepted() {
+        assert!(is_rewind_key(KeyCode::KeyI));
+        assert!(is_rewind_key(KeyCode::KeyR));
+        assert!(!is_rewind_key(KeyCode::KeyF));
     }
 
     #[test]

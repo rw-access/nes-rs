@@ -76,15 +76,6 @@ impl RewindTape {
                     base_state,
                     buttons_rle: stored_rle,
                 });
-                println!(
-                    "stored {} frames, {} checkpoints, RLE : cap = {}/len = {}, reserved capacity = {} B, size of checkpoints = {}",
-                    self.frames,
-                    self.stored_checkpoints.len(),
-                    self.stored_checkpoints.last().unwrap().buttons_rle.capacity(),
-                    self.stored_checkpoints.last().unwrap().buttons_rle.len(),
-                    self.stored_checkpoints.capacity() * std::mem::size_of::<Checkpoint>(),
-                    std::mem::size_of_val(&self.stored_checkpoints[..]),
-                );
             } else {
                 // convert another expanded snapshot to an RLE button press
                 // pack the buton onto the current sequence, preserving and building RLE

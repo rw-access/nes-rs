@@ -107,16 +107,20 @@ The library and headless paths build without native presentation dependencies:
 cargo test --workspace
 ```
 
-The first alternative desktop frontend uses winit, softbuffer, and cpal:
+The desktop frontend uses winit, softbuffer, and cpal:
 
 ```text
 cargo run -p nes-play --features winit-frontend --bin nes-winit -- path/to/game.nes
 ```
 
-The original SDL2 frontend remains available as a migration fallback:
+The desktop frontend controls are `W/A/S/D` for the D-pad, `J/K` for B/A,
+`,` and `.` for Select/Start, `I` or `R` (hold) to rewind, `V` to cycle the
+display layer, and `F` to toggle frame throttling. `Escape` exits.
+
+The terminal frontend is video-only and does not require a native audio device:
 
 ```text
-cargo run -p nes-play --features sdl2-frontend --bin nes -- play --rom path/to/game.nes
+cargo run -p nes-play --features tui-frontend --bin nes-tui -- path/to/game.nes
 ```
 
 ### WASM/browser frontend
