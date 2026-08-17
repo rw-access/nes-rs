@@ -19,6 +19,8 @@ const DEFAULT_ROWS: usize = 38;
 const DEFAULT_HYSTERESIS: f32 = 0.11;
 const EDGE_THRESHOLD: f32 = 0.18;
 const QUIET_BACKGROUND_SPRITE: f32 = 0.42;
+const TEXT_CONTRAST_THRESHOLD: f32 = 0.08;
+const TEXT_MAX_EDGE_STRENGTH: f32 = 0.48;
 
 /// The coarse orientation of a cell's strongest contour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -489,35 +491,46 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
     let mut tone = (cell.tone + cell.sprite_weight * config.sprite_boost).clamp(0.0, 1.0);
     tone = (tone + cell.contrast * 0.04).clamp(0.0, 1.0);
     let edge = (cell.edge_strength * config.edge_boost).clamp(0.0, 1.0);
-    let (glyph, role) = if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
-        // A terminal cell can always fall back to a blank. Preserve visual
-        // hierarchy by reserving dense fill glyphs for texture, sprites, and
-        // other regions that actually carry local information.
-        (' ', GlyphRole::Fill)
-    } else if edge >= EDGE_THRESHOLD {
-        match cell.edge_orientation {
-            EdgeOrientation::Horizontal => ('─', GlyphRole::Edge),
-            EdgeOrientation::Vertical => ('│', GlyphRole::Edge),
-            EdgeOrientation::DiagonalDown | EdgeOrientation::DiagonalUp
-                if edge > 0.40 && cell.contrast > 0.12 =>
-            {
-                (
-                    corner_glyph(cell.gradient_x, cell.gradient_y),
-                    GlyphRole::Corner,
-                )
+    // Text has strong local contrast, but its opposing strokes usually cancel
+    // into a modest aggregate edge. Dense tile texture tends to have both
+    // contrast and a much larger edge sum, so keep that out of the text path.
+    let text_like =
+        cell.contrast >= TEXT_CONTRAST_THRESHOLD && cell.edge_strength <= TEXT_MAX_EDGE_STRENGTH;
+    let (glyph, role) =
+        if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE && !text_like {
+            // A terminal cell can always fall back to a blank. Preserve visual
+            // hierarchy by reserving dense fill glyphs for texture, sprites, and
+            // other regions that actually carry local information.
+            (' ', GlyphRole::Fill)
+        } else if edge >= EDGE_THRESHOLD {
+            match cell.edge_orientation {
+                EdgeOrientation::Horizontal => ('─', GlyphRole::Edge),
+                EdgeOrientation::Vertical => ('│', GlyphRole::Edge),
+                EdgeOrientation::DiagonalDown | EdgeOrientation::DiagonalUp
+                    if edge > 0.40 && cell.contrast > 0.12 =>
+                {
+                    (
+                        corner_glyph(cell.gradient_x, cell.gradient_y),
+                        GlyphRole::Corner,
+                    )
+                }
+                EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
+                EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
+                // High local texture without a coherent direction is noise, not
+                // a contour. Preserve high-contrast text-like cells with a
+                // density glyph; only low-contrast texture stays blank.
+                EdgeOrientation::None if text_like => {
+                    (fill_glyph((tone + 0.18).min(1.0)), GlyphRole::Fill)
+                }
+                EdgeOrientation::None => (' ', GlyphRole::Fill),
             }
-            EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
-            EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
-            // High local texture without a coherent direction is noise, not
-            // a contour. Keep the background quiet instead of turning it
-            // into a wall of dense fill glyphs.
-            EdgeOrientation::None => (' ', GlyphRole::Fill),
-        }
-    } else if cell.sprite_weight > 0.42 && tone > 0.18 {
-        (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
-    } else {
-        (fill_glyph(tone), GlyphRole::Fill)
-    };
+        } else if text_like && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
+            (fill_glyph((tone + 0.18).min(1.0)), GlyphRole::Fill)
+        } else if cell.sprite_weight > 0.42 && tone > 0.18 {
+            (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
+        } else {
+            (fill_glyph(tone), GlyphRole::Fill)
+        };
     RenderedCell {
         glyph,
         role,
@@ -709,5 +722,22 @@ mod tests {
         };
         let rendered = select_cell(cell, RendererConfig::default());
         assert_eq!(rendered.glyph, ' ');
+    }
+
+    #[test]
+    fn high_contrast_text_like_cell_survives_without_contour_direction() {
+        let cell = PerceptualCell {
+            tone: 0.72,
+            contrast: 0.22,
+            edge_strength: 0.21,
+            edge_orientation: EdgeOrientation::None,
+            gradient_x: 0.0,
+            gradient_y: 0.0,
+            sprite_weight: 0.0,
+            region_id: 1,
+        };
+        let rendered = select_cell(cell, RendererConfig::default());
+        assert_ne!(rendered.glyph, ' ');
+        assert_eq!(rendered.role, GlyphRole::Fill);
     }
 }
