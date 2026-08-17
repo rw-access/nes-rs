@@ -14,13 +14,114 @@ pub type Pixels = [[u8; FRAME_WIDTH]; FRAME_HEIGHT];
 /// A coverage mask has the same shape as a frame. Non-zero means covered.
 pub type Coverage = [[u8; FRAME_WIDTH]; FRAME_HEIGHT];
 
+const NES_TEXT_COLUMNS: usize = FRAME_WIDTH / 8;
+const NES_TEXT_ROWS: usize = FRAME_HEIGHT / 8;
+
+/// A small OCR atlas extracted from the ROM's CHR font.
+///
+/// The text-test ROMs in the test-ROM submodule store their ASCII font as
+/// duplicated 8x8 tiles: character `c` starts at tile `c * 2`. The same
+/// convention is used by the shared text-console assets. Keeping the atlas
+/// ROM-owned means recognition follows the font actually on screen rather
+/// than assuming a host terminal font or a single universal NES typeface.
+#[derive(Clone, Debug)]
+pub struct TextAtlas {
+    glyphs: [[u8; 8]; 95],
+}
+
+impl TextAtlas {
+    pub fn from_chr(banks: &[nes_core::cartridge::ChrBank]) -> Option<Self> {
+        let chr = banks.first()?;
+        let mut glyphs = [[0u8; 8]; 95];
+        let duplicate_tiles = (0..95)
+            .filter(|&index| {
+                let offset = (0x20 + index) * 16;
+                chr.get(offset..offset + 8) == chr.get(offset + 8..offset + 16)
+            })
+            .count();
+        if duplicate_tiles < 90 {
+            return None;
+        }
+        for (index, glyph) in glyphs.iter_mut().enumerate() {
+            let offset = (0x20 + index) * 16;
+            glyph.copy_from_slice(chr.get(offset..offset + 8)?);
+        }
+        Some(Self { glyphs })
+    }
+
+    fn recognize(&self, pixels: &Pixels, x0: usize, y0: usize) -> Option<char> {
+        let mut values = [[0.0f32; 8]; 8];
+        let mut minimum = 1.0f32;
+        let mut maximum = 0.0f32;
+        for (row, values_row) in values.iter_mut().enumerate() {
+            for (column, value) in values_row.iter_mut().enumerate() {
+                let sample = source_luma(pixels, x0 + column, y0 + row);
+                *value = sample;
+                minimum = minimum.min(sample);
+                maximum = maximum.max(sample);
+            }
+        }
+        if maximum - minimum < TEXT_CONTRAST_THRESHOLD {
+            return None;
+        }
+
+        let threshold = (minimum + maximum) * 0.5;
+        let mut low_count = 0usize;
+        let mut high_count = 0usize;
+        for row in values {
+            for value in row {
+                if value < threshold {
+                    low_count += 1;
+                } else {
+                    high_count += 1;
+                }
+            }
+        }
+        let foreground_is_high = high_count <= low_count;
+        let mut mask = [0u8; 8];
+        for (row, values_row) in values.iter().enumerate() {
+            for (column, &value) in values_row.iter().enumerate() {
+                let foreground = if foreground_is_high {
+                    value >= threshold
+                } else {
+                    value < threshold
+                };
+                if foreground {
+                    mask[row] |= 0x80 >> column;
+                }
+            }
+        }
+
+        let mut best = None;
+        let mut best_distance = u32::MAX;
+        let inverted = mask.map(|row| !row);
+        for candidate in [mask, inverted] {
+            for (index, glyph) in self.glyphs.iter().enumerate() {
+                let distance = candidate
+                    .iter()
+                    .zip(glyph)
+                    .map(|(&actual, &expected)| (actual ^ expected).count_ones())
+                    .sum();
+                if distance < best_distance {
+                    best_distance = distance;
+                    best = Some((index, glyph));
+                }
+            }
+        }
+        if best_distance <= 24 {
+            best.map(|(index, _)| (0x20 + index) as u8 as char)
+        } else {
+            None
+        }
+    }
+}
+
 const DEFAULT_COLUMNS: usize = 80;
 const DEFAULT_ROWS: usize = 38;
 const DEFAULT_HYSTERESIS: f32 = 0.11;
 const EDGE_THRESHOLD: f32 = 0.18;
 const QUIET_BACKGROUND_SPRITE: f32 = 0.42;
 const TEXT_CONTRAST_THRESHOLD: f32 = 0.08;
-const TEXT_MAX_EDGE_STRENGTH: f32 = 0.48;
 
 /// The coarse orientation of a cell's strongest contour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,6 +287,9 @@ pub struct PerceptualCell {
     pub sprite_weight: f32,
     /// A stable coarse region key useful to diagnostic callers.
     pub region_id: u16,
+    /// Literal 2x4 reconstruction for high-contrast text-like cells.
+    pub text_glyph: char,
+    pub ocr_glyph: Option<char>,
 }
 
 /// The semantic family selected for a rendered cell.
@@ -220,6 +324,8 @@ impl RenderedCell {
                 gradient_y: 0.0,
                 sprite_weight: 0.0,
                 region_id: 0,
+                text_glyph: ' ',
+                ocr_glyph: None,
             },
         }
     }
@@ -263,6 +369,7 @@ impl RenderedFrame {
 pub struct Renderer {
     config: RendererConfig,
     previous: Vec<RenderedCell>,
+    text_atlas: Option<TextAtlas>,
 }
 
 impl Renderer {
@@ -270,6 +377,7 @@ impl Renderer {
         Self {
             previous: vec![RenderedCell::blank(); config.grid.cell_count()],
             config,
+            text_atlas: None,
         }
     }
 
@@ -291,6 +399,11 @@ impl Renderer {
         self.previous.fill(RenderedCell::blank());
     }
 
+    pub fn set_text_atlas(&mut self, atlas: Option<TextAtlas>) {
+        self.text_atlas = atlas;
+        self.reset_history();
+    }
+
     /// Render a palette-indexed NES frame with optional PPU layer data.
     pub fn render_pixels(&mut self, pixels: &Pixels, layers: LayerData<'_>) -> RenderedFrame {
         let grid = self.config.grid;
@@ -300,7 +413,8 @@ impl Renderer {
         for y in 0..grid.content_rows {
             for x in 0..grid.content_columns {
                 let index = (grid.content_y + y) * grid.columns + grid.content_x + x;
-                perceptual[index] = analyze_cell(pixels, layers, grid, x, y);
+                perceptual[index] =
+                    analyze_cell(pixels, layers, grid, x, y, self.text_atlas.as_ref());
             }
         }
 
@@ -361,6 +475,7 @@ fn analyze_cell(
     grid: TerminalGrid,
     cell_x: usize,
     cell_y: usize,
+    text_atlas: Option<&TextAtlas>,
 ) -> PerceptualCell {
     let x0 = cell_x * FRAME_WIDTH / grid.content_columns;
     let x1 = ((cell_x + 1) * FRAME_WIDTH / grid.content_columns).max(x0 + 1);
@@ -420,6 +535,28 @@ fn analyze_cell(
     let average_gradient_x = gradient_x / count.max(1.0);
     let average_gradient_y = gradient_y / count.max(1.0);
     let orientation = orientation(gradient_x, gradient_y, edge_strength);
+    let text_glyph = text_glyph(pixels, x0, x1.min(FRAME_WIDTH), y0, y1.min(FRAME_HEIGHT));
+    let ocr_glyph = if grid.content_rows >= NES_TEXT_ROWS
+        && grid.content_rows % NES_TEXT_ROWS == 0
+        && grid.content_columns >= NES_TEXT_COLUMNS
+    {
+        let cells_per_tile_row = grid.content_rows / NES_TEXT_ROWS;
+        let tile_row = cell_y / cells_per_tile_row;
+        if tile_row < NES_TEXT_ROWS && cell_x < NES_TEXT_COLUMNS {
+            let tile_x = cell_x * 8;
+            let tile_y = tile_row * 8;
+            text_atlas.map(|atlas| atlas.recognize(pixels, tile_x, tile_y).unwrap_or(' '))
+        } else if text_atlas.is_some() {
+            // A text atlas is a deliberate compact 32-column presentation:
+            // don't let the image grammar reintroduce noisy half-characters
+            // beside or below the decoded text plane.
+            Some(' ')
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     PerceptualCell {
         tone: tone.clamp(0.0, 1.0),
@@ -430,6 +567,78 @@ fn analyze_cell(
         gradient_y: average_gradient_y,
         sprite_weight,
         region_id: ((tone * 31.0).round() as u16) | ((sprite_weight > 0.2) as u16 * 0x100),
+        text_glyph,
+        ocr_glyph,
+    }
+}
+
+/// Reconstruct the source rectangle as a Braille character. At 128x60 this
+/// is exactly one Braille dot per 2x4 NES pixels; at 64x30 each dot covers a
+/// 2x2 source block. Choosing the minority side of local contrast supports
+/// both light-on-dark and dark-on-light text.
+fn text_glyph(pixels: &Pixels, x0: usize, x1: usize, y0: usize, y1: usize) -> char {
+    let width = x1.saturating_sub(x0).max(1);
+    let height = y1.saturating_sub(y0).max(1);
+    let mut samples = [[0.0f32; 4]; 2];
+    let mut lows = 0usize;
+    let mut highs = 0usize;
+    let mut minimum = 1.0f32;
+    let mut maximum = 0.0f32;
+
+    for dot_y in 0..4 {
+        for dot_x in 0..2 {
+            let sx0 = x0 + dot_x * width / 2;
+            let sx1 = (x0 + (dot_x + 1) * width / 2).max(sx0 + 1);
+            let sy0 = y0 + dot_y * height / 4;
+            let sy1 = (y0 + (dot_y + 1) * height / 4).max(sy0 + 1);
+            let mut value = 0.0;
+            let mut count: f32 = 0.0;
+            for y in sy0..sy1.min(FRAME_HEIGHT) {
+                for x in sx0..sx1.min(FRAME_WIDTH) {
+                    value += source_luma(pixels, x, y);
+                    count += 1.0;
+                }
+            }
+            let value = value / count.max(1.0);
+            samples[dot_x][dot_y] = value;
+            minimum = minimum.min(value);
+            maximum = maximum.max(value);
+        }
+    }
+
+    if maximum - minimum < 0.08 {
+        return ' ';
+    }
+    let threshold = (minimum + maximum) * 0.5;
+    for column in &samples {
+        for &value in column {
+            if value < threshold {
+                lows += 1;
+            } else {
+                highs += 1;
+            }
+        }
+    }
+    let foreground_is_high = highs <= lows;
+    let mut bits = 0u8;
+    const DOTS: [[u8; 4]; 2] = [[1, 2, 4, 64], [8, 16, 32, 128]];
+    for dot_y in 0..4 {
+        for dot_x in 0..2 {
+            let value = samples[dot_x][dot_y];
+            let foreground = if foreground_is_high {
+                value >= threshold
+            } else {
+                value < threshold
+            };
+            if foreground {
+                bits |= DOTS[dot_x][dot_y];
+            }
+        }
+    }
+    if bits == 0 {
+        ' '
+    } else {
+        char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
     }
 }
 
@@ -491,46 +700,40 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
     let mut tone = (cell.tone + cell.sprite_weight * config.sprite_boost).clamp(0.0, 1.0);
     tone = (tone + cell.contrast * 0.04).clamp(0.0, 1.0);
     let edge = (cell.edge_strength * config.edge_boost).clamp(0.0, 1.0);
-    // Text has strong local contrast, but its opposing strokes usually cancel
-    // into a modest aggregate edge. Dense tile texture tends to have both
-    // contrast and a much larger edge sum, so keep that out of the text path.
-    let text_like =
-        cell.contrast >= TEXT_CONTRAST_THRESHOLD && cell.edge_strength <= TEXT_MAX_EDGE_STRENGTH;
-    let (glyph, role) =
-        if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE && !text_like {
-            // A terminal cell can always fall back to a blank. Preserve visual
-            // hierarchy by reserving dense fill glyphs for texture, sprites, and
-            // other regions that actually carry local information.
-            (' ', GlyphRole::Fill)
-        } else if edge >= EDGE_THRESHOLD {
-            match cell.edge_orientation {
-                EdgeOrientation::Horizontal => ('─', GlyphRole::Edge),
-                EdgeOrientation::Vertical => ('│', GlyphRole::Edge),
-                EdgeOrientation::DiagonalDown | EdgeOrientation::DiagonalUp
-                    if edge > 0.40 && cell.contrast > 0.12 =>
-                {
-                    (
-                        corner_glyph(cell.gradient_x, cell.gradient_y),
-                        GlyphRole::Corner,
-                    )
-                }
-                EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
-                EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
-                // High local texture without a coherent direction is noise, not
-                // a contour. Preserve high-contrast text-like cells with a
-                // density glyph; only low-contrast texture stays blank.
-                EdgeOrientation::None if text_like => {
-                    (fill_glyph((tone + 0.18).min(1.0)), GlyphRole::Fill)
-                }
-                EdgeOrientation::None => (' ', GlyphRole::Fill),
+    // Text has strong local contrast. Once a cell has a literal bitmap
+    // reconstruction, it must take priority over the generic contour grammar;
+    // otherwise a single vertical edge erases the rest of the character.
+    let text_like = cell.text_glyph != ' ' && cell.contrast >= TEXT_CONTRAST_THRESHOLD;
+    let (glyph, role) = if let Some(glyph) = cell.ocr_glyph {
+        (glyph, GlyphRole::Fill)
+    } else if text_like && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
+        (cell.text_glyph, GlyphRole::Fill)
+    } else if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
+        // A terminal cell can always fall back to a blank. Preserve visual
+        // hierarchy by reserving dense fill glyphs for texture, sprites, and
+        // other regions that actually carry local information.
+        (' ', GlyphRole::Fill)
+    } else if edge >= EDGE_THRESHOLD {
+        match cell.edge_orientation {
+            EdgeOrientation::Horizontal => ('─', GlyphRole::Edge),
+            EdgeOrientation::Vertical => ('│', GlyphRole::Edge),
+            EdgeOrientation::DiagonalDown | EdgeOrientation::DiagonalUp
+                if edge > 0.40 && cell.contrast > 0.12 =>
+            {
+                (
+                    corner_glyph(cell.gradient_x, cell.gradient_y),
+                    GlyphRole::Corner,
+                )
             }
-        } else if text_like && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
-            (fill_glyph((tone + 0.18).min(1.0)), GlyphRole::Fill)
-        } else if cell.sprite_weight > 0.42 && tone > 0.18 {
-            (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
-        } else {
-            (fill_glyph(tone), GlyphRole::Fill)
-        };
+            EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
+            EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
+            EdgeOrientation::None => (' ', GlyphRole::Fill),
+        }
+    } else if cell.sprite_weight > 0.42 && tone > 0.18 {
+        (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
+    } else {
+        (fill_glyph(tone), GlyphRole::Fill)
+    };
     RenderedCell {
         glyph,
         role,
@@ -592,6 +795,29 @@ mod tests {
     }
 
     #[test]
+    fn text_atlas_recognizes_either_foreground_polarity() {
+        let mut atlas = TextAtlas {
+            glyphs: [[0; 8]; 95],
+        };
+        let glyph = [0x6e, 0x73, 0x63, 0x7e, 0x6c, 0x67, 0x63, 0x00];
+        atlas.glyphs[(b'R' - b' ') as usize] = glyph;
+
+        let mut light_on_dark = flat(0x0d);
+        let mut dark_on_light = flat(0x20);
+        for (row, &bits) in glyph.iter().enumerate() {
+            for column in 0..8 {
+                if bits & (0x80 >> column) != 0 {
+                    light_on_dark[row][column] = 0x20;
+                    dark_on_light[row][column] = 0x0d;
+                }
+            }
+        }
+
+        assert_eq!(atlas.recognize(&light_on_dark, 0, 0), Some('R'));
+        assert_eq!(atlas.recognize(&dark_on_light, 0, 0), Some('R'));
+    }
+
+    #[test]
     fn terminal_fit_preserves_physical_aspect() {
         let grid = TerminalGrid::fit(80, 38);
         let physical = grid.content_columns as f32 / (2.0 * grid.content_rows as f32);
@@ -636,6 +862,7 @@ mod tests {
             grid,
             grid.content_columns / 2,
             10,
+            None,
         );
         assert_eq!(cell.edge_orientation, EdgeOrientation::Vertical);
         assert!(cell.edge_strength > EDGE_THRESHOLD);
@@ -669,6 +896,7 @@ mod tests {
             grid,
             10,
             10,
+            None,
         );
         let visible_cell = analyze_cell(
             &frame,
@@ -680,6 +908,7 @@ mod tests {
             grid,
             10,
             10,
+            None,
         );
         assert!(visible_cell.sprite_weight > hidden_cell.sprite_weight);
         // Keep the bindings above intentionally explicit: these are borrowed
@@ -719,6 +948,8 @@ mod tests {
             gradient_y: 0.0,
             sprite_weight: 0.0,
             region_id: 1,
+            text_glyph: ' ',
+            ocr_glyph: None,
         };
         let rendered = select_cell(cell, RendererConfig::default());
         assert_eq!(rendered.glyph, ' ');
@@ -735,6 +966,8 @@ mod tests {
             gradient_y: 0.0,
             sprite_weight: 0.0,
             region_id: 1,
+            text_glyph: '⠿',
+            ocr_glyph: None,
         };
         let rendered = select_cell(cell, RendererConfig::default());
         assert_ne!(rendered.glyph, ' ');

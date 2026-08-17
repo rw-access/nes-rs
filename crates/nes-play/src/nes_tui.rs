@@ -4,7 +4,7 @@
 
 mod tui_renderer;
 
-use tui_renderer::Renderer;
+use tui_renderer::{Renderer, TextAtlas};
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -41,7 +41,7 @@ fn usage(program: &str) {
     eprintln!("       {program} --help");
 }
 
-fn load_console(path: &Path) -> Result<Console, Box<dyn Error>> {
+fn load_console(path: &Path) -> Result<(Console, Option<TextAtlas>), Box<dyn Error>> {
     let mut file = File::open(path)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
     let (cartridge_image, mapper_number) = ines::load(&mut file).ok_or_else(|| {
@@ -51,8 +51,9 @@ fn load_console(path: &Path) -> Result<Console, Box<dyn Error>> {
         )
     })?;
 
-    if mapper_number == 0 {
-        Ok(Console::new_nrom(cartridge_image))
+    let text_atlas = TextAtlas::from_chr(cartridge_image.chr.get_banks());
+    let console = if mapper_number == 0 {
+        Console::new_nrom(cartridge_image)
     } else {
         let mapper = cartridge::new(cartridge_image, mapper_number).ok_or_else(|| {
             io::Error::new(
@@ -60,8 +61,9 @@ fn load_console(path: &Path) -> Result<Console, Box<dyn Error>> {
                 format!("unsupported mapper {mapper_number} in {}", path.display()),
             )
         })?;
-        Ok(Console::new(mapper))
-    }
+        Console::new(mapper)
+    };
+    Ok((console, text_atlas))
 }
 
 struct TerminalGuard {
@@ -195,11 +197,16 @@ fn wait_for_frame(deadline: Instant, buttons: &mut ButtonState) -> io::Result<bo
     }
 }
 
-fn run(mut console: Console, rom_name: &str) -> Result<(), Box<dyn Error>> {
+fn run(
+    mut console: Console,
+    rom_name: &str,
+    text_atlas: Option<TextAtlas>,
+) -> Result<(), Box<dyn Error>> {
     let _terminal = TerminalGuard::enter()?;
     let mut stdout = io::stdout();
     let (columns, rows) = terminal::size()?;
     let mut renderer = Renderer::for_terminal(columns as usize, rows.saturating_sub(2) as usize);
+    renderer.set_text_atlas(text_atlas);
     let mut buttons = ButtonState::default();
     let mut next_frame_at = Instant::now();
     let started_at = next_frame_at;
@@ -301,6 +308,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|name| name.to_str())
         .unwrap_or("rom")
         .to_owned();
-    let console = load_console(&rom_path)?;
-    run(console, &rom_name)
+    let (console, text_atlas) = load_console(&rom_path)?;
+    run(console, &rom_name, text_atlas)
 }
