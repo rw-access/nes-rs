@@ -18,6 +18,7 @@ const DEFAULT_COLUMNS: usize = 80;
 const DEFAULT_ROWS: usize = 38;
 const DEFAULT_HYSTERESIS: f32 = 0.11;
 const EDGE_THRESHOLD: f32 = 0.18;
+const QUIET_BACKGROUND_SPRITE: f32 = 0.42;
 
 /// The coarse orientation of a cell's strongest contour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -466,7 +467,12 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
     let mut tone = (cell.tone + cell.sprite_weight * config.sprite_boost).clamp(0.0, 1.0);
     tone = (tone + cell.contrast * 0.04).clamp(0.0, 1.0);
     let edge = (cell.edge_strength * config.edge_boost).clamp(0.0, 1.0);
-    let (glyph, role) = if edge >= EDGE_THRESHOLD {
+    let (glyph, role) = if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
+        // A terminal cell can always fall back to a blank. Preserve visual
+        // hierarchy by reserving dense fill glyphs for texture, sprites, and
+        // other regions that actually carry local information.
+        (' ', GlyphRole::Fill)
+    } else if edge >= EDGE_THRESHOLD {
         match cell.edge_orientation {
             EdgeOrientation::Horizontal => ('─', GlyphRole::Edge),
             EdgeOrientation::Vertical => ('│', GlyphRole::Edge),
@@ -480,7 +486,10 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
             }
             EdgeOrientation::DiagonalDown => ('╲', GlyphRole::Edge),
             EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
-            EdgeOrientation::None => (fill_glyph(tone), GlyphRole::Fill),
+            // High local texture without a coherent direction is noise, not
+            // a contour. Keep the background quiet instead of turning it
+            // into a wall of dense fill glyphs.
+            EdgeOrientation::None => (' ', GlyphRole::Fill),
         }
     } else if cell.sprite_weight > 0.42 && tone > 0.18 {
         (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
@@ -642,5 +651,21 @@ mod tests {
         let first = renderer.render_pixels(&flat(0x10), LayerData::none());
         let second = renderer.render_pixels(&flat(0x11), LayerData::none());
         assert_eq!(first.text(), second.text());
+    }
+
+    #[test]
+    fn quiet_background_prefers_blank_over_dense_fill() {
+        let cell = PerceptualCell {
+            tone: 0.95,
+            contrast: 0.0,
+            edge_strength: 0.0,
+            edge_orientation: EdgeOrientation::None,
+            gradient_x: 0.0,
+            gradient_y: 0.0,
+            sprite_weight: 0.0,
+            region_id: 1,
+        };
+        let rendered = select_cell(cell, RendererConfig::default());
+        assert_eq!(rendered.glyph, ' ');
     }
 }
