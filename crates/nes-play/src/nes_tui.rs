@@ -254,7 +254,6 @@ fn draw(
     queue!(
         stdout,
         MoveTo(0, 0),
-        Clear(ClearType::All),
         SetForegroundColor(Color::AnsiValue(252))
     )?;
     for (y, row) in rendered.rows().enumerate() {
