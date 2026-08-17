@@ -113,6 +113,10 @@ The desktop frontend uses winit, softbuffer, and cpal:
 cargo run -p nes-play --features winit-frontend --bin nes-winit -- path/to/game.nes
 ```
 
+The desktop frontend controls are `W/A/S/D` for the D-pad, `J/K` for B/A,
+`,` and `.` for Select/Start, `I` or `R` (hold) to rewind, `V` to cycle the
+display layer, and `F` to toggle frame throttling. `Escape` exits.
+
 The terminal frontend is video-only and does not require a native audio device:
 
 ```text
