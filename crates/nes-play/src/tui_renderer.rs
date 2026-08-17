@@ -348,6 +348,8 @@ pub struct PerceptualCell {
 pub enum GlyphRole {
     #[default]
     Fill,
+    Text,
+    Detail,
     Edge,
     Corner,
     Sprite,
@@ -477,6 +479,8 @@ impl Renderer {
                 cells[index] = stabilize(candidate, self.previous[index], self.config.hysteresis);
             }
         }
+
+        break_long_vertical_edges(&mut cells, grid);
 
         self.previous = cells.clone();
         RenderedFrame { grid, cells }
@@ -751,9 +755,17 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
     // it carries tile texture more faithfully than a dense fill glyph.
     let text_like = cell.text_glyph != ' ' && cell.contrast >= TEXT_CONTRAST_THRESHOLD;
     let (glyph, role) = if let Some(glyph) = cell.ocr_glyph {
-        (glyph, GlyphRole::Fill)
+        (glyph, GlyphRole::Text)
     } else if text_like && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
-        (cell.text_glyph, GlyphRole::Fill)
+        (cell.text_glyph, GlyphRole::Detail)
+    } else if cell.sprite_weight > 0.16 && tone > 0.04 {
+        // Small sprites often have strong internal edges. Give their filled
+        // silhouette priority over the generic edge grammar so characters do
+        // not dissolve into a handful of thin lines at small terminal sizes.
+        (
+            fill_glyph((tone + 0.18 + cell.contrast * 0.08).min(1.0)),
+            GlyphRole::Sprite,
+        )
     } else if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
         // A terminal cell can always fall back to a blank. Preserve visual
         // hierarchy by reserving dense fill glyphs for texture, sprites, and
@@ -775,8 +787,6 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
             EdgeOrientation::DiagonalUp => ('╱', GlyphRole::Edge),
             EdgeOrientation::None => (' ', GlyphRole::Fill),
         }
-    } else if cell.sprite_weight > 0.42 && tone > 0.18 {
-        (fill_glyph((tone + 0.12).min(1.0)), GlyphRole::Sprite)
     } else {
         (fill_glyph(tone), GlyphRole::Fill)
     };
@@ -802,6 +812,38 @@ fn fill_glyph(tone: f32) -> char {
     const FILL: &[char] = &[' ', '.', ':', ';', '\'', '+', '*', '#', '%', '@'];
     let index = (tone.clamp(0.0, 1.0) * (FILL.len() - 1) as f32).round() as usize;
     FILL[index]
+}
+
+fn break_long_vertical_edges(cells: &mut [RenderedCell], grid: TerminalGrid) {
+    const MAX_STRAIGHT_RUN: usize = 4;
+    let mut replacements = Vec::new();
+
+    for x in grid.content_x..grid.content_x + grid.content_columns {
+        let mut y = grid.content_y;
+        while y < grid.content_y + grid.content_rows {
+            let index = y * grid.columns + x;
+            if cells[index].glyph != '│' {
+                y += 1;
+                continue;
+            }
+
+            let start = y;
+            while y < grid.content_y + grid.content_rows && cells[y * grid.columns + x].glyph == '│'
+            {
+                y += 1;
+            }
+            if y - start >= MAX_STRAIGHT_RUN {
+                for row in start..y {
+                    let index = row * grid.columns + x;
+                    replacements.push((index, cells[index].perceptual.text_glyph));
+                }
+            }
+        }
+    }
+
+    for (index, glyph) in replacements {
+        cells[index].glyph = glyph;
+    }
 }
 
 fn stabilize(candidate: RenderedCell, previous: RenderedCell, hysteresis: f32) -> RenderedCell {
@@ -1058,6 +1100,25 @@ mod tests {
     }
 
     #[test]
+    fn covered_sprite_prefers_silhouette_over_edge_line() {
+        let cell = PerceptualCell {
+            tone: 0.25,
+            contrast: 0.20,
+            edge_strength: 0.90,
+            edge_orientation: EdgeOrientation::Vertical,
+            gradient_x: 0.0,
+            gradient_y: 0.0,
+            sprite_weight: 0.30,
+            region_id: 1,
+            text_glyph: ' ',
+            ocr_glyph: None,
+        };
+        let rendered = select_cell(cell, RendererConfig::default());
+        assert_eq!(rendered.role, GlyphRole::Sprite);
+        assert_ne!(rendered.glyph, '│');
+    }
+
+    #[test]
     fn high_contrast_text_like_cell_survives_without_contour_direction() {
         let cell = PerceptualCell {
             tone: 0.72,
@@ -1073,6 +1134,6 @@ mod tests {
         };
         let rendered = select_cell(cell, RendererConfig::default());
         assert_ne!(rendered.glyph, ' ');
-        assert_eq!(rendered.role, GlyphRole::Fill);
+        assert_eq!(rendered.role, GlyphRole::Detail);
     }
 }
