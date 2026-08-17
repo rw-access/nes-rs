@@ -536,26 +536,28 @@ fn analyze_cell(
     let average_gradient_y = gradient_y / count.max(1.0);
     let orientation = orientation(gradient_x, gradient_y, edge_strength);
     let text_glyph = text_glyph(pixels, x0, x1.min(FRAME_WIDTH), y0, y1.min(FRAME_HEIGHT));
-    let ocr_glyph = if grid.content_rows >= NES_TEXT_ROWS
-        && grid.content_rows % NES_TEXT_ROWS == 0
-        && grid.content_columns >= NES_TEXT_COLUMNS
-    {
-        let cells_per_tile_row = grid.content_rows / NES_TEXT_ROWS;
-        let tile_row = cell_y / cells_per_tile_row;
-        if tile_row < NES_TEXT_ROWS && cell_x < NES_TEXT_COLUMNS {
-            let tile_x = cell_x * 8;
-            let tile_y = tile_row * 8;
-            text_atlas.map(|atlas| atlas.recognize(pixels, tile_x, tile_y).unwrap_or(' '))
-        } else if text_atlas.is_some() {
-            // A text atlas is a deliberate compact 32-column presentation:
-            // don't let the image grammar reintroduce noisy half-characters
-            // beside or below the decoded text plane.
-            Some(' ')
-        } else {
-            None
+    let cells_per_tile_row = (grid.content_rows / NES_TEXT_ROWS).max(1);
+    let tile_row = cell_y / cells_per_tile_row;
+    let ocr_glyph = match text_atlas {
+        Some(atlas)
+            if cell_x < NES_TEXT_COLUMNS
+                && tile_row < NES_TEXT_ROWS
+                && cell_y % cells_per_tile_row == 0 =>
+        {
+            // Keep the decoded text compact: one terminal cell per NES
+            // character. On short terminals this crops the lower rows, while
+            // larger tile-aligned profiles put each decoded row at its first
+            // cell row.
+            atlas
+                .recognize(pixels, cell_x * 8, tile_row * 8)
+                .or(Some(' '))
         }
-    } else {
-        None
+        Some(_) => {
+            // Don't let the image grammar reintroduce noisy half-characters
+            // beside or between the compact decoded text cells.
+            Some(' ')
+        }
+        None => None,
     };
 
     PerceptualCell {
@@ -815,6 +817,29 @@ mod tests {
 
         assert_eq!(atlas.recognize(&light_on_dark, 0, 0), Some('R'));
         assert_eq!(atlas.recognize(&dark_on_light, 0, 0), Some('R'));
+    }
+
+    #[test]
+    fn text_atlas_remains_active_on_short_terminals() {
+        let mut atlas = TextAtlas {
+            glyphs: [[0; 8]; 95],
+        };
+        let glyph = [0x6e, 0x73, 0x63, 0x7e, 0x6c, 0x67, 0x63, 0x00];
+        atlas.glyphs[(b'R' - b' ') as usize] = glyph;
+
+        let mut frame = flat(0x0d);
+        for (row, &bits) in glyph.iter().enumerate() {
+            for column in 0..8 {
+                if bits & (0x80 >> column) != 0 {
+                    frame[row][column] = 0x20;
+                }
+            }
+        }
+
+        let grid = TerminalGrid::fit(80, 24);
+        assert!(grid.content_rows < NES_TEXT_ROWS);
+        let cell = analyze_cell(&frame, LayerData::none(), grid, 0, 0, Some(&atlas));
+        assert_eq!(cell.ocr_glyph, Some('R'));
     }
 
     #[test]
