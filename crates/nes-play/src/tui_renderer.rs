@@ -74,10 +74,32 @@ pub struct TerminalGrid {
 }
 
 impl TerminalGrid {
-    /// Fit the NES frame in a terminal while preserving its physical aspect.
+    /// Fit the NES frame in a terminal, preferring tile-aligned sampling.
+    ///
+    /// A terminal cell is approximately 1:2 wide-to-tall. The 64x30 profile
+    /// therefore samples exactly 4x8 NES pixels per cell: two characters per
+    /// 8x8 tile horizontally and one tile row vertically. The 128x60 profile
+    /// doubles that resolution while preserving the same alignment. Short
+    /// terminals fall back to ordinary aspect fitting rather than wasting
+    /// most of the available screen on padding.
     pub fn fit(columns: usize, rows: usize) -> Self {
         let columns = columns.max(1);
         let rows = rows.max(1);
+
+        let scale = (columns / 64).min(rows / 30);
+        if scale > 0 {
+            let content_columns = 64 * scale;
+            let content_rows = 30 * scale;
+            return Self {
+                columns,
+                rows,
+                content_x: (columns - content_columns) / 2,
+                content_y: (rows - content_rows) / 2,
+                content_columns,
+                content_rows,
+            };
+        }
+
         // Physical image aspect is columns / (2 * rows). The NES frame is
         // 256 / 240, so its cell-space aspect is 256 / 120.
         let target = FRAME_WIDTH as f32 / (FRAME_HEIGHT as f32 * 0.5);
@@ -564,6 +586,26 @@ mod tests {
         assert!((physical - source).abs() < 0.04, "{physical} vs {source}");
         assert!(grid.content_columns <= grid.columns);
         assert!(grid.content_rows <= grid.rows);
+    }
+
+    #[test]
+    fn terminal_fit_prefers_tile_aligned_profiles() {
+        let standard = TerminalGrid::fit(80, 38);
+        assert_eq!((standard.content_columns, standard.content_rows), (64, 30));
+        assert_eq!(FRAME_WIDTH / standard.content_columns, 4);
+        assert_eq!(FRAME_HEIGHT / standard.content_rows, 8);
+
+        let large = TerminalGrid::fit(128, 62);
+        assert_eq!((large.content_columns, large.content_rows), (128, 60));
+        assert_eq!(FRAME_WIDTH / large.content_columns, 2);
+        assert_eq!(FRAME_HEIGHT / large.content_rows, 4);
+    }
+
+    #[test]
+    fn short_terminal_falls_back_to_maximum_aspect_fit() {
+        let grid = TerminalGrid::fit(80, 24);
+        assert_eq!(grid.content_rows, 24);
+        assert!(grid.content_columns > 32);
     }
 
     #[test]
