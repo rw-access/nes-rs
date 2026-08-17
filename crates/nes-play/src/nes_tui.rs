@@ -254,18 +254,13 @@ fn draw(
     queue!(
         stdout,
         MoveTo(0, 0),
+        SetForegroundColor(Color::AnsiValue(252)),
         SetAttribute(Attribute::NormalIntensity)
     )?;
-    let mut current_color = None;
     for (y, row) in rendered.rows().enumerate() {
         queue!(stdout, MoveTo(0, y as u16), Clear(ClearType::CurrentLine))?;
         let mut bold = false;
         for cell in row {
-            let color = cell_color(cell);
-            if current_color != Some(color) {
-                queue!(stdout, SetForegroundColor(color))?;
-                current_color = Some(color);
-            }
             if cell.role == tui_renderer::GlyphRole::Text && !bold {
                 queue!(stdout, SetAttribute(Attribute::Bold))?;
                 bold = true;
@@ -302,36 +297,6 @@ fn draw(
         ResetColor
     )?;
     stdout.flush()
-}
-
-fn cell_color(cell: &tui_renderer::RenderedCell) -> Color {
-    match cell.role {
-        tui_renderer::GlyphRole::Text => Color::Rgb {
-            r: 255,
-            g: 255,
-            b: 255,
-        },
-        tui_renderer::GlyphRole::Sprite => Color::Rgb {
-            r: 255,
-            g: 204,
-            b: 112,
-        },
-        tui_renderer::GlyphRole::Detail => Color::Rgb {
-            r: 198,
-            g: 204,
-            b: 220,
-        },
-        tui_renderer::GlyphRole::Edge | tui_renderer::GlyphRole::Corner => Color::Rgb {
-            r: 164,
-            g: 176,
-            b: 196,
-        },
-        tui_renderer::GlyphRole::Fill => Color::Rgb {
-            r: 124,
-            g: 134,
-            b: 154,
-        },
-    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

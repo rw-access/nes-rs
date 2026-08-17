@@ -763,7 +763,7 @@ fn select_cell(cell: PerceptualCell, config: RendererConfig) -> RenderedCell {
         // silhouette priority over the generic edge grammar so characters do
         // not dissolve into a handful of thin lines at small terminal sizes.
         (
-            fill_glyph((tone + 0.18 + cell.contrast * 0.08).min(1.0)),
+            sprite_glyph((tone + 0.18 + cell.contrast * 0.08).min(1.0)),
             GlyphRole::Sprite,
         )
     } else if edge < EDGE_THRESHOLD && cell.sprite_weight < QUIET_BACKGROUND_SPRITE {
@@ -812,6 +812,15 @@ fn fill_glyph(tone: f32) -> char {
     const FILL: &[char] = &[' ', '.', ':', ';', '\'', '+', '*', '#', '%', '@'];
     let index = (tone.clamp(0.0, 1.0) * (FILL.len() - 1) as f32).round() as usize;
     FILL[index]
+}
+
+fn sprite_glyph(tone: f32) -> char {
+    // Sprites get a denser Unicode fill family instead of color. Braille is
+    // reserved for fine detail; these blocks make small characters read as
+    // silhouettes against the lighter background texture.
+    const SPRITE_FILL: &[char] = &['░', '▒', '▓', '█'];
+    let index = (tone.clamp(0.0, 1.0) * (SPRITE_FILL.len() - 1) as f32).round() as usize;
+    SPRITE_FILL[index]
 }
 
 fn break_long_vertical_edges(cells: &mut [RenderedCell], grid: TerminalGrid) {
@@ -1115,7 +1124,7 @@ mod tests {
         };
         let rendered = select_cell(cell, RendererConfig::default());
         assert_eq!(rendered.role, GlyphRole::Sprite);
-        assert_ne!(rendered.glyph, '│');
+        assert!(matches!(rendered.glyph, '░' | '▒' | '▓' | '█'));
     }
 
     #[test]
