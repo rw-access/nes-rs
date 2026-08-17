@@ -97,7 +97,7 @@ impl TextAtlas {
             }
         }
         if maximum - minimum < TEXT_CONTRAST_THRESHOLD {
-            return None;
+            return Some(' ');
         }
 
         let threshold = (minimum + maximum) * 0.5;
@@ -590,24 +590,17 @@ fn analyze_cell(
     let cells_per_tile_row = (grid.content_rows / NES_TEXT_ROWS).max(1);
     let tile_row = cell_y / cells_per_tile_row;
     let ocr_glyph = match text_atlas {
-        Some(atlas)
-            if cell_x < NES_TEXT_COLUMNS
-                && tile_row < NES_TEXT_ROWS
-                && cell_y % cells_per_tile_row == 0 =>
-        {
-            // Keep the decoded text compact: one terminal cell per NES
-            // character. On short terminals this crops the lower rows, while
-            // larger tile-aligned profiles put each decoded row at its first
-            // cell row.
-            atlas
-                .recognize(pixels, cell_x * 8, tile_row * 8)
-                .or(Some(' '))
+        Some(atlas) if cell_x < NES_TEXT_COLUMNS && tile_row < NES_TEXT_ROWS => {
+            if cell_y % cells_per_tile_row != 0 {
+                // Keep the decoded text compact: one terminal cell per NES
+                // character. On larger profiles, suppress the extra cell
+                // rows belonging to the same source tile.
+                Some(' ')
+            } else {
+                atlas.recognize(pixels, cell_x * 8, tile_row * 8)
+            }
         }
-        Some(_) => {
-            // Don't let the image grammar reintroduce noisy half-characters
-            // beside or between the compact decoded text cells.
-            Some(' ')
-        }
+        Some(_) => None,
         None => None,
     };
 
@@ -913,6 +906,17 @@ mod tests {
         assert!(grid.content_rows < NES_TEXT_ROWS);
         let cell = analyze_cell(&frame, LayerData::none(), grid, 0, 0, Some(&atlas));
         assert_eq!(cell.ocr_glyph, Some('R'));
+
+        let blank = flat(0x0d);
+        let cell = analyze_cell(&blank, LayerData::none(), grid, 0, 0, Some(&atlas));
+        assert_eq!(cell.ocr_glyph, Some(' '));
+
+        let mut artwork = flat(0x0d);
+        for row in 0..8 {
+            artwork[row][row] = 0x20;
+        }
+        let cell = analyze_cell(&artwork, LayerData::none(), grid, 0, 0, Some(&atlas));
+        assert_eq!(cell.ocr_glyph, None);
     }
 
     #[test]
