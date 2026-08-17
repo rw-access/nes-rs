@@ -258,7 +258,12 @@ fn draw(
     )?;
     for (y, row) in rendered.rows().enumerate() {
         let line: String = row.iter().map(|cell| cell.glyph).collect();
-        queue!(stdout, MoveTo(0, y as u16), Print(line))?;
+        queue!(
+            stdout,
+            MoveTo(0, y as u16),
+            Clear(ClearType::CurrentLine),
+            Print(line)
+        )?;
     }
 
     let status_y = rows.saturating_sub(2);
@@ -273,8 +278,10 @@ fn draw(
     queue!(
         stdout,
         MoveTo(0, status_y),
+        Clear(ClearType::CurrentLine),
         Print(status),
         MoveTo(0, rows.saturating_sub(1)),
+        Clear(ClearType::CurrentLine),
         Print(HELP_LINE),
         ResetColor
     )?;
