@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" role="img" aria-labelledby="title desc">
+  <title id="title">NES-inspired console hardware</title>
+  <desc id="desc">A bold warm-beige 8-bit console with a raised vent, front controls, and two controller ports.</desc>
+  <defs>
+    <linearGradient id="top" x1="0" y1="0" x2="0.75" y2="1"><stop offset="0" stop-color="#f2eee6"/><stop offset="0.58" stop-color="#e4dfd5"/><stop offset="1" stop-color="#c9c3b8"/></linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d6d1c8"/><stop offset="1" stop-color="#b9b4ac"/></linearGradient>
+    <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#bcb5ab"/><stop offset="1" stop-color="#958e85"/></linearGradient>
+    <filter id="shadow" x="-15%" y="-15%" width="135%" height="150%" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="13" stdDeviation="11" flood-color="#3e3933" flood-opacity="0.3"/></filter>
+    <filter id="button-shadow" x="-20%" y="-25%" width="140%" height="160%" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="5" stdDeviation="3" flood-color="#3e3933" flood-opacity="0.34"/></filter>
+  </defs>
+
+  <ellipse cx="500" cy="437" rx="420" ry="24" fill="#3e3933" opacity="0.2"/>
+  <g filter="url(#shadow)">
+    <!-- Three large molded planes establish the silhouette. -->
+    <path d="M72 116H846L924 193V396L874 450H116L42 373V193Z" fill="url(#wall)" stroke="#3b3a3d" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M51 193H910V296H51Z" fill="url(#face)"/>
+    <path d="M51 296H910V396L874 450H116L42 373V296Z" fill="#bcb7af"/>
+    <path d="M51 193L42 373L116 450V296H51Z" fill="#a9a39b" opacity="0.76"/>
+    <path d="M910 193L924 193V396L874 450V296H910Z" fill="#938c84" opacity="0.78"/>
+    <path d="M72 116H846L910 193H51Z" fill="url(#top)" stroke="#67645f" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M84 127H840L886 184H67Z" fill="#fffaf0" opacity="0.23"/>
+
+    <!-- One broad raised vent, with chunky ribs instead of fine linework. -->
+    <path d="M627 105H744L762 127V207H627Z" fill="#aca69d" stroke="#5c5b5c" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M631 105H744L756 121H631Z" fill="#858a8a"/>
+    <rect x="636" y="132" width="119" height="67" rx="4" fill="#d6d1c8"/>
+    <g fill="#a39e96"><rect x="641" y="140" width="109" height="7" rx="3"/><rect x="641" y="152" width="109" height="7" rx="3"/><rect x="641" y="164" width="109" height="7" rx="3"/><rect x="641" y="176" width="109" height="7" rx="3"/><rect x="641" y="188" width="109" height="7" rx="3"/></g>
+    <path d="M627 199H762V211H627Z" fill="#bdb7ae"/>
+
+    <!-- Simple front label plate. -->
+    <rect x="143" y="210" width="470" height="78" rx="8" fill="#e8e2d7" stroke="#76716b" stroke-width="5"/>
+    <rect x="153" y="220" width="450" height="58" rx="4" fill="#f1ece4" opacity="0.58"/>
+    <text x="174" y="247" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="22" font-weight="900">Nintendo</text>
+    <text x="176" y="266" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="10" letter-spacing="1.2">ENTERTAINMENT SYSTEM™</text>
+    <text x="176" y="280" fill="#a2615c" font-family="Arial, sans-serif" font-size="10" letter-spacing="1">NES VERSION</text>
+
+    <!-- Bold console controls. -->
+    <rect x="127" y="350" width="16" height="16" rx="3" fill="#3f4045" stroke="#222329" stroke-width="4"/>
+    <circle cx="135" cy="358" r="3" fill="#c94b45"/>
+    <g filter="url(#button-shadow)">
+      <rect x="170" y="345" width="108" height="47" rx="7" fill="#e4ded4" stroke="#5d5b60" stroke-width="5"/>
+      <rect x="300" y="345" width="108" height="47" rx="7" fill="#e4ded4" stroke="#5d5b60" stroke-width="5"/>
+    </g>
+    <text x="194" y="374" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="11" letter-spacing="0.8">POWER</text>
+    <text x="327" y="374" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="11" letter-spacing="0.8">RESET</text>
+
+    <!-- Single dark tower with two chunky ports. -->
+    <path d="M646 193H766V450H646Z" fill="#202126"/>
+    <path d="M646 193H766V296H646Z" fill="#25262c"/>
+    <path d="M646 296H766V308H646Z" fill="#111217"/>
+    <text x="682" y="328" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="13">1</text>
+    <text x="730" y="328" fill="#c94b45" font-family="Arial Black, Arial, sans-serif" font-size="13">2</text>
+    <g filter="url(#button-shadow)">
+      <rect x="662" y="338" width="38" height="76" rx="10" fill="#101116" stroke="#0a0b0f" stroke-width="5"/>
+      <rect x="712" y="338" width="38" height="76" rx="10" fill="#101116" stroke="#0a0b0f" stroke-width="5"/>
+    </g>
+    <g fill="#aaa49b">
+      <rect x="672" y="352" width="8" height="10" rx="2"/><rect x="684" y="352" width="8" height="10" rx="2"/><rect x="696" y="352" width="8" height="10" rx="2"/>
+      <rect x="672" y="370" width="8" height="10" rx="2"/><rect x="684" y="370" width="8" height="10" rx="2"/><rect x="696" y="370" width="8" height="10" rx="2"/>
+      <rect x="722" y="352" width="8" height="10" rx="2"/><rect x="734" y="352" width="8" height="10" rx="2"/><rect x="746" y="352" width="8" height="10" rx="2"/>
+      <rect x="722" y="370" width="8" height="10" rx="2"/><rect x="734" y="370" width="8" height="10" rx="2"/><rect x="746" y="370" width="8" height="10" rx="2"/>
+    </g>
+    <path d="M658 427H754" stroke="#515056" stroke-width="5" opacity="0.55"/>
+    <path d="M116 450H874" stroke="#eee8dd" stroke-width="5" opacity="0.26"/>
+  </g>
+</svg>

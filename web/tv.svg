@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Warm molded television shell, forked from the controller's flat-fill palette and depth language. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900" preserveAspectRatio="none" role="img" aria-labelledby="tv-title tv-desc">
+  <title id="tv-title">NES-inspired television shell</title>
+  <desc id="tv-desc">A warm beige molded television body with a dark screen recess and gray lower control tray.</desc>
+  <defs>
+    <filter id="body-shadow" x="-8%" y="-8%" width="116%" height="124%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#5b5043" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Rear thickness and front shell follow the controller's layered body treatment. -->
+  <rect x="7" y="18" width="986" height="857" rx="26" fill="#e8e2d7" filter="url(#body-shadow)"/>
+  <rect x="7" y="7" width="986" height="868" rx="26" fill="#ded8cd"/>
+  <path d="M21 703h958v145c0 6-5 11-11 11H32c-6 0-11-5-11-11Z" fill="#ded8cd"/>
+  <path d="M31 714h938c6 0 10 4 10 10v5H21v-5c0-6 4-10 10-10Z" fill="#f4eee4" opacity=".34"/>
+  <path d="M21 847h958v11H21Z" fill="#5b5043" opacity=".34"/>
+</svg>
