@@ -73,6 +73,7 @@ const image = context.createImageData(WIDTH, HEIGHT);
 const status = document.querySelector("#status");
 const romInput = document.querySelector("#rom-input");
 const audioButton = document.querySelector("#audio-button");
+const audioLabel = audioButton.querySelector(".tool-label");
 const snapshotButton = document.querySelector("#snapshot-button");
 const restoreButton = document.querySelector("#restore-button");
 const rewindButton = document.querySelector("#rewind-button");
@@ -190,13 +191,13 @@ class AudioScheduler {
   }
 
   updateButton() {
-    if (this.muted) {
-      audioButton.textContent = "Audio muted";
-    } else if (this.context?.state === "running") {
-      audioButton.textContent = "Audio enabled";
-    } else {
-      audioButton.textContent = "Enable audio";
-    }
+    const running = this.context?.state === "running";
+    const label = this.muted ? "MUTE" : "AUDIO";
+    const accessibleLabel = this.muted ? "Unmute audio" : running ? "Mute audio" : "Enable audio";
+    audioButton.dataset.muted = this.muted ? "true" : "false";
+    audioLabel.textContent = label;
+    audioButton.title = accessibleLabel;
+    audioButton.setAttribute("aria-label", accessibleLabel);
   }
 
   async enable() {
@@ -487,7 +488,10 @@ romInput.addEventListener("change", () => {
 romInput.addEventListener("click", () => { romInput.value = ""; });
 
 audioButton.addEventListener("click", async () => {
-  try { await audio.enable(); }
+  try {
+    if (audio.context?.state === "running") audio.toggleMute();
+    else await audio.enable();
+  }
   catch (error) {
     reportDebug("audio", error);
     setStatus(`Audio unavailable: ${error}`);

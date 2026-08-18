@@ -33,7 +33,7 @@ jobs:
       - name: Stage static site
         run: |
           mkdir -p _site/pkg
-          cp web/index.html web/app.js web/style.css _site/
+          cp web/index.html web/app.js web/style.css web/tv.svg web/controller.svg _site/
           cp -R web/pkg/. _site/pkg/
           touch _site/.nojekyll
 
