@@ -5,6 +5,10 @@
     "directory": "./_site"
   },
   "routes": [
+    { "pattern": "rw-access.dev/play/nes-rs", "zone_name": "rw-access.dev" },
+    { "pattern": "rw-access.dev/play/nes-rs/*", "zone_name": "rw-access.dev" },
+    { "pattern": "www.rw-access.dev/play/nes-rs", "zone_name": "rw-access.dev" },
+    { "pattern": "www.rw-access.dev/play/nes-rs/*", "zone_name": "rw-access.dev" },
     { "pattern": "rw-access.dev/nes-rs", "zone_name": "rw-access.dev" },
     { "pattern": "rw-access.dev/nes-rs/*", "zone_name": "rw-access.dev" },
     { "pattern": "www.rw-access.dev/nes-rs", "zone_name": "rw-access.dev" },

@@ -11,7 +11,10 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
   cargo install wasm-pack --locked
 fi
 wasm-pack build crates/nes-wasm --target web --release --out-dir ../../web/pkg
-mkdir -p _site/nes-rs/pkg
-cp web/index.html web/app.js web/style.css web/tv.svg web/controller.svg _site/nes-rs/
-cp -R web/pkg/. _site/nes-rs/pkg/
-touch _site/nes-rs/.nojekyll
+# Publish the /play/ URL and preserve the previous prefix for bookmarks.
+for asset_dir in _site/play/nes-rs _site/nes-rs; do
+  mkdir -p "$asset_dir/pkg"
+  cp web/index.html web/app.js web/style.css web/tv.svg web/controller.svg "$asset_dir/"
+  cp -R web/pkg/. "$asset_dir/pkg/"
+  touch "$asset_dir/.nojekyll"
+done

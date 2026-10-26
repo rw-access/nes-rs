@@ -1,7 +1,7 @@
 # nes-rs
 NES emulator in Rust
 
-[Try the WASM demo](https://rw-access.dev/nes-rs/)
+[Try the WASM demo](https://rw-access.dev/play/nes-rs/)
 
 ## Headless test ROM runner
 
@@ -168,15 +168,16 @@ GitHub Pages).
 
 #### Cloudflare Workers Builds
 
-The `wrangler.jsonc` config serves this frontend at `rw-access.dev/nes-rs/`.
+The `wrangler.jsonc` config serves this frontend at `rw-access.dev/play/nes-rs/`.
 For a Cloudflare Worker connected to this repository, use:
 
 - Build command: `bash scripts/build-cloudflare.sh`
 - Deploy command: `npx --yes wrangler@4.152.0 deploy`
 
 The build stages only the browser app and generated WASM package under
-`_site/nes-rs/`; native code, test ROMs, and other repository files are not
-uploaded as site assets.
+`_site/play/nes-rs/`; native code, test ROMs, and other repository files are not
+uploaded as site assets. The previous `/nes-rs/` URLs are also staged and routed
+to this Worker so existing bookmarks keep working.
 
 The default keyboard mapping is:
 
