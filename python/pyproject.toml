@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=83,<86"]
+requires = ["setuptools>=84.1.0,<86"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
@@ -22,7 +22,7 @@ dev = [
 
 [tool.uv]
 package = true
-override-dependencies = ["setuptools>=83,<86"]
+override-dependencies = ["setuptools>=84.1.0,<86"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
