@@ -166,6 +166,18 @@ it, open the repository's **Settings → Pages** page and set **Source** to
 at `https://<owner>.github.io/nes-rs/` (or the custom domain configured in
 GitHub Pages).
 
+#### Cloudflare Workers Builds
+
+The `wrangler.jsonc` config serves this frontend at `rw-access.dev/nes-rs/`.
+For a Cloudflare Worker connected to this repository, use:
+
+- Build command: `bash scripts/build-cloudflare.sh`
+- Deploy command: `npx --yes wrangler@4.152.0 deploy`
+
+The build stages only the browser app and generated WASM package under
+`_site/nes-rs/`; native code, test ROMs, and other repository files are not
+uploaded as site assets.
+
 The default keyboard mapping is:
 
 | NES button | Keyboard |

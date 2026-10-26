@@ -29,3 +29,6 @@ Cargo.lock
 /.idea
 
 # ROMs/testing®
+/_site/
+.dev.vars
+.wrangler/
