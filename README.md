@@ -176,8 +176,8 @@ For a Cloudflare Worker connected to this repository, use:
 
 The build stages only the browser app and generated WASM package under
 `_site/play/nes-rs/`; native code, test ROMs, and other repository files are not
-uploaded as site assets. The portfolio Worker redirects retired `/nes-rs/` URLs
-to `/play/nes-rs/`; this Worker serves only the canonical game path.
+uploaded as site assets. This Worker serves only the canonical `/play/nes-rs/`
+game path.
 
 The default keyboard mapping is:
 
