@@ -32,3 +32,6 @@ Cargo.lock
 /_site/
 .dev.vars
 .wrangler/
+
+# Local operational notes and deployment records
+/plans/private/

@@ -2,106 +2,198 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>nes-rs — 8-bit browser console</title>
-    <link rel="stylesheet" href="style.css?v=21">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111217">
+    <title>nes-rs — cardboard viewbox</title>
+    <link rel="stylesheet" href="style.css?v=85">
   </head>
   <body>
-    <main class="shell">
-      <section class="console" aria-label="NES-inspired television">
-        <p id="status" class="sr-only" role="status">Choose an iNES ROM to begin.</p>
-        <img class="tv-art" src="tv.svg" alt="">
-        <section class="screen-wrap" aria-label="NES screen">
-          <div class="screen-bezel">
-            <canvas id="screen" width="256" height="240"></canvas>
-          </div>
-        </section>
+    <main class="app-shell">
+      <p id="status" class="sr-only" role="status">Choose an iNES ROM to begin.</p>
 
-        <div class="console-front">
-          <div class="console-controls" aria-label="Television controls">
-            <span class="power-cluster"><i class="power-led"></i><b>POWER</b></span>
-            <span class="console-physical-button">RESET</span>
-            <label class="console-physical-button file-button" for="rom-input" title="Load ROM">
-              <span class="button-icon" aria-hidden="true">↥</span><span class="button-label">LOAD</span>
-              <input id="rom-input" type="file" accept=".nes,application/octet-stream">
-            </label>
+      <header class="toolbar" aria-label="Emulator toolbar">
+        <div class="toolbar-primary">
+          <label class="rom-picker" for="rom-input" title="Load a ROM">
+            <span aria-hidden="true">＋</span><span>Load ROM</span>
+            <input id="rom-input" type="file" accept=".nes,application/octet-stream">
+          </label>
+          <div class="toolbar-actions" aria-label="Playback and display">
+            <button id="audio-button" type="button" aria-label="Enable audio" title="Enable audio">
+              <span class="tool-label">Audio</span>
+            </button>
+            <button id="effects-button" type="button" aria-pressed="true" title="Toggle 2.5D effects">2.5D</button>
+            <button id="effects-settings-button" type="button" aria-label="2.5D settings" title="2.5D settings" aria-expanded="false" aria-controls="effects-settings">Settings</button>
+            <button id="motion-button" type="button" aria-pressed="false" aria-describedby="motion-status" title="Enable phone tilt">Tilt</button>
+            <button id="motion-recenter-button" type="button" aria-label="Recenter view" title="Recenter view" hidden>Recenter</button>
           </div>
-          <span class="console-badge">Nintendo <small>COLOR TV</small></span>
         </div>
-      </section>
+        <div class="toolbar-secondary" aria-label="Save and recording">
+          <button id="snapshot-button" type="button" title="Save state" disabled>Save</button>
+          <button id="restore-button" type="button" title="Restore state" disabled>Restore</button>
+          <button id="rewind-button" type="button" title="Rewind while held" disabled>Rewind</button>
+          <button id="record-button" class="record-button" type="button" title="Start recording" disabled>Rec</button>
+          <button id="stop-record-button" type="button" title="Stop recording and upload" disabled>Stop</button>
+          <span id="recording-status" class="sr-only" role="status">Recording is off</span>
+        </div>
+      </header>
 
-      <section class="utility-panel" aria-label="Emulator tools">
-          <div class="utility-group primary-tools">
-            <p class="panel-label">GAME DECK</p>
-            <div class="button-row">
-              <button id="audio-button" type="button" aria-label="Enable audio" title="Enable audio">
-                <span class="tool-icon audio-on-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10"/></svg></span>
-                <span class="tool-icon audio-off-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="m17 9 5 6m0-6-5 6"/></svg></span>
-                <span class="tool-label">AUDIO</span>
-              </button>
-            </div>
-          </div>
-          <div class="utility-group state-tools">
-            <p class="panel-label">STATE MEMORY</p>
-            <div class="button-row">
-              <button id="snapshot-button" type="button" aria-label="Save state" title="Save state" disabled>
-                <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M5 4h11l3 3v13H5Z"/><path d="M8 4v6h8V5M8 20v-6h8v6"/></svg></span><span class="tool-label">SAVE</span>
-              </button>
-              <button id="restore-button" type="button" aria-label="Restore state" title="Restore state" disabled>
-                <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M5 8a8 8 0 1 1 2 8"/><path d="M5 4v4h4"/></svg></span><span class="tool-label">RESTORE</span>
-              </button>
-              <button id="rewind-button" type="button" aria-label="Rewind" title="Rewind while held" disabled>
-                <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M7 7H3m0 0 4-4M3 7a9 9 0 1 1 2 10"/></svg></span><span class="tool-label">REWIND</span>
-              </button>
-            </div>
-          </div>
-          <div class="utility-group record-tools">
-            <p class="panel-label">PLAYBACK RECORDER</p>
-            <div class="button-row">
-              <button id="record-button" class="record-button" type="button" aria-label="Start recording" title="Start recording" disabled>
-                <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="7.5"/></svg></span><span class="tool-label">REC</span>
-              </button>
-              <button id="stop-record-button" type="button" aria-label="Stop recording and upload" title="Stop recording and upload" disabled>
-                <span class="tool-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><rect x="4.5" y="4.5" width="15" height="15" rx="1"/></svg></span><span class="tool-label">STOP</span>
-              </button>
-            </div>
-            <span id="recording-status" class="recording-status sr-only" role="status">Recording is off</span>
-          </div>
-          <a class="github-tray-link" href="https://github.com/rw-access/nes-rs" target="_blank" rel="noreferrer" aria-label="Open nes-rs on GitHub" title="Open nes-rs on GitHub">
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577l-.015-2.234c-3.338.726-4.042-1.416-4.042-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.084-.729.084-.729 1.205.084 1.84 1.237 1.84 1.237 1.07 1.835 2.809 1.305 3.495.998.108-.776.418-1.305.762-1.604-2.665-.304-5.466-1.332-5.466-5.931 0-1.31.465-2.381 1.235-3.221-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.296-1.23 3.296-1.23.647 1.653.24 2.873.12 3.176.765.84 1.23 1.911 1.23 3.221 0 4.61-2.806 5.624-5.476 5.921.43.372.823 1.102.823 2.222l-.012 3.293c0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
-            </svg>
-          </a>
-      </section>
+      <p id="motion-status" class="motion-status" role="status" aria-live="polite" hidden></p>
 
-      <section class="control-deck" aria-label="Console controls and touch controls">
-        <div class="deck-heading"><span>CONTROLLER 01</span><span>WIRED INPUT / READY</span></div>
-        <div class="controller">
-          <div class="controller-art">
-            <!-- Controller vector source: https://commons.wikimedia.org/wiki/File:Nes_controller.svg -->
-            <img src="controller.svg" alt="NES-inspired wired controller with a directional pad, Select and Start buttons, and red A and B buttons">
-            <div class="controller-hitboxes" aria-label="Touch controls">
-              <div class="dpad-hitbox" aria-label="Directional pad">
-                <button class="hit-up" data-button="up" aria-label="Up"></button>
-                <button class="hit-left" data-button="left" aria-label="Left"></button>
-                <button class="hit-down" data-button="down" aria-label="Down"></button>
-                <button class="hit-right" data-button="right" aria-label="Right"></button>
+      <section class="game-panel" aria-label="Game screen">
+        <div class="screen-wrap" data-rim="true">
+          <div id="screen-stage" data-depth="false">
+            <div id="screen-scene">
+              <canvas id="screen" width="256" height="240" aria-label="Game screen"></canvas>
+              <div id="depth-stack" aria-hidden="true">
+                <canvas width="256" height="240"></canvas>
+                <canvas width="256" height="240"></canvas>
+                <canvas width="256" height="240"></canvas>
+                <canvas width="256" height="240"></canvas>
               </div>
-              <div class="menu-hitbox">
-                <button data-button="select" aria-label="Select"></button>
-                <button data-button="start" aria-label="Start"></button>
-              </div>
-              <div class="face-hitbox">
-                <button data-button="b" aria-label="B">B</button>
-                <button data-button="a" aria-label="A">A</button>
-              </div>
+              <canvas id="depth-ghosts" width="256" height="240" aria-hidden="true"></canvas>
             </div>
           </div>
         </div>
       </section>
 
-      <footer class="hint"><span class="hint-key">HOW TO PLAY</span> WASD / arrows move <i></i> J K or Z X fire <i></i> Shift + Enter select / start <i></i> R rewind <i></i> M mute <i></i> V cycle layers</footer>
+      <section class="touch-controls" aria-label="Touch controls">
+        <div class="controller-hitboxes">
+          <div class="dpad-hitbox" aria-label="Directional pad">
+            <button class="hit-up" data-button="up" aria-label="Up"><span aria-hidden="true">▲</span></button>
+            <button class="hit-left" data-button="left" aria-label="Left"><span aria-hidden="true">◀</span></button>
+            <button class="hit-down" data-button="down" aria-label="Down"><span aria-hidden="true">▼</span></button>
+            <button class="hit-right" data-button="right" aria-label="Right"><span aria-hidden="true">▶</span></button>
+          </div>
+          <div class="menu-hitbox" aria-label="Menu buttons">
+            <button data-button="select" aria-label="Select">Select</button>
+            <button data-button="start" aria-label="Start">Start</button>
+          </div>
+          <div class="face-hitbox" aria-label="Action buttons">
+            <button data-button="b" aria-label="B">B</button>
+            <button data-button="a" aria-label="A">A</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="effects-settings" class="presentation-panel" aria-label="2.5D settings" hidden>
+        <div class="presentation-controls">
+          <fieldset class="settings-group scene-group">
+            <legend>Scene geometry</legend>
+            <div class="group-controls">
+              <label for="depth-input">
+                <span>Background separation <output id="depth-value" for="depth-input">85 game px</output></span>
+                <input id="depth-input" type="range" min="0" max="115" step="1" value="85" aria-describedby="depth-hint">
+                <small id="depth-hint">Native NES pixels (256 × 240) · Zero restores a flat scene</small>
+              </label>
+              <label for="thickness-input">
+                <span>Card thickness <output id="thickness-value" for="thickness-input">4 game px</output></span>
+                <input id="thickness-input" type="range" min="0" max="8" step="1" value="4" aria-describedby="thickness-hint">
+                <small id="thickness-hint">Native NES pixels · Independent of backdrop distance</small>
+              </label>
+              <label for="rim-width-input">
+                <span>Rim width <output id="rim-width-value" for="rim-width-input">2%</output></span>
+                <input id="rim-width-input" type="range" min="0" max="100" step="1" value="2" aria-describedby="rim-width-hint">
+                <small id="rim-width-hint">Fraction of maximum frame width · Actual size shown in game pixels</small>
+              </label>
+              <label for="rim-thickness-input">
+                <span>Rim thickness <output id="rim-thickness-value" for="rim-thickness-input">25% of foreground</output></span>
+                <input id="rim-thickness-input" type="range" min="0" max="100" step="1" value="25" aria-describedby="rim-thickness-hint">
+                <small id="rim-thickness-hint">Percentage of foreground thickness · Limited by available gap</small>
+              </label>
+              <label for="rim-recess-input">
+                <span>Rim recess <output id="rim-recess-value" for="rim-recess-input">5% of gap</output></span>
+                <input id="rim-recess-input" type="range" min="0" max="100" step="1" value="5" aria-describedby="rim-recess-hint">
+                <small id="rim-recess-hint">Percentage of card gap · Zero is flush · Gameplay stays fixed</small>
+              </label>
+              <div class="surface-options">
+                <label for="solid-sides-input"><input id="solid-sides-input" type="checkbox" checked>Solid sides</label>
+                <label for="sprite-relief-input"><input id="sprite-relief-input" type="checkbox" checked aria-describedby="sprite-relief-hint">Layer relief</label>
+                <label class="sprite-relief-style" for="sprite-relief-style">
+                  <span>Relief style</span>
+                  <select id="sprite-relief-style" aria-describedby="sprite-relief-hint">
+                    <option value="shadows">Shadows only</option>
+                    <option value="contact" selected>Thickness + shadows</option>
+                    <option value="cutout">Forced cutouts + shadows</option>
+                  </select>
+                  <small id="sprite-relief-hint">Sprites and tiles · Faces stay aligned · Uses card thickness and shadow softness</small>
+                </label>
+                <label for="thin-overlaps-input"><input id="thin-overlaps-input" type="checkbox" checked aria-describedby="thin-overlaps-hint">Thin overlaps (⅓ thickness)</label>
+                <small id="thin-overlaps-hint">Full thickness against the backdrop · Thin edges over other artwork</small>
+                <label for="rim-input"><input id="rim-input" type="checkbox" checked>Rim</label>
+                <label for="recessed-opening-input"><input id="recessed-opening-input" type="checkbox" aria-describedby="recessed-opening-hint">Recessed opening</label>
+                <small id="recessed-opening-hint">Keep the inset opening when Rim is off</small>
+                <label for="console-edge-input"><input id="console-edge-input" type="checkbox">Shell-colored edge</label>
+              </div>
+            </div>
+          </fieldset>
+          <fieldset class="settings-group viewing-group">
+            <legend>Viewing setup</legend>
+            <div class="group-controls">
+              <label class="viewing-profile" for="motion-tracking-input">
+                <span>View tracking</span>
+                <select id="motion-tracking-input" aria-describedby="motion-tracking-hint">
+                  <option value="look" selected>Look around — sideways peeking</option>
+                  <option value="gravity">Ground stable — ignores room turns</option>
+                </select>
+                <small id="motion-tracking-hint">Look around follows gyro rotation · Recenter after turning your body · Changing modes recenters</small>
+              </label>
+              <label for="motion-strength-input">
+                <span>Motion strength <output id="motion-strength-value" for="motion-strength-input">50%</output></span>
+                <input id="motion-strength-input" type="range" min="0" max="100" step="1" value="50" disabled aria-describedby="motion-strength-hint">
+                <small id="motion-strength-hint">Adjust the viewing response · Recenter resets your comfortable hold</small>
+              </label>
+              <label for="viewing-distance-input">
+                <span>Viewing distance <output id="viewing-distance-value" for="viewing-distance-input">~35 cm</output></span>
+                <input id="viewing-distance-input" type="range" min="20" max="100" step="1" value="35" aria-describedby="viewing-distance-hint">
+                <small id="viewing-distance-hint">Estimated eyes-to-screen distance · Changes perspective and tilt together</small>
+              </label>
+              <label class="viewing-profile" for="screen-profile-input">
+                <span>Screen size</span>
+                <select id="screen-profile-input" aria-describedby="screen-profile-hint">
+                  <option value="auto">Auto estimate</option>
+                  <option value="phone">Phone</option>
+                  <option value="large-phone">Large phone</option>
+                  <option value="tablet-11">11-inch tablet</option>
+                  <option value="tablet-13">13-inch tablet</option>
+                </select>
+                <small id="screen-profile-hint">Approximate physical size · Choose manually if Auto feels wrong</small>
+              </label>
+            </div>
+          </fieldset>
+          <fieldset class="settings-group lighting-group">
+            <legend>Lighting</legend>
+            <div class="group-controls">
+              <label for="light-distance-input">
+                <span>Light distance <output id="light-distance-value" for="light-distance-input">25 cm</output></span>
+                <input id="light-distance-input" type="range" min="5" max="300" step="1" value="25" aria-describedby="light-distance-hint">
+                <small id="light-distance-hint">Fixed out from the initial phone position · Recenter places it again</small>
+              </label>
+              <label for="light-elevation-input">
+                <span>Light elevation <output id="light-elevation-value" for="light-elevation-input">7°</output></span>
+                <input id="light-elevation-input" type="range" min="0" max="80" step="1" value="7" aria-describedby="light-elevation-hint">
+                <small id="light-elevation-hint">Angle above the initial screen normal · Independent of viewing distance</small>
+              </label>
+              <label for="softness-input">
+                <span>Shadow softness <output id="softness-value" for="softness-input">18%</output></span>
+                <input id="softness-input" type="range" min="0" max="100" step="1" value="18" aria-describedby="softness-hint">
+                <small id="softness-hint">Crisp edges to diffuse shadows</small>
+              </label>
+              <label for="rim-softness-input">
+                <span>Rim shadow softness <output id="rim-softness-value" for="rim-softness-input">100%</output></span>
+                <input id="rim-softness-input" type="range" min="0" max="100" step="1" value="100" aria-describedby="rim-softness-hint">
+                <small id="rim-softness-hint">Rim shadow only · Independent of gameplay shadows</small>
+              </label>
+              <label class="lighting-toggle" for="diorama-input"><input id="diorama-input" type="checkbox" checked>Rim shadow</label>
+            </div>
+          </fieldset>
+        </div>
+        <footer class="settings-footer" aria-label="2.5D settings actions">
+          <button id="reset-effects-settings-button" type="button" aria-label="Reset 2.5D settings to defaults" title="Restore every 2.5D setting to its default">Reset defaults</button>
+        </footer>
+      </section>
+
+      <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · Shift + Enter · R rewind · M mute · V layers</footer>
     </main>
-    <script type="module" src="app.js?v=21"></script>
+    <script type="module" src="app.js?v=85"></script>
   </body>
 </html>

@@ -14,6 +14,6 @@ wasm-pack build crates/nes-wasm --target web --release --out-dir ../../web/pkg
 # Clear generated output so retired URL prefixes are not uploaded again.
 rm -rf _site
 mkdir -p _site/play/nes-rs/pkg
-cp web/index.html web/app.js web/style.css web/tv.svg web/controller.svg _site/play/nes-rs/
+cp web/index.html web/style.css web/*.js _site/play/nes-rs/
 cp -R web/pkg/. _site/play/nes-rs/pkg/
 touch _site/play/nes-rs/.nojekyll

@@ -2,6 +2,17 @@ use std::cell::Cell;
 
 use crate::dsp::FirstOrderFilter;
 
+#[cfg(feature = "audio-stems")]
+use crate::console::AudioStems;
+
+/// One sample at an APU sample edge, with optional attributed channel output.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AudioSample {
+    pub(crate) mono: f32,
+    #[cfg(feature = "audio-stems")]
+    pub(crate) stems: AudioStems,
+}
+
 const LENGTH_COUNTER_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
     192, 24, 72, 26, 16, 28, 32, 30,
@@ -553,6 +564,8 @@ pub(crate) struct APU {
     on_apu_cycle: bool,
 
     first_order_filters: [FirstOrderFilter; 3],
+    #[cfg(feature = "audio-stems")]
+    stem_filters: [[FirstOrderFilter; 3]; 5],
 }
 
 impl Default for APU {
@@ -586,6 +599,14 @@ impl Default for APU {
                 FirstOrderFilter::high_pass(48_000.0, 440.0),
                 FirstOrderFilter::low_pass(48_000.0, 14_000.0),
             ],
+            #[cfg(feature = "audio-stems")]
+            stem_filters: std::array::from_fn(|_| {
+                [
+                    FirstOrderFilter::high_pass(48_000.0, 90.0),
+                    FirstOrderFilter::high_pass(48_000.0, 440.0),
+                    FirstOrderFilter::low_pass(48_000.0, 14_000.0),
+                ]
+            }),
         }
     }
 }
@@ -700,7 +721,7 @@ impl APU {
     #[cfg(feature = "timestamped-scheduler")]
     fn advance_timestamped_batched<G>(&mut self, cycles: u64, process_sample: &mut G)
     where
-        G: FnMut(f32),
+        G: FnMut(AudioSample),
     {
         let mut remaining = cycles;
         while remaining != 0 {
@@ -719,7 +740,7 @@ impl APU {
     }
 
     #[cfg(feature = "timestamped-scheduler")]
-    fn advance_timestamped_segment(&mut self, cycles: u64) -> Option<f32> {
+    fn advance_timestamped_segment(&mut self, cycles: u64) -> Option<AudioSample> {
         debug_assert!(cycles != 0);
 
         let apu_ticks = if self.on_apu_cycle {
@@ -766,7 +787,7 @@ impl APU {
         self.advance_frame_counter_segment(cycles);
 
         let sample = if self.on_sample_edge {
-            Some(self.sample())
+            Some(self.sample_with_output())
         } else {
             None
         };
@@ -824,11 +845,26 @@ impl APU {
     pub(crate) fn advance_cpu_cycles<F, G>(
         &mut self,
         cycles: u64,
-        mut read_memory: F,
+        read_memory: F,
         mut process_sample: G,
     ) where
         F: FnMut(u16) -> u8,
         G: FnMut(f32),
+    {
+        self.advance_cpu_cycles_with_output(cycles, read_memory, |sample| {
+            process_sample(sample.mono)
+        });
+    }
+
+    #[cfg(feature = "timestamped-scheduler")]
+    pub(crate) fn advance_cpu_cycles_with_output<F, G>(
+        &mut self,
+        cycles: u64,
+        mut read_memory: F,
+        mut process_sample: G,
+    ) where
+        F: FnMut(u16) -> u8,
+        G: FnMut(AudioSample),
     {
         if self.can_batch_timestamped() {
             self.advance_timestamped_batched(cycles, &mut process_sample);
@@ -836,7 +872,7 @@ impl APU {
         }
 
         for _ in 0..cycles {
-            if let Some(sample) = self.step(&mut read_memory) {
+            if let Some(sample) = self.step_with_output(&mut read_memory) {
                 process_sample(sample);
             }
         }
@@ -857,7 +893,14 @@ impl APU {
         self.on_apu_cycle = !self.on_apu_cycle;
     }
 
-    pub(crate) fn step<F: FnMut(u16) -> u8>(&mut self, mut read_memory: F) -> Option<f32> {
+    pub(crate) fn step<F: FnMut(u16) -> u8>(&mut self, read_memory: F) -> Option<f32> {
+        self.step_with_output(read_memory).map(|sample| sample.mono)
+    }
+
+    pub(crate) fn step_with_output<F: FnMut(u16) -> u8>(
+        &mut self,
+        mut read_memory: F,
+    ) -> Option<AudioSample> {
         self.dmc.step_dma(&mut read_memory);
 
         if self.on_apu_cycle {
@@ -874,7 +917,7 @@ impl APU {
         self.step_frame_counter();
 
         let sample = if self.on_sample_edge {
-            Some(self.sample())
+            Some(self.sample_with_output())
         } else {
             None
         };
@@ -998,6 +1041,70 @@ impl APU {
         }
 
         sampled
+    }
+
+    fn sample_with_output(&mut self) -> AudioSample {
+        // Keep the legacy mono arithmetic and filter order as its own path.
+        let mono = self.sample();
+        #[cfg(feature = "audio-stems")]
+        {
+            let stems = self.mixed_stems();
+            let stems = std::array::from_fn(|channel| {
+                let mut value = stems[channel];
+                for filter in self.stem_filters[channel].iter_mut() {
+                    value = filter.filter(value);
+                }
+                value
+            });
+            AudioSample { mono, stems }
+        }
+        #[cfg(not(feature = "audio-stems"))]
+        {
+            AudioSample { mono }
+        }
+    }
+
+    #[cfg(feature = "audio-stems")]
+    fn mixed_stems(&self) -> AudioStems {
+        let pulse_1 = if self.channel_mask.pulse1 {
+            self.pulses[0].sample()
+        } else {
+            0
+        };
+        let pulse_2 = if self.channel_mask.pulse2 {
+            self.pulses[1].sample()
+        } else {
+            0
+        };
+        let triangle = if self.channel_mask.triangle {
+            self.triangle.sample()
+        } else {
+            0
+        };
+        let noise = if self.channel_mask.noise {
+            self.noise.sample()
+        } else {
+            0
+        };
+
+        let pulse_total = PULSE_TABLE[(pulse_1 + pulse_2) as usize];
+        let tnd_total = TND_TABLE[(3 * triangle + 2 * noise + self.dmc.output_level) as usize];
+        let pulse_parts = apportion(pulse_total, [pulse_1 as f32, pulse_2 as f32]);
+        let tnd_parts = apportion(
+            tnd_total,
+            [
+                (3 * triangle) as f32,
+                (2 * noise) as f32,
+                self.dmc.output_level as f32,
+            ],
+        );
+        [
+            pulse_parts[0],
+            pulse_parts[1],
+            tnd_parts[0],
+            tnd_parts[1],
+            tnd_parts[2],
+        ]
     }
 
     // Only supports 0x4015
@@ -1136,9 +1243,158 @@ impl APU {
     }
 }
 
+#[cfg(feature = "audio-stems")]
+fn apportion<const N: usize>(total: f32, weights: [f32; N]) -> [f32; N] {
+    let mut result = [0.0; N];
+    let sum: f32 = weights.iter().sum();
+    if sum == 0.0 {
+        return result;
+    }
+
+    let last_active = weights.iter().rposition(|&weight| weight != 0.0).unwrap();
+    let mut assigned = 0.0;
+    for (index, &weight) in weights.iter().enumerate() {
+        if weight == 0.0 {
+            continue;
+        }
+        let part = if index == last_active {
+            total - assigned
+        } else {
+            total * (weight / sum)
+        };
+        result[index] = part;
+        assigned += part;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "audio-stems")]
+    #[test]
+    fn stem_attribution_covers_legal_group_inputs_and_exact_silence() {
+        for pulse_1 in 0..=15 {
+            for pulse_2 in 0..=15 {
+                let total = PULSE_TABLE[(pulse_1 + pulse_2) as usize];
+                let stems = apportion(total, [pulse_1 as f32, pulse_2 as f32]);
+                assert!((stems.iter().sum::<f32>() - total).abs() < 1e-6);
+                if pulse_1 == 0 {
+                    assert_eq!(stems[0], 0.0);
+                }
+                if pulse_2 == 0 {
+                    assert_eq!(stems[1], 0.0);
+                }
+            }
+        }
+
+        for triangle in 0..=15 {
+            for noise in 0..=15 {
+                for dmc in 0..=127 {
+                    let total = TND_TABLE[(3 * triangle + 2 * noise + dmc) as usize];
+                    let stems = apportion(
+                        total,
+                        [(3 * triangle) as f32, (2 * noise) as f32, dmc as f32],
+                    );
+                    assert!((stems.iter().sum::<f32>() - total).abs() < 1e-6);
+                    if triangle == 0 {
+                        assert_eq!(stems[0], 0.0);
+                    }
+                    if noise == 0 {
+                        assert_eq!(stems[1], 0.0);
+                    }
+                    if dmc == 0 {
+                        assert_eq!(stems[2], 0.0);
+                    }
+                }
+            }
+        }
+        assert_eq!(apportion(0.0, [0.0, 0.0]), [0.0, 0.0]);
+        assert_eq!(apportion(0.0, [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[cfg(feature = "audio-stems")]
+    #[test]
+    fn identical_stem_filters_reconstruct_mono_and_clone_histories() {
+        let mut mono_filter = [
+            FirstOrderFilter::high_pass(48_000.0, 90.0),
+            FirstOrderFilter::high_pass(48_000.0, 440.0),
+            FirstOrderFilter::low_pass(48_000.0, 14_000.0),
+        ];
+        let mut stem_filters: [[FirstOrderFilter; 3]; 5] = std::array::from_fn(|_| {
+            [
+                FirstOrderFilter::high_pass(48_000.0, 90.0),
+                FirstOrderFilter::high_pass(48_000.0, 440.0),
+                FirstOrderFilter::low_pass(48_000.0, 14_000.0),
+            ]
+        });
+        let mut seed = 0x1234_5678u32;
+        let mut worst_error = 0.0f32;
+        for _ in 0..12_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let p1 = ((seed >> 24) & 15) as usize;
+            let p2 = ((seed >> 20) & 15) as usize;
+            let triangle = ((seed >> 16) & 15) as usize;
+            let noise = ((seed >> 12) & 15) as usize;
+            let dmc = ((seed >> 5) & 127) as usize;
+            let pulse_total = PULSE_TABLE[p1 + p2];
+            let tnd_total = TND_TABLE[3 * triangle + 2 * noise + dmc];
+            let pulse_parts = apportion(pulse_total, [p1 as f32, p2 as f32]);
+            let tnd_parts = apportion(
+                tnd_total,
+                [(3 * triangle) as f32, (2 * noise) as f32, dmc as f32],
+            );
+            let stems = [
+                pulse_parts[0],
+                pulse_parts[1],
+                tnd_parts[0],
+                tnd_parts[1],
+                tnd_parts[2],
+            ];
+            let mut mono = pulse_total + tnd_total;
+            for filter in &mut mono_filter {
+                mono = filter.filter(mono);
+            }
+            let filtered: [f32; 5] = std::array::from_fn(|channel| {
+                let mut sample = stems[channel];
+                for filter in &mut stem_filters[channel] {
+                    sample = filter.filter(sample);
+                }
+                sample
+            });
+            worst_error = worst_error.max((filtered.iter().sum::<f32>() - mono).abs());
+        }
+        assert!(worst_error < 1e-5, "max stem/mono difference {worst_error}");
+
+        let mut original = APU::default();
+        original.pulses[0].enabled = true;
+        original.pulses[0].length_counter = 1;
+        original.pulses[0].timer_period = 8;
+        original.pulses[0].duty_type = 3;
+        original.pulses[0].volume_envelope.use_constant_volume = true;
+        original.pulses[0].volume_envelope.period_or_constant_volume = 12;
+        original.triangle.enabled = true;
+        original.triangle.timer_period = 1;
+        original.triangle.length_counter = 1;
+        original.triangle.linear_counter_offset = 1;
+        let mut mono_reference = original.clone();
+        for frame in 0..200 {
+            original.dmc.output_level = (frame % 128) as u8;
+            mono_reference.dmc.output_level = original.dmc.output_level;
+            let output = original.sample_with_output();
+            assert_eq!(output.mono.to_bits(), mono_reference.sample().to_bits());
+        }
+        let mut restored = original.clone();
+        for _ in 0..100 {
+            original.dmc.output_level = (original.dmc.output_level + 31) & 0x7f;
+            restored.dmc.output_level = original.dmc.output_level;
+            let a = original.sample_with_output();
+            let b = restored.sample_with_output();
+            assert_eq!(a.mono.to_bits(), b.mono.to_bits());
+            assert_eq!(a.stems.map(f32::to_bits), b.stems.map(f32::to_bits));
+        }
+    }
 
     #[cfg(feature = "timestamped-scheduler")]
     #[test]

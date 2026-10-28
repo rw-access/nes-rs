@@ -1,4 +1,4 @@
-use crate::apu::ChannelMask;
+use crate::apu::{AudioSample, ChannelMask};
 use crate::{
     bus::MemoryBus,
     cartridge::{Cartridge, Mapper, MapperInstance},
@@ -21,6 +21,12 @@ use crate::cartridge::NROM;
 pub use crate::video::{FRAME_HEIGHT, FRAME_WIDTH};
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+#[cfg(feature = "audio-stems")]
+/// Number of attributed NES channels in each stem sample frame.
+pub const AUDIO_STEM_CHANNELS: usize = 5;
+#[cfg(feature = "audio-stems")]
+/// Per-sample channel order: Pulse 1, Pulse 2, Triangle, Noise, DMC.
+pub type AudioStems = [f32; AUDIO_STEM_CHANNELS];
 pub const CPU_RAM_BYTES: usize = 0x800;
 
 /// Selects whether the PPU writes final palette values to the framebuffer.
@@ -45,6 +51,9 @@ pub struct FrameOutput<'a> {
     #[cfg(feature = "layered-render")]
     pub ghost_layers: &'a [GhostLayer],
     pub audio_samples: &'a [f32],
+    #[cfg(feature = "audio-stems")]
+    /// Five attributed channels at the same sample edges as `audio_samples`.
+    pub audio_stems: &'a [AudioStems],
     pub audio_sample_rate: u32,
     pub audio_discontinuity: bool,
 }
@@ -91,14 +100,18 @@ impl ConsoleState {
         self.frame_number
     }
 
-    fn step_hardware_cycle<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+    fn step_hardware_cycle<F: FnMut(AudioSample)>(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: &mut F,
+    ) {
         self.step_hardware_cycle_with_mode::<true, false, F>(screen, process_sample);
     }
 
     fn step_hardware_cycle_with_mode<
         const WRITE_OUTPUT: bool,
         const AGGRESSIVE: bool,
-        F: FnMut(f32),
+        F: FnMut(AudioSample),
     >(
         &mut self,
         screen: &mut Screen,
@@ -116,7 +129,7 @@ impl ConsoleState {
             let sample = {
                 let apu = &mut self.bus.apu;
                 let mapper = &self.bus.mapper;
-                apu.step(|addr| mapper.read(addr))
+                apu.step_with_output(|addr| mapper.read(addr))
             };
             if let Some(sample) = sample {
                 process_sample(sample);
@@ -128,7 +141,7 @@ impl ConsoleState {
     }
 
     #[cfg(feature = "timestamped-scheduler")]
-    fn step_timestamped_nrom<F: FnMut(f32)>(
+    fn step_timestamped_nrom<F: FnMut(AudioSample)>(
         &mut self,
         screen: &mut Screen,
         process_sample: &mut F,
@@ -140,7 +153,7 @@ impl ConsoleState {
     fn step_timestamped_nrom_with_mode<
         const WRITE_OUTPUT: bool,
         const AGGRESSIVE: bool,
-        F: FnMut(f32),
+        F: FnMut(AudioSample),
     >(
         &mut self,
         screen: &mut Screen,
@@ -205,12 +218,16 @@ impl ConsoleState {
 
     #[cfg(feature = "timestamped-scheduler")]
     #[inline(always)]
-    fn advance_apu_timestamped<F: FnMut(f32)>(&mut self, cycles: u64, process_sample: &mut F) {
+    fn advance_apu_timestamped<F: FnMut(AudioSample)>(
+        &mut self,
+        cycles: u64,
+        process_sample: &mut F,
+    ) {
         #[cfg(not(feature = "apu-disabled"))]
         {
             let apu = &mut self.bus.apu;
             let mapper = &self.bus.mapper;
-            apu.advance_cpu_cycles(cycles, |addr| mapper.read(addr), process_sample);
+            apu.advance_cpu_cycles_with_output(cycles, |addr| mapper.read(addr), process_sample);
         }
         #[cfg(feature = "apu-disabled")]
         {
@@ -239,11 +256,11 @@ impl ConsoleState {
         }
     }
 
-    fn step<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
+    fn step<F: FnMut(AudioSample)>(&mut self, screen: &mut Screen, process_sample: &mut F) {
         self.step_with_mode::<true, false, F>(screen, process_sample);
     }
 
-    fn step_with_mode<const WRITE_OUTPUT: bool, const AGGRESSIVE: bool, F: FnMut(f32)>(
+    fn step_with_mode<const WRITE_OUTPUT: bool, const AGGRESSIVE: bool, F: FnMut(AudioSample)>(
         &mut self,
         screen: &mut Screen,
         process_sample: &mut F,
@@ -311,14 +328,18 @@ impl ConsoleState {
         }
     }
 
-    pub(crate) fn wait_vblank<F: FnMut(f32)>(&mut self, screen: &mut Screen, process_sample: F) {
+    pub(crate) fn wait_vblank<F: FnMut(AudioSample)>(
+        &mut self,
+        screen: &mut Screen,
+        process_sample: F,
+    ) {
         self.wait_vblank_with_mode::<true, false, F>(screen, process_sample);
     }
 
     pub(crate) fn wait_vblank_with_mode<
         const WRITE_OUTPUT: bool,
         const AGGRESSIVE: bool,
-        F: FnMut(f32),
+        F: FnMut(AudioSample),
     >(
         &mut self,
         screen: &mut Screen,
@@ -363,6 +384,8 @@ pub struct Console {
     video_output: VideoOutput,
     aggressive_headless: bool,
     audio_samples: Vec<f32>,
+    #[cfg(feature = "audio-stems")]
+    audio_stems: Vec<AudioStems>,
     in_rewind: bool,
     rewind_history_active: bool,
     rewind_exhausted: bool,
@@ -445,7 +468,11 @@ impl Console {
         self.rewind_history_active = false;
         self.rewind_exhausted = false;
         self.audio_samples.clear();
+        #[cfg(feature = "audio-stems")]
+        self.audio_stems.clear();
         self.audio_reset.mark();
+        #[cfg(feature = "layered-render")]
+        self.screen.layers.clear();
         #[cfg(feature = "layered-render")]
         self.ghost_timeline.reset();
     }
@@ -508,6 +535,8 @@ impl Console {
             },
             aggressive_headless: cfg!(feature = "headless-render-disabled"),
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
+            #[cfg(feature = "audio-stems")]
+            audio_stems: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
             tape: RewindTape::new(Self::INITIAL_TAPE_STEP),
             in_rewind: false,
             rewind_history_active: false,
@@ -534,6 +563,10 @@ impl Console {
     pub fn set_video_output(&mut self, output: VideoOutput) {
         self.video_output = output;
         self.aggressive_headless = false;
+        #[cfg(feature = "layered-render")]
+        if output == VideoOutput::Disabled {
+            self.screen.layers.available = false;
+        }
     }
 
     pub fn video_output(&self) -> VideoOutput {
@@ -544,8 +577,8 @@ impl Console {
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
         let audio_discontinuity = self.audio_reset.take();
         self.audio_samples.clear();
-        #[cfg(feature = "layered-render")]
-        self.screen.layers.clear();
+        #[cfg(feature = "audio-stems")]
+        self.audio_stems.clear();
 
         if self.rewind_exhausted {
             self.in_rewind = false;
@@ -558,9 +591,17 @@ impl Console {
                 #[cfg(feature = "layered-render")]
                 ghost_layers: self.ghost_timeline.layers(),
                 audio_samples: &self.audio_samples,
+                #[cfg(feature = "audio-stems")]
+                audio_stems: &self.audio_stems,
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_discontinuity,
             };
+        }
+
+        #[cfg(feature = "layered-render")]
+        match self.video_output {
+            VideoOutput::Enabled => self.screen.layers.begin_frame(&self.screen.pixels),
+            VideoOutput::Disabled => self.screen.layers.clear(),
         }
 
         #[cfg(feature = "layered-render")]
@@ -577,20 +618,28 @@ impl Console {
             let state = &mut self.state;
             let screen = &mut self.screen;
             let audio_samples = &mut self.audio_samples;
+            #[cfg(feature = "audio-stems")]
+            let audio_stems = &mut self.audio_stems;
             match self.video_output {
                 VideoOutput::Enabled => {
                     state.wait_vblank_with_mode::<true, false, _>(screen, |sample| {
-                        audio_samples.push(sample)
+                        audio_samples.push(sample.mono);
+                        #[cfg(feature = "audio-stems")]
+                        audio_stems.push(sample.stems);
                     });
                 }
                 VideoOutput::Disabled => {
                     if self.aggressive_headless {
                         state.wait_vblank_with_mode::<false, true, _>(screen, |sample| {
-                            audio_samples.push(sample)
+                            audio_samples.push(sample.mono);
+                            #[cfg(feature = "audio-stems")]
+                            audio_stems.push(sample.stems);
                         });
                     } else {
                         state.wait_vblank_with_mode::<false, false, _>(screen, |sample| {
-                            audio_samples.push(sample)
+                            audio_samples.push(sample.mono);
+                            #[cfg(feature = "audio-stems")]
+                            audio_stems.push(sample.stems);
                         });
                     }
                 }
@@ -619,6 +668,8 @@ impl Console {
             #[cfg(feature = "layered-render")]
             ghost_layers: self.ghost_timeline.layers(),
             audio_samples: &self.audio_samples,
+            #[cfg(feature = "audio-stems")]
+            audio_stems: &self.audio_stems,
             audio_sample_rate: AUDIO_SAMPLE_RATE,
             audio_discontinuity,
         }
@@ -921,6 +972,55 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "layered-render")]
+    #[test]
+    fn forced_blank_frames_retain_layers_until_rendering_resumes() {
+        let mut console = Console::new(Box::new(TestMapper));
+        console.set_video_output(super::VideoOutput::Enabled);
+        console.screen.pixels[40][40] = 0x2a;
+
+        let layers = &mut console.screen.layers;
+        layers.available = true;
+        layers.backdrop[40][40] = 0x12;
+        layers.background.pixels[40][40] = 0x23;
+        layers.background.coverage[40][40] = 1;
+        layers.sprites.pixels[40][40] = 0x34;
+        layers.sprites.coverage[40][40] = 1;
+        layers.behind_background[40][40] = 1;
+        layers.visible_sprites[40][40] = 1;
+        let prior_layers = layers.clone();
+
+        for _ in 0..3 {
+            let frame = console.next_frame();
+            assert_eq!(frame.pixels[40][40], 0x2a);
+            assert_eq!(frame.layers, prior_layers.as_ref());
+        }
+
+        console.set_video_output(super::VideoOutput::Disabled);
+        let frame = console.next_frame();
+        assert!(!frame.layers.available);
+        drop(frame);
+
+        console.set_video_output(super::VideoOutput::Enabled);
+        for address in 0x3f00..=0x3f1f {
+            console
+                .state
+                .bus
+                .ppu
+                .write_byte(&mut console.state.bus.mapper, address, 0x07);
+        }
+        let state = &mut console.state;
+        state.cpu.write_byte(&mut state.bus, 0x2001, 0x18);
+
+        let frame = console.next_frame();
+        assert!(frame.layers.available);
+        assert_ne!(frame.layers.backdrop[40][40], prior_layers.backdrop[40][40]);
+        assert_ne!(
+            frame.layers.background.pixels[40][40],
+            prior_layers.background.pixels[40][40]
+        );
+    }
+
     #[test]
     fn strict_video_off_preserves_cpu_and_audio_state() {
         let cartridge = patterned_nrom_cartridge();
@@ -987,6 +1087,11 @@ mod tests {
             assert_eq!(
                 timestamped_frame.audio_samples,
                 cycle_stepped_frame.audio_samples
+            );
+            #[cfg(feature = "audio-stems")]
+            assert_eq!(
+                timestamped_frame.audio_stems,
+                cycle_stepped_frame.audio_stems
             );
             #[cfg(not(feature = "headless-render-disabled"))]
             {
@@ -1065,15 +1170,21 @@ mod tests {
         assert_eq!(first.pixels[0].len(), FRAME_WIDTH);
         assert_eq!(first.audio_sample_rate, super::AUDIO_SAMPLE_RATE);
         assert!(!first.audio_samples.is_empty());
+        #[cfg(feature = "audio-stems")]
+        assert_eq!(first.audio_stems.len(), first.audio_samples.len());
 
         let second = console.next_frame();
         assert_eq!(second.frame_number, 2);
         assert!(!second.audio_samples.is_empty());
+        #[cfg(feature = "audio-stems")]
+        assert_eq!(second.audio_stems.len(), second.audio_samples.len());
 
         console.rewind();
         let rewound = console.next_frame();
         assert!(rewound.audio_discontinuity);
         assert!(!rewound.audio_samples.is_empty());
+        #[cfg(feature = "audio-stems")]
+        assert_eq!(rewound.audio_stems.len(), rewound.audio_samples.len());
     }
 
     #[cfg(not(feature = "rewind-disabled"))]

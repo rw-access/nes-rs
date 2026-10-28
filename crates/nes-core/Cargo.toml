@@ -10,6 +10,7 @@ rewind-disabled = []
 timestamped-scheduler = []
 headless-render-disabled = []
 layered-render = []
+audio-stems = []
 
 [dependencies]
 arrayvec = "0.7.2"

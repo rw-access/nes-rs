@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use js_sys::{Float32Array, Uint8Array};
 use nes_core::ghost::GhostLayer;
+use nes_core::video::{DEPTH_PLANE_COUNT, FRAME_RGBA_BYTES};
 use nes_core::{
     cartridge, ines, Console, RenderMode, VideoBuffer, AUDIO_SAMPLE_RATE, NES_PALETTE_RGBA,
 };
@@ -22,6 +23,11 @@ pub struct NesWeb {
     audio: Vec<f32>,
     rgba_js: Uint8Array,
     audio_js: Float32Array,
+    audio_stems: Vec<f32>,
+    audio_stems_js: Float32Array,
+    depth_enabled: bool,
+    depth_rgba: Vec<u8>,
+    depth_rgba_js: Uint8Array,
     ghost_buffer: Vec<u8>,
     ghost_buffer_js: Uint8Array,
     controller_bits: u8,
@@ -40,6 +46,7 @@ pub struct FrameMetadata {
     audio_sample_rate: u32,
     audio_samples: usize,
     audio_discontinuity: bool,
+    depth_available: bool,
 }
 
 #[wasm_bindgen]
@@ -73,6 +80,11 @@ impl FrameMetadata {
     pub fn audio_discontinuity(&self) -> bool {
         self.audio_discontinuity
     }
+
+    #[wasm_bindgen(getter)]
+    pub fn depth_available(&self) -> bool {
+        self.depth_available
+    }
 }
 
 /// An opaque, cloneable point-in-time state for save/restore UI controls.
@@ -98,6 +110,13 @@ impl NesWeb {
             audio: Vec::with_capacity((AUDIO_SAMPLE_RATE / 55) as usize + 8),
             rgba_js: Uint8Array::new_with_length(nes_core::video::FRAME_RGBA_BYTES as u32),
             audio_js: Float32Array::new_with_length(4096),
+            audio_stems: Vec::with_capacity(4096 * 5),
+            audio_stems_js: Float32Array::new_with_length(4096 * 5),
+            depth_enabled: false,
+            depth_rgba: vec![0; DEPTH_PLANE_COUNT * FRAME_RGBA_BYTES],
+            depth_rgba_js: Uint8Array::new_with_length(
+                (DEPTH_PLANE_COUNT * FRAME_RGBA_BYTES) as u32,
+            ),
             ghost_buffer: Vec::new(),
             ghost_buffer_js: Uint8Array::new_with_length(0),
             controller_bits: 0,
@@ -109,6 +128,7 @@ impl NesWeb {
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_samples: 0,
                 audio_discontinuity: false,
+                depth_available: false,
             },
         })
     }
@@ -120,19 +140,39 @@ impl NesWeb {
 
     /// Emulate one frame and refresh the reusable RGBA/audio buffers.
     pub fn step_frame(&mut self) -> FrameMetadata {
-        let (frame_number, audio_sample_rate, audio_discontinuity) = {
+        let (frame_number, audio_sample_rate, audio_discontinuity, depth_available) = {
             let frame = self.console.next_frame();
             frame.copy_mode_to(self.display_mode, &mut self.video);
             self.audio.clear();
             self.audio.extend_from_slice(frame.audio_samples);
+            self.audio_stems.clear();
+            for sample in frame.audio_stems {
+                self.audio_stems.extend_from_slice(sample);
+            }
+            let depth_available = self.depth_enabled
+                && self.display_mode == RenderMode::Both
+                && frame.layers.available;
+            if depth_available {
+                frame.layers.write_depth_rgba(&mut self.depth_rgba);
+            }
             collect_ghost_layers(frame.ghost_layers, &mut self.ghost_buffer);
             (
                 frame.frame_number,
                 frame.audio_sample_rate,
                 frame.audio_discontinuity,
+                depth_available,
             )
         };
         self.rgba_js.copy_from(self.video.rgba());
+        if depth_available {
+            self.depth_rgba_js.copy_from(&self.depth_rgba);
+        }
+        if self.audio_stems.len() > self.audio_stems_js.length() as usize {
+            self.audio_stems_js = Float32Array::new_with_length(self.audio_stems.len() as u32);
+        }
+        self.audio_stems_js
+            .subarray(0, self.audio_stems.len() as u32)
+            .copy_from(&self.audio_stems);
 
         if self.audio.len() > self.audio_js.length() as usize {
             self.audio_js = Float32Array::new_with_length(self.audio.len() as u32);
@@ -154,6 +194,7 @@ impl NesWeb {
             audio_sample_rate,
             audio_samples: self.audio.len(),
             audio_discontinuity: audio_discontinuity || self.audio_discontinuity_pending,
+            depth_available,
         };
         self.audio_discontinuity_pending = false;
         self.last_frame
@@ -172,6 +213,26 @@ impl NesWeb {
     /// as the valid prefix length; it is not a view into WASM memory.
     pub fn audio_buffer(&self) -> Float32Array {
         self.audio_js.clone()
+    }
+
+    /// Interleaved pulse 1, pulse 2, triangle, noise, DMC contributions.
+    /// The valid prefix is `frame_metadata().audio_samples * 5` floats.
+    pub fn audio_stem_buffer(&self) -> Float32Array {
+        self.audio_stems_js.clone()
+    }
+
+    /// Four contiguous RGBA planes: backdrop, rear sprites, tiles, front sprites.
+    /// Only read this buffer when `frame_metadata().depth_available` is true.
+    pub fn depth_buffer(&self) -> Uint8Array {
+        self.depth_rgba_js.clone()
+    }
+
+    /// Skip RGBA layer expansion and transfer when the frontend shows flat video.
+    pub fn set_depth_enabled(&mut self, enabled: bool) {
+        if self.depth_enabled != enabled {
+            self.last_frame.depth_available = false;
+        }
+        self.depth_enabled = enabled;
     }
 
     /// Return JS-owned sparse [x, y, red, green, blue, alpha] records for the
@@ -224,6 +285,7 @@ impl NesWeb {
                 self.controller_bits,
             ));
         self.audio_discontinuity_pending = true;
+        self.last_frame.depth_available = false;
     }
 
     pub fn width(&self) -> u32 {

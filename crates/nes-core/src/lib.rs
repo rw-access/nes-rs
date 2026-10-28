@@ -16,6 +16,8 @@ pub(crate) mod ppu;
 pub mod snapshot;
 pub mod video;
 
+#[cfg(feature = "audio-stems")]
+pub use console::{AudioStems, AUDIO_STEM_CHANNELS};
 pub use console::{
     Console, ConsoleState, FrameOutput, VideoOutput, AUDIO_SAMPLE_RATE, CPU_RAM_BYTES,
 };

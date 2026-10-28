@@ -36,7 +36,8 @@ mod scroll_tests {
 
 #[cfg(all(test, feature = "layered-render"))]
 mod layered_render_tests {
-    use super::{Screen, SpritePixel, TileData, PPU};
+    use super::{ParsedSprite, ProcessedSprite, Screen, SpritePixel, TileData, PPU};
+    use crate::video::{FRAME_PIXELS, FRAME_RGBA_BYTES, NES_PALETTE_RGBA};
 
     #[test]
     fn captures_independent_layers_and_compositor_visibility() {
@@ -58,6 +59,7 @@ mod layered_render_tests {
         ppu.cycle_in_scanline = 1;
 
         let mut screen = Screen::default();
+        screen.layers.begin_frame(&screen.pixels);
         ppu.render_pixel_inner::<true>(&mut screen);
 
         assert_eq!(screen.pixels[0][0], 0x42);
@@ -80,7 +82,174 @@ mod layered_render_tests {
 
         assert_eq!(screen.pixels[0][1], 0x21);
         assert_eq!(screen.layers.sprites.coverage[0][1], 1);
+        assert_eq!(screen.layers.behind_background[0][1], 1);
         assert_eq!(screen.layers.visible_sprites[0][1], 0);
+
+        assert_composite_matches(&screen);
+    }
+
+    #[test]
+    fn oam_winner_is_selected_before_priority_plane_split() {
+        let mut ppu = PPU::default();
+        ppu.processed_sprites[0] = ProcessedSprite {
+            sprite: ParsedSprite {
+                left_x: 4,
+                behind_background: true,
+                ..ParsedSprite::default()
+            },
+            tile: TileData {
+                pattern_low: 0b1000_0000,
+                ..TileData::default()
+            },
+        };
+        ppu.processed_sprites[1] = ProcessedSprite {
+            sprite: ParsedSprite {
+                left_x: 4,
+                behind_background: false,
+                ..ParsedSprite::default()
+            },
+            tile: TileData {
+                palette: 2,
+                pattern_low: 0b1000_0000,
+                ..TileData::default()
+            },
+        };
+
+        ppu.prepare_sprite_pixels(2);
+        let winner = ppu.sprite_pixels[4];
+        assert_eq!(winner.position, 0);
+        assert_eq!(winner.palette, 1);
+        assert!(winner.behind_background);
+    }
+
+    #[test]
+    fn backdrop_tracks_palette_per_dot_and_unwritten_pixels_keep_canonical_frame() {
+        let mut ppu = PPU::default();
+        ppu.mask_reg = 0x18;
+        let mut screen = Screen::default();
+        screen.pixels[0][2] = 0x31;
+        screen.pixels[0][1] = 0x22;
+        screen.layers.begin_frame(&screen.pixels);
+
+        ppu.palette_ram[0] = 0x10;
+        ppu.cycle_in_scanline = 1;
+        ppu.render_pixel_inner::<true>(&mut screen);
+        ppu.palette_ram[0] = 0x20;
+        ppu.cycle_in_scanline = 2;
+        ppu.render_pixel_inner::<true>(&mut screen);
+
+        assert_eq!(screen.layers.backdrop[0][0], 0x10);
+        assert_eq!(screen.layers.backdrop[0][1], 0x20);
+        assert_eq!(screen.layers.backdrop[0][2], 0x31);
+        assert_eq!(screen.layers.background.coverage[0][0], 0);
+        assert_eq!(screen.layers.sprites.coverage[0][0], 0);
+        assert_composite_matches(&screen);
+
+        screen.layers.clear();
+        assert!(!screen.layers.available);
+        assert_eq!(screen.layers.backdrop, [[0; 256]; 240]);
+    }
+
+    #[test]
+    fn retained_transition_frames_preserve_layers_until_pixels_are_replaced() {
+        let mut ppu = PPU::default();
+        ppu.mask_reg = 0x18;
+        ppu.palette_ram[0] = 0x10;
+        ppu.palette_ram[1] = 0x21;
+        ppu.palette_ram[0x11] = 0x30;
+        ppu.processed_tile[0] = TileData {
+            pattern_low: 0xff,
+            ..TileData::default()
+        };
+        ppu.sprite_pixels[0] = SpritePixel {
+            palette: 1,
+            ..SpritePixel::default()
+        };
+        let mut screen = Screen::default();
+        screen.layers.begin_frame(&screen.pixels);
+        for x in 0..2 {
+            ppu.cycle_in_scanline = x + 1;
+            ppu.render_pixel_inner::<true>(&mut screen);
+        }
+        let captured = screen.layers.clone();
+        // A loading transition can retain the canonical picture for several
+        // frames without emitting pixels. Its depth attribution must survive.
+        for _ in 0..3 {
+            screen.layers.begin_frame(&screen.pixels);
+            assert_eq!(screen.layers, captured);
+            assert_composite_matches(&screen);
+        }
+        // Resume with a transparent pixel: old tile AND sprite coverage must
+        // disappear there, while the adjacent unwritten tile remains intact.
+        ppu.processed_tile[0] = TileData::default();
+        ppu.sprite_pixels[0] = SpritePixel::default();
+        ppu.palette_ram[0] = 0x20;
+        ppu.cycle_in_scanline = 1;
+        ppu.render_pixel_inner::<true>(&mut screen);
+        assert_eq!(screen.layers.background.coverage[0][0], 0);
+        assert_eq!(screen.layers.sprites.coverage[0][0], 0);
+        assert_eq!(screen.layers.backdrop[0][0], 0x20);
+        assert_eq!(screen.layers.background.coverage[0][1], 1);
+        assert_composite_matches(&screen);
+
+        // Explicit invalidation (reset or output suppression) still drops
+        // attribution and seeds a fresh capture from canonical pixels.
+        screen.layers.available = false;
+        screen.layers.begin_frame(&screen.pixels);
+        assert_eq!(screen.layers.background.coverage[0][1], 0);
+        assert_eq!(screen.layers.sprites.coverage[0][0], 0);
+        assert_eq!(screen.layers.backdrop, screen.pixels);
+        assert_composite_matches(&screen);
+    }
+
+    #[test]
+    fn depth_planes_encode_rgba_coverage_and_priority_in_order() {
+        let mut screen = Screen::default();
+        screen.layers.begin_frame(&screen.pixels);
+        screen.layers.backdrop[0][0] = 0;
+        screen.layers.sprites.pixels[0][0] = 3;
+        screen.layers.sprites.coverage[0][0] = 1;
+        screen.layers.behind_background[0][0] = 1;
+        screen.layers.background.pixels[0][1] = 0;
+        screen.layers.background.coverage[0][1] = 1;
+        screen.layers.sprites.pixels[0][1] = 4;
+        screen.layers.sprites.coverage[0][1] = 1;
+
+        let mut rgba = vec![0xaa; FRAME_RGBA_BYTES * 4];
+        screen.layers.write_depth_rgba(&mut rgba);
+        let pixel_rgba = |plane: usize, pixel: usize| {
+            let start = plane * FRAME_RGBA_BYTES + pixel * 4;
+            rgba[start..start + 4].to_vec()
+        };
+
+        assert_eq!(pixel_rgba(0, 0), NES_PALETTE_RGBA[0]);
+        assert_eq!(pixel_rgba(1, 0), NES_PALETTE_RGBA[3]);
+        assert_eq!(pixel_rgba(2, 0), [0; 4]);
+        assert_eq!(pixel_rgba(3, 0), [0; 4]);
+        assert_eq!(pixel_rgba(1, 1), [0; 4]);
+        assert_eq!(pixel_rgba(2, 1), NES_PALETTE_RGBA[0]);
+        assert_eq!(pixel_rgba(3, 1), NES_PALETTE_RGBA[4]);
+        assert_eq!(pixel_rgba(2, FRAME_PIXELS - 1), [0; 4]);
+    }
+
+    fn assert_composite_matches(screen: &Screen) {
+        let mut output = vec![0; FRAME_RGBA_BYTES * 4];
+        screen.layers.write_depth_rgba(&mut output);
+        for y in 0..240 {
+            for x in 0..256 {
+                let pixel = y * 256 + x;
+                let mut composed = [0; 4];
+                for plane in 0..4 {
+                    let offset = plane * FRAME_RGBA_BYTES + pixel * 4;
+                    let source: [u8; 4] = output[offset..offset + 4].try_into().unwrap();
+                    if source[3] != 0 {
+                        composed = source;
+                    }
+                }
+                let canonical = NES_PALETTE_RGBA[(screen.pixels[y][x] & 0x3f) as usize];
+                assert_eq!(composed, canonical, "depth composite at ({x}, {y})");
+            }
+        }
     }
 }
 
@@ -1313,11 +1482,14 @@ impl PPU {
         let background_color = tile_palette_offset | tile_palette;
         let sprite_color = 0x10 | sprite.palette_offset | sprite.palette;
 
+        screen.layers.backdrop[y][x] = palette[0];
         screen.layers.background.pixels[y][x] =
             palette[PPU::mirror_palette(background_color) as usize];
         screen.layers.background.coverage[y][x] = (tile_palette != 0) as u8;
         screen.layers.sprites.pixels[y][x] = palette[PPU::mirror_palette(sprite_color) as usize];
         screen.layers.sprites.coverage[y][x] = (sprite.palette != 0) as u8;
+        screen.layers.behind_background[y][x] =
+            (sprite.palette != 0 && sprite.behind_background) as u8;
         screen.layers.visible_sprites[y][x] = sprite_visible as u8;
     }
 

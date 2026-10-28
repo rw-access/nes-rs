@@ -8,6 +8,9 @@ pub const FRAME_HEIGHT: usize = 240;
 pub const FRAME_PIXELS: usize = FRAME_WIDTH * FRAME_HEIGHT;
 /// Number of bytes in one RGBA frame.
 pub const FRAME_RGBA_BYTES: usize = FRAME_PIXELS * 4;
+/// Number of planes in the depth presentation payload.
+#[cfg(feature = "layered-render")]
+pub const DEPTH_PLANE_COUNT: usize = 4;
 /// Number of entries in the NES master palette.
 pub const PALETTE_ENTRIES: usize = 64;
 
@@ -80,18 +83,29 @@ impl RenderLayer {
 #[cfg(feature = "layered-render")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameLayers {
+    /// Per-dot backdrop, initialized from the canonical retained framebuffer
+    /// when capture starts and retained alongside unwritten layer pixels.
+    pub backdrop: FramePixels,
+    /// Priority of the selected nontransparent sprite pixel, independent of
+    /// whether that sprite wins the background/sprite mux.
+    pub behind_background: FrameMask,
     pub background: RenderLayer,
     pub sprites: RenderLayer,
     pub visible_sprites: FrameMask,
+    /// Whether this payload belongs to a frame begun with `begin_frame`.
+    pub available: bool,
 }
 
 #[cfg(feature = "layered-render")]
 impl Default for FrameLayers {
     fn default() -> Self {
         Self {
+            backdrop: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            behind_background: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
             background: RenderLayer::default(),
             sprites: RenderLayer::default(),
             visible_sprites: [[0; FRAME_WIDTH]; FRAME_HEIGHT],
+            available: false,
         }
     }
 }
@@ -99,9 +113,78 @@ impl Default for FrameLayers {
 #[cfg(feature = "layered-render")]
 impl FrameLayers {
     pub fn clear(&mut self) {
+        self.backdrop = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
+        self.behind_background = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
         self.background.clear();
         self.sprites.clear();
         self.visible_sprites = [[0; FRAME_WIDTH]; FRAME_HEIGHT];
+        self.available = false;
+    }
+
+    /// Retain layer attribution wherever the canonical framebuffer is retained.
+    /// The PPU replaces every layer field at each pixel it actually emits.
+    /// During forced blanking it emits nothing, so clearing these planes would
+    /// flatten the retained picture for one or more transition frames.
+    pub fn begin_frame(&mut self, retained: &FramePixels) {
+        if !self.available {
+            self.clear();
+            self.backdrop = *retained;
+            self.available = true;
+        }
+    }
+
+    /// Write four contiguous RGBA planes: backdrop, rear sprites, background
+    /// tiles, and front sprites. Sprite/tile coverage controls alpha, so
+    /// palette index zero remains a valid opaque color. The output must have
+    /// exactly `DEPTH_PLANE_COUNT * FRAME_RGBA_BYTES` bytes.
+    pub fn write_depth_rgba(&self, output: &mut [u8]) {
+        assert_eq!(
+            output.len(),
+            DEPTH_PLANE_COUNT * FRAME_RGBA_BYTES,
+            "invalid NES depth buffer size"
+        );
+
+        let (backdrop, remaining) = output.split_at_mut(FRAME_RGBA_BYTES);
+        let (rear, remaining) = remaining.split_at_mut(FRAME_RGBA_BYTES);
+        let (tiles, front) = remaining.split_at_mut(FRAME_RGBA_BYTES);
+        for y in 0..FRAME_HEIGHT {
+            for x in 0..FRAME_WIDTH {
+                let pixel = y * FRAME_WIDTH + x;
+                let rgba_offset = pixel * 4;
+                copy_opaque_palette_pixel(self.backdrop[y][x], &mut backdrop[rgba_offset..]);
+                write_layer_pixel(
+                    self.sprites.pixels[y][x],
+                    self.sprites.coverage[y][x] != 0 && self.behind_background[y][x] != 0,
+                    &mut rear[rgba_offset..],
+                );
+                write_layer_pixel(
+                    self.background.pixels[y][x],
+                    self.background.coverage[y][x] != 0,
+                    &mut tiles[rgba_offset..],
+                );
+                write_layer_pixel(
+                    self.sprites.pixels[y][x],
+                    self.sprites.coverage[y][x] != 0 && self.behind_background[y][x] == 0,
+                    &mut front[rgba_offset..],
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "layered-render")]
+#[inline]
+fn copy_opaque_palette_pixel(index: u8, output: &mut [u8]) {
+    output[..4].copy_from_slice(&NES_PALETTE_RGBA[(index & 0x3f) as usize]);
+}
+
+#[cfg(feature = "layered-render")]
+#[inline]
+fn write_layer_pixel(index: u8, covered: bool, output: &mut [u8]) {
+    if covered {
+        copy_opaque_palette_pixel(index, output);
+    } else {
+        output[..4].fill(0);
     }
 }
 
