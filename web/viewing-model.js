@@ -13,6 +13,144 @@ const REFERENCE_TILT_RADIANS = 25 * Math.PI / 180;
 export const DESKTOP_GAME_WIDTH_CM = 24;
 const DESKTOP_REFERENCE_CSS_WIDTH = 768;
 const MOTION_SLOPE_SCALE = 0.7 / (2 * Math.tan(REFERENCE_TILT_RADIANS));
+const IDENTITY_ROTATION = Object.freeze([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+const POSE_ROTATION_EPSILON = 1e-6;
+const POSE_NORMAL_EPSILON = 1e-12;
+const POSE_FULL_CORRECTION_FORWARD_Z = 0.1;
+
+/**
+ * Reconcile a measured room pose with the gain-scaled camera ray, returning
+ * one proper rotation shared by the rendered camera and room-fixed lighting.
+ */
+export function resolveRenderedScenePose(view) {
+  if (!view || typeof view !== "object") throw new TypeError("Rendered scene view must be an object");
+  const { x, y } = view;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new RangeError("Rendered scene view offsets must be finite numbers");
+  }
+  const rawRotation = view.rotation ?? IDENTITY_ROTATION;
+  validatePoseRotation(rawRotation);
+  const rotation = Array.from(rawRotation);
+  const result = { x, y };
+
+  // Preserve the established safe handling of folded/back-facing sensor poses.
+  if (rotation[8] <= 0) {
+    result.rotation = Object.freeze(rotation);
+    return Object.freeze(result);
+  }
+
+  const eyeMeasured = normalizePoseVector([-rotation[2], -rotation[5], -rotation[8]]);
+  const eyeRendered = normalizePoseVector([
+    x / MOTION_SLOPE_SCALE,
+    y / MOTION_SLOPE_SCALE,
+    -1,
+  ]);
+  const difference = Math.hypot(
+    eyeMeasured[0] - eyeRendered[0],
+    eyeMeasured[1] - eyeRendered[1],
+    eyeMeasured[2] - eyeRendered[2],
+  );
+  if (difference <= POSE_NORMAL_EPSILON) {
+    result.rotation = Object.freeze(rotation);
+    return Object.freeze(result);
+  }
+
+  const cross = [
+    eyeMeasured[1] * eyeRendered[2] - eyeMeasured[2] * eyeRendered[1],
+    eyeMeasured[2] * eyeRendered[0] - eyeMeasured[0] * eyeRendered[2],
+    eyeMeasured[0] * eyeRendered[1] - eyeMeasured[1] * eyeRendered[0],
+  ];
+  const dot = Math.max(-1, Math.min(1,
+    eyeMeasured[0] * eyeRendered[0]
+      + eyeMeasured[1] * eyeRendered[1]
+      + eyeMeasured[2] * eyeRendered[2]));
+  const crossLength = Math.hypot(...cross);
+  const correctionWeight = smoothstep(Math.max(0, Math.min(1,
+    rotation[8] / POSE_FULL_CORRECTION_FORWARD_Z)));
+  if (correctionWeight === 0) {
+    result.rotation = Object.freeze(rotation);
+    return Object.freeze(result);
+  }
+  const correction = shortestArcCorrection(cross, crossLength, dot, correctionWeight);
+
+  const renderedRotation = Array(9);
+  for (let row = 0; row < 3; row += 1) {
+    for (let column = 0; column < 3; column += 1) {
+      renderedRotation[row * 3 + column] = correction[row * 3] * rotation[column]
+        + correction[row * 3 + 1] * rotation[3 + column]
+        + correction[row * 3 + 2] * rotation[6 + column];
+    }
+  }
+  if (!renderedRotation.every(Number.isFinite)) {
+    throw new RangeError("Rendered scene rotation must remain finite");
+  }
+  result.rotation = Object.freeze(renderedRotation);
+  return Object.freeze(result);
+}
+
+function shortestArcCorrection(cross, crossLength, dot, weight) {
+  if (!(crossLength > 0) || !Number.isFinite(crossLength)) {
+    throw new RangeError("Rendered camera direction cannot be aligned to the measured pose");
+  }
+  const axis = cross.map(component => component / crossLength);
+  const angle = Math.atan2(crossLength, dot) * weight;
+  const sine = Math.sin(angle);
+  const oneMinusCosine = 1 - Math.cos(angle);
+  const skew = [
+    0, -axis[2], axis[1],
+    axis[2], 0, -axis[0],
+    -axis[1], axis[0], 0,
+  ];
+  const correction = Array(9);
+  for (let row = 0; row < 3; row += 1) {
+    for (let column = 0; column < 3; column += 1) {
+      let square = 0;
+      for (let inner = 0; inner < 3; inner += 1) {
+        square += skew[row * 3 + inner] * skew[inner * 3 + column];
+      }
+      correction[row * 3 + column] = (row === column ? 1 : 0)
+        + sine * skew[row * 3 + column] + oneMinusCosine * square;
+    }
+  }
+  return correction;
+}
+
+function smoothstep(value) {
+  return value * value * (3 - 2 * value);
+}
+
+function normalizePoseVector(vector) {
+  const length = Math.hypot(...vector);
+  if (!(length > 0) || !Number.isFinite(length)) {
+    throw new RangeError("Rendered scene direction must be finite and nonzero");
+  }
+  return vector.map(component => component / length);
+}
+
+function validatePoseRotation(rotation) {
+  if ((!Array.isArray(rotation) && !ArrayBuffer.isView(rotation)) || rotation.length !== 9
+    || rotation instanceof DataView || !Array.from(rotation).every(Number.isFinite)) {
+    throw new TypeError("Rendered scene rotation must be a finite 3×3 row-major matrix");
+  }
+  const matrix = Array.from(rotation);
+  for (let rowA = 0; rowA < 3; rowA += 1) {
+    for (let rowB = rowA; rowB < 3; rowB += 1) {
+      const dot = matrix[rowA * 3] * matrix[rowB * 3]
+        + matrix[rowA * 3 + 1] * matrix[rowB * 3 + 1]
+        + matrix[rowA * 3 + 2] * matrix[rowB * 3 + 2];
+      const expected = rowA === rowB ? 1 : 0;
+      if (Math.abs(dot - expected) > POSE_ROTATION_EPSILON) {
+        throw new RangeError("Rendered scene rotation must be orthonormal");
+      }
+    }
+  }
+  const determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7])
+    - matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6])
+    + matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
+  if (Math.abs(determinant - 1) > POSE_ROTATION_EPSILON) {
+    throw new RangeError("Rendered scene rotation must be a proper rotation with determinant +1");
+  }
+}
 
 /** A fixed box pose whose vanishing point stays inside the aperture at supported viewing distances. */
 export function computeStationaryView({ gameWidthCm, width = NATIVE_WIDTH, height = 240 } = {}) {

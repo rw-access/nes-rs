@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   SCENE_LIGHT,
+  backdropIrradiance,
+  backdropIrradianceFromLight,
+  createBackdropIrradianceSampler,
   getSceneLightPlacement,
   getSceneLightDistance,
   getSceneLightPosition,
@@ -167,6 +170,11 @@ test("wall shade remains shared and bounded by ambient plus diffuse light", () =
     [160, 144, { x: 24, y: 112, z: 0 }],
   ]) {
     const light = getSceneLightPosition(width, height);
+    const referenceRadius = Math.hypot(
+      (light.x - width / 2) * 256 / width,
+      (light.y - height / 2) * 240 / height,
+      light.z * SCENE_DEPTH_TO_NATIVE_PIXELS,
+    );
     const dx = (light.x - point.x) * 256 / width;
     const dy = (light.y - point.y) * 240 / height;
     const dz = (light.z - point.z) * 19.2;
@@ -176,7 +184,8 @@ test("wall shade remains shared and bounded by ambient plus diffuse light", () =
         const direction = inward ? -1 : 1;
         const [nx, ny] = normals[orientation];
         const cosine = Math.max(0, direction * (nx * dx + ny * dy) / length);
-        const expected = 0.45 + 0.32 * cosine;
+        const attenuation = Math.min(1, (referenceRadius / length) ** 2);
+        const expected = 0.45 + 0.32 * cosine * attenuation;
         assert.ok(Math.abs(surfaceShade(orientation, inward, point, width, height) - expected) < 1e-12,
           "diffuse shading uses the isotropic point-light vector");
       }
@@ -324,17 +333,21 @@ test("phone-plane placement round-trips physical distance and elevation across d
   try {
     setSceneLightRotation([1, 0, 0, 0, 1, 0, 0, 0, 1]);
     for (const [gameWidthCm, width, height] of [[6.7, 390, 366], [16.05, 844, 792]]) {
-      for (const [distanceCm, elevationDegrees] of [[25, 10], [5, 0], [300, 80]]) {
-        setSceneLightPlacement({ distanceCm, elevationDegrees, gameWidthCm });
+      for (const [distanceCm, elevationDegrees, azimuthDegrees] of [
+        [25, 10, 0], [5, 0, -60], [300, 80, 60], [42, 35, 23],
+      ]) {
+        setSceneLightPlacement({ distanceCm, elevationDegrees, azimuthDegrees, gameWidthCm });
         const light = getSceneLightPosition(width, height);
         const pixelsPerCm = 256 / gameWidthCm;
+        const canonicalX = (light.x - width / 2) * 256 / width;
         const canonicalY = (light.y - height / 2) * 240 / height;
         const canonicalZ = light.z * SCENE_DEPTH_TO_NATIVE_PIXELS;
-        const recoveredDistance = Math.hypot(canonicalY, canonicalZ) / pixelsPerCm;
-        const recoveredElevation = Math.atan2(-canonicalY, -canonicalZ) * 180 / Math.PI;
+        const recoveredDistance = Math.hypot(canonicalX, canonicalY, canonicalZ) / pixelsPerCm;
+        const recoveredElevation = Math.atan2(-canonicalY, Math.hypot(canonicalX, canonicalZ)) * 180 / Math.PI;
+        const recoveredAzimuth = Math.atan2(canonicalX, -canonicalZ) * 180 / Math.PI;
         assert.ok(Math.abs(recoveredDistance - distanceCm) < 1e-10);
         assert.ok(Math.abs(recoveredElevation - elevationDegrees) < 1e-10);
-        assert.ok(Math.abs(light.x - width / 2) < 1e-12, "initial source lies on the screen centerline");
+        assert.ok(Math.abs(recoveredAzimuth - azimuthDegrees) < 1e-10);
       }
     }
   } finally {
@@ -346,7 +359,7 @@ test("phone-plane placement round-trips physical distance and elevation across d
 test("phone-plane placement rotates as one canonical point and preserves ray collinearity", () => {
   const originalPlacement = getSceneLightPlacement();
   const originalRotation = [...getSceneLightRotation()];
-  const placement = { distanceCm: 25, elevationDegrees: 10, gameWidthCm: 7 };
+  const placement = { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: -15, gameWidthCm: 7 };
   const first = rotationX(0.3), second = rotationY(-0.2);
   const composed = Array.from({ length: 9 }, (_, index) => {
     const row = Math.floor(index / 3), column = index % 3;
@@ -369,9 +382,11 @@ test("phone-plane placement rotates as one canonical point and preserves ray col
 
     const pixelsPerCm = 256 / placement.gameWidthCm;
     const elevation = placement.elevationDegrees * Math.PI / 180;
-    const baseline = [0,
+    const azimuth = placement.azimuthDegrees * Math.PI / 180;
+    const baseline = [
+      placement.distanceCm * Math.cos(elevation) * Math.sin(azimuth) * pixelsPerCm,
       -placement.distanceCm * Math.sin(elevation) * pixelsPerCm,
-      -placement.distanceCm * Math.cos(elevation) * pixelsPerCm];
+      -placement.distanceCm * Math.cos(elevation) * Math.cos(azimuth) * pixelsPerCm];
     const recovered = [0, 1, 2].map(column =>
       composed[column] * atNative[0]
         + composed[3 + column] * atNative[1]
@@ -428,15 +443,17 @@ test("placement configuration is immutable and revisions change only for effecti
     assert.equal(setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 10, gameWidthCm: 7 }), true);
     const revision = getSceneLightRevision();
     const placement = getSceneLightPlacement();
-    assert.deepEqual(placement, { distanceCm: 25, elevationDegrees: 10, gameWidthCm: 7 });
+    assert.deepEqual(placement, { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: 0, gameWidthCm: 7 });
     assert.ok(Object.isFrozen(placement));
     assert.equal(setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 10, gameWidthCm: 7 }), false);
     assert.equal(getSceneLightRevision(), revision, "unchanged placement does not invalidate caches");
     assert.equal(setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 11, gameWidthCm: 7 }), true);
     assert.equal(getSceneLightRevision(), revision + 1);
+    assert.equal(setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 11, azimuthDegrees: 5, gameWidthCm: 7 }), true);
+    assert.equal(getSceneLightRevision(), revision + 2, "azimuth changes invalidate dependent caches");
     assert.equal(setSceneLightPlacement(null), true);
     assert.equal(getSceneLightPlacement(), null);
-    assert.equal(getSceneLightRevision(), revision + 2);
+    assert.equal(getSceneLightRevision(), revision + 3);
     setSceneLightRotation([1, 0, 0, 0, 1, 0, 0, 0, 1]);
     assert.deepEqual(getSceneLightPosition(), {
       x: 128,
@@ -453,6 +470,9 @@ test("placement configuration is immutable and revisions change only for effecti
       { distanceCm: 25, elevationDegrees: -0.01, gameWidthCm: 7 },
       { distanceCm: 25, elevationDegrees: 80.01, gameWidthCm: 7 },
       { distanceCm: 25, elevationDegrees: Infinity, gameWidthCm: 7 },
+      { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: -60.01, gameWidthCm: 7 },
+      { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: 60.01, gameWidthCm: 7 },
+      { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: NaN, gameWidthCm: 7 },
       { distanceCm: 25, elevationDegrees: 10, gameWidthCm: 0 },
       { distanceCm: 25, elevationDegrees: 10, gameWidthCm: Infinity },
       { distanceCm: 25, elevationDegrees: 10, gameWidthCm: Number.MIN_VALUE },
@@ -467,5 +487,191 @@ test("placement configuration is immutable and revisions change only for effecti
     setSceneLightPlacement(originalPlacement);
     setSceneLightRotation(originalRotation);
     assert.ok(getSceneLightRevision() >= originalRevision);
+  }
+});
+
+test("backdrop irradiance follows the same point-light ray through phone rotation", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  const placement = { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: 18, gameWidthCm: 7 };
+  const rotations = [
+    [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    rotationZ(0.7),
+    [
+      Math.cos(0.3), 0, Math.sin(0.3),
+      Math.sin(0.2) * Math.sin(0.3), Math.cos(0.2), -Math.sin(0.2) * Math.cos(0.3),
+      -Math.cos(0.2) * Math.sin(0.3), Math.sin(0.2), Math.cos(0.2) * Math.cos(0.3),
+    ],
+  ];
+  try {
+    setSceneLightPlacement(placement);
+    for (const rotation of rotations) {
+      setSceneLightRotation(rotation);
+      for (const [width, height, point] of [
+        [256, 240, { x: 22, y: 180, z: 0 }],
+        [512, 480, { x: 390, y: 40, z: 1.25 }],
+        [844, 792, { x: 173, y: 655, z: 4.5 }],
+      ]) {
+        const light = getSceneLightPosition(width, height);
+        const dx = (light.x - point.x) * 256 / width;
+        const dy = (light.y - point.y) * 240 / height;
+        const dz = (light.z - point.z) * SCENE_DEPTH_TO_NATIVE_PIXELS;
+        const length = Math.hypot(dx, dy, dz);
+        const referenceRadius = placement.distanceCm * 256 / placement.gameWidthCm;
+        const attenuation = Math.min(1, (referenceRadius / length) ** 2);
+        const expected = 0.35 + 0.65 * Math.max(0, -dz / length) * attenuation;
+        assert.ok(Math.abs(backdropIrradiance(point, width, height) - expected) < 1e-12,
+          "irradiance matches an independent front-normal dot product");
+        assert.equal(backdropIrradianceFromLight(point, light, width, height),
+          backdropIrradiance(point, width, height), "precomputed-light helper matches the oracle");
+        const sample = createBackdropIrradianceSampler(light, point.z, width, height);
+        assert.ok(Math.abs(sample(point.x, point.y) - backdropIrradiance(point, width, height)) < 1e-12,
+          "prevalidated scalar sampler matches the oracle");
+      }
+    }
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
+  }
+});
+
+test("backdrop irradiance is bright for a front light and ambient-only for a back light", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  const point = { x: 128, y: 120, z: 0 };
+  try {
+    setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 10, gameWidthCm: 7 });
+    setSceneLightRotation([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const front = backdropIrradiance(point);
+    assert.ok(front > 0.35 && front <= 1);
+    setSceneLightRotation(rotationY(Math.PI));
+    assert.ok(Math.abs(backdropIrradiance(point) - 0.35) < 1e-12);
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
+  }
+});
+
+test("distance attenuation preserves fixture power under rotation and dims a farther backboard", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  const placement = { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: 0, gameWidthCm: 7 };
+  const referenceRadius = placement.distanceCm * 256 / placement.gameWidthCm;
+  try {
+    setSceneLightPlacement(placement);
+    const results = [];
+    for (const rotation of [rotationY(Math.PI / 6), rotationY(-Math.PI / 6),
+      rotationZ(Math.PI / 4), rotationZ(-Math.PI / 4)]) {
+      setSceneLightRotation(rotation);
+      const light = getSceneLightPosition();
+      const centerRadius = Math.hypot(
+        (light.x - 128), (light.y - 120), light.z * SCENE_DEPTH_TO_NATIVE_PIXELS,
+      );
+      assert.ok(Math.abs(centerRadius - referenceRadius) < 1e-10,
+        "room rotation preserves source radius to the initial phone center");
+      const near = backdropIrradiance({ x: 128, y: 120, z: 0 });
+      const far = backdropIrradiance({ x: 128, y: 120, z: 3 });
+      const nearSide = surfaceShade("top", false, { x: 128, y: 200, z: 0 });
+      const farSide = surfaceShade("top", false, { x: 128, y: 200, z: 3 });
+      assert.ok(near <= 1 && near >= 0.35);
+      assert.ok(far < near && far >= 0.35,
+        "the same fixed light loses diffuse contribution across the physical gap");
+      assert.ok(nearSide <= 0.77 && nearSide >= 0.45);
+      assert.ok(farSide < nearSide && farSide >= 0.45,
+        "side-face diffuse light also falls with physical distance");
+      results.push({ near, far, nearSide, farSide });
+    }
+    for (const [positive, negative] of [[results[0], results[1]], [results[2], results[3]]]) {
+      assert.ok(Math.abs(positive.near - negative.near) < 1e-12,
+        "opposing yaw and roll preserve the center-point irradiance");
+      assert.ok(Math.abs(positive.far - negative.far) < 1e-12);
+      assert.ok(Math.abs(positive.nearSide - negative.nearSide) < 1e-12);
+      assert.ok(Math.abs(positive.farSide - negative.farSide) < 1e-12);
+    }
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
+  }
+});
+
+test("raising either side toward a fixed room lamp reverses the receiving-board light gradient", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  const radians = 10 * Math.PI / 180;
+  const depth = 85 / SCENE_DEPTH_TO_NATIVE_PIXELS;
+  const pixelsPerCm = 256 / 6.7;
+  const roomLamp = [0, -25 * Math.sin(7 * Math.PI / 180) * pixelsPerCm,
+    -25 * Math.cos(7 * Math.PI / 180) * pixelsPerCm];
+  try {
+    setSceneLightPlacement({ distanceCm: 25, elevationDegrees: 7, gameWidthCm: 6.7 });
+    for (const angle of [-radians, radians]) {
+      // Inverse phone rotation, with positive angle bringing its left edge toward the lamp.
+      setSceneLightRotation(rotationY(angle));
+      const values = [];
+      for (const x of [-64, 64]) {
+        // Independently rotate the receiving point into the room, leaving the lamp fixed.
+        const z = depth * SCENE_DEPTH_TO_NATIVE_PIXELS;
+        const roomPoint = [Math.cos(angle) * x - Math.sin(angle) * z, 0,
+          Math.sin(angle) * x + Math.cos(angle) * z];
+        const ray = roomLamp.map((value, index) => value - roomPoint[index]);
+        const length = Math.hypot(...ray);
+        const outwardNormal = [Math.sin(angle), 0, -Math.cos(angle)];
+        const cosine = Math.max(0, ray.reduce((sum, value, index) =>
+          sum + value * outwardNormal[index], 0) / length);
+        const expected = 0.35 + 0.65 * cosine * Math.min(1,
+          (25 * pixelsPerCm / length) ** 2);
+        const actual = backdropIrradiance({ x: 128 + x, y: 120, z: depth });
+        assert.ok(Math.abs(actual - expected) < 1e-12);
+        values.push(actual);
+      }
+      assert.equal(values[0] > values[1], angle > 0,
+        "the raised side is nearer and receives more light; reversing tilt reverses the gradient");
+    }
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
+  }
+});
+
+test("backdrop irradiance validates coordinates, depth, dimensions, and coincident rays", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  try {
+    setSceneLightPlacement({ distanceCm: 5, elevationDegrees: 0, gameWidthCm: 256 });
+    setSceneLightRotation(rotationY(Math.PI));
+    const light = getSceneLightPosition();
+    const coincidentPoint = {
+      x: light.x,
+      y: light.y,
+      z: light.z,
+    };
+    assert.equal(backdropIrradiance(coincidentPoint), 1);
+    for (const point of [null, {}, { x: NaN, y: 1, z: 0 }, { x: 0, y: Infinity, z: 0 }, { x: 1, y: 2 }]) {
+      assert.throws(() => backdropIrradiance(point));
+    }
+    for (const invalidLight of [null, {}, { x: 1, y: 2, z: NaN }]) {
+      assert.throws(() => backdropIrradianceFromLight({ x: 0, y: 0, z: 0 }, invalidLight));
+    }
+    for (const depth of [-0.01, 6.01]) {
+      assert.throws(() => backdropIrradiance({ x: 1, y: 2, z: depth }), RangeError);
+    }
+    assert.throws(() => backdropIrradiance({ x: 1, y: 2, z: 0 }, 0, 240), RangeError);
+    assert.throws(() => backdropIrradiance({ x: Number.MAX_VALUE, y: Number.MAX_VALUE, z: 0 }), RangeError);
+    assert.equal(createBackdropIrradianceSampler(light, light.z, 256, 240)(light.x, light.y), 1);
+    const huge = createBackdropIrradianceSampler({ x: Number.MAX_VALUE, y: 0, z: 0 }, 0);
+    assert.ok(Number.isFinite(huge(0, 0)), "overflowed squared length falls back to hypot");
+    for (const args of [
+      [null, 0, 256, 240],
+      [{ x: 0, y: NaN, z: 0 }, 0, 256, 240],
+      [light, NaN, 256, 240],
+      [light, -0.01, 256, 240],
+      [light, 0, 0, 240],
+      [{ x: Number.MAX_VALUE, y: 0, z: 0 }, 0, 0.5, 240],
+    ]) {
+      assert.throws(() => createBackdropIrradianceSampler(...args));
+    }
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
   }
 });

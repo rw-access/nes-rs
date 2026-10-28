@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CARD_EDGE_COLOR, CanvasDepthRenderer, collectSideFaces, collectTileSupportedFaces, projectDepthPoint } from "./depth-mesh.js";
+import { CanvasDepthRenderer, collectSideFaces, collectTileSupportedFaces, projectDepthPoint } from "./depth-mesh.js";
 import {
   getSceneLightRevision,
   getSceneLightRotation,
@@ -56,7 +56,7 @@ test("solid rectangle produces its inward-facing left and top runs despite inter
   const faces = collectSideFaces(rgba(10, 10, pixels), 10, 10);
   assert.equal(faces.length, 2);
   assert.deepEqual(faces.map((face) => face.orientation).sort(), ["left", "top"]);
-  assert.ok(faces.every((face) => face.color.join(",") === CARD_EDGE_COLOR.join(",")));
+  assert.ok(faces.every((face) => face.color.join(",") === "100,120,140"));
   assert.ok(faces.every((face) => face.start && face.end && Number.isFinite(face.sortKey)));
 });
 
@@ -77,7 +77,7 @@ test("transparent holes create inward-facing exposed boundaries", () => {
 test("opaque black pixels remain in the silhouette", () => {
   const faces = collectSideFaces(rgba(10, 10, [[7, 7, 0, 0, 0]]), 10, 10);
   assert.equal(faces.length, 2);
-  assert.ok(faces.every((face) => face.color.join(",") === CARD_EDGE_COLOR.join(",")));
+  assert.ok(faces.every((face) => face.color.join(",") === "0,0,0"));
 });
 
 test("projection keeps fractional depth continuous without pixel rounding", () => {
@@ -256,25 +256,60 @@ test("perspective uses the refined quarter-depth scale continuously", () => {
   assert.ok(above.x > below.x && above.y > below.y);
 });
 
-test("printed artwork colors merge into one unprinted cut-edge run without changing source", () => {
+test("source color changes split exposed edge runs without adding internal walls", () => {
   const pixels = [];
   for (let y = 7; y <= 11; y++) for (let x = 7; x <= 11; x++) {
     pixels.push([x, y, ...(y % 2 ? [0, 0, 0] : [210, 120, 60])]);
   }
   const source = rgba(12, 12, pixels), original = source.slice();
-  const wall = collectSideFaces(source, 12, 12).filter(face => face.orientation === "left");
-  assert.equal(wall.length, 1, "color changes do not split a straight physical edge into stripes");
-  assert.deepEqual(wall[0].start, { x: 7, y: 7 });
-  assert.deepEqual(wall[0].end, { x: 7, y: 12 });
-  assert.deepEqual(wall[0].color, CARD_EDGE_COLOR);
+  const wall = collectSideFaces(source, 12, 12).filter(face => face.orientation === "left")
+    .sort((a, b) => a.start.y - b.start.y);
+  assert.equal(wall.length, 5);
+  for (let index = 0; index < wall.length; index++) {
+    assert.deepEqual(wall[index].start, { x: 7, y: 7 + index });
+    assert.deepEqual(wall[index].end, { x: 7, y: 8 + index });
+    assert.deepEqual(wall[index].color, index % 2 ? [210, 120, 60] : [0, 0, 0]);
+  }
   assert.deepEqual(source, original);
 });
 
-test("transparent gaps still separate unprinted card edges", () => {
+test("all four side orientations inherit each boundary pixel and merge only equal colors", () => {
+  const pixels = [];
+  for (let y = 2; y < 6; y++) for (let x = 2; x < 6; x++) {
+    pixels.push([x, y, x * 31, y * 37, (x + y) * 13]);
+  }
+  const source = rgba(8, 8, pixels), original = source.slice();
+  try {
+    const faces = [];
+    for (const offset of [-1, 1]) {
+      setSceneView(offset, offset);
+      faces.push(...collectSideFaces(source, 8, 8));
+    }
+    assert.equal(faces.length, 16, "only the rectangle's exposed perimeter contributes walls");
+    assert.deepEqual([...new Set(faces.map(face => face.orientation))].sort(), ["bottom", "left", "right", "top"]);
+    for (const face of faces) {
+      const x = face.start.x - (face.orientation === "right" ? 1 : 0);
+      const y = face.start.y - (face.orientation === "bottom" ? 1 : 0);
+      assert.deepEqual(face.color, [...source.slice((y * 8 + x) * 4, (y * 8 + x) * 4 + 3)]);
+    }
+    setSceneView(1, 1);
+    const band = rgba(6, 1, [[0, 0, 200, 30, 10], [1, 0, 200, 30, 10],
+      [2, 0, 0, 0, 0], [3, 0, 0, 0, 0], [4, 0, 20, 180, 50], [5, 0, 20, 180, 50]]);
+    const bottom = collectSideFaces(band, 6, 1).filter(face => face.orientation === "bottom")
+      .sort((a, b) => a.start.x - b.start.x);
+    assert.deepEqual(bottom.map(face => [face.start.x, face.end.x, face.color]),
+      [[0, 2, [200, 30, 10]], [2, 4, [0, 0, 0]], [4, 6, [20, 180, 50]]]);
+    assert.deepEqual(source, original);
+  } finally {
+    setSceneView(0, 0);
+  }
+});
+
+test("transparent gaps keep differently colored edges separate", () => {
   const source = rgba(8, 1, [[5, 0, 0, 0, 0], [7, 0, 220, 40, 20]]);
   const edges = collectSideFaces(source, 8, 1).filter(face => face.orientation === "left");
   assert.deepEqual(edges.map(face => face.start.x), [7, 5]);
-  assert.ok(edges.every(face => face.color === CARD_EDGE_COLOR));
+  assert.deepEqual(edges.map(face => face.color), [[220, 40, 20], [0, 0, 0]]);
 });
 
 test("renderer redraws changed occluders, removes them on null, and draws source art last", () => {
@@ -729,7 +764,7 @@ test("sprite relief modes add a clipped rear-projected shadow and opt-in tile fa
     const recoloredSource = source.slice();
     recoloredSource[(3 * 10 + 1) * 4] = 222;
     assert.equal(renderer.paint(recoloredSource, 0.5, tilePixels, projection, { mode: "contact", softness: 1 }), true);
-    assert.deepEqual(renderer.tileSupportedFaces[0].color, CARD_EDGE_COLOR, "printed color changes leave cut-edge material unchanged");
+    assert.deepEqual(renderer.tileSupportedFaces[0].color, [222, 80, 40], "boundary color changes also update the supported side material");
     assert.equal(renderer.sourceImage.data[(3 * 10 + 1) * 4], 222, "printed face still updates");
     assert.equal(renderer.paint(source, 0.5, tilePixels, projection, { mode: "cutout", softness: 0.5 }), true);
     const softerShadow = reliefContext.events.filter(([name, event]) => name === "drawImage" && event.image === renderer.sourceCanvas).at(-1)[1];

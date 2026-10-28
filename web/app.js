@@ -2,11 +2,13 @@ import init, * as wasm from "./pkg/nes_wasm.js";
 import { SpatialAudio } from "./spatial-audio.js";
 import { CanvasDepthRenderer, cameraDepthScale, projectDepthPoint } from "./depth-mesh.js";
 import { DioramaFrame } from "./diorama-frame.js";
+import { CanvasBackdropRenderer } from "./backdrop-lighting.js";
+import { CanvasCardShadowRenderer } from "./card-shadow.js";
 import { RimHousing, RIM_MATERIALS } from "./rim-housing.js";
 import { RIM_CORNER_FRACTION } from "./rim-outline.js";
 import { setSceneLightPlacement, setSceneLightRotation, getSceneLightRevision } from "./scene-lighting.js";
 import { setSceneCamera, getSceneViewRevision } from "./scene-view.js";
-import { resolveScreenProfile, estimateGameWidthCm, computeViewingCamera, SCENE_DEPTH_TO_NATIVE_PIXELS, computeStationaryView } from "./viewing-model.js";
+import { resolveScreenProfile, estimateGameWidthCm, computeViewingCamera, SCENE_DEPTH_TO_NATIVE_PIXELS, computeStationaryView, resolveRenderedScenePose } from "./viewing-model.js";
 import { DeviceTiltController } from "./device-tilt.js";
 import { loadCachedRom, saveCachedRom, clearCachedRom } from "./rom-store.js";
 import { resolveSceneDepth, resolveShadowSoftness, resolveRimThickness, resolveRimRecess, gameplayShadowProjection } from "./depth-model.js";
@@ -98,7 +100,12 @@ const backgroundShadow = document.createElement("canvas");
 backgroundShadow.className = "layer-shadow";
 backgroundShadow.setAttribute("aria-hidden", "true");
 depthStack.insertBefore(backgroundShadow, depthCanvases[1]);
-const backgroundShadowContext = backgroundShadow.getContext("2d");
+const cardShadowRenderer = new CanvasCardShadowRenderer(backgroundShadow, WIDTH, HEIGHT);
+const shadowCasterCanvas = document.createElement("canvas");
+shadowCasterCanvas.width = WIDTH;
+shadowCasterCanvas.height = HEIGHT;
+const shadowCasterContext = shadowCasterCanvas.getContext("2d");
+const shadowCasterImage = shadowCasterContext.createImageData(WIDTH, HEIGHT);
 // Like a surrounding tile, rim sides sit over backdrop and below all gameplay.
 const rimCanvas = document.createElement("canvas");
 rimCanvas.id = "tv-rim";
@@ -107,8 +114,7 @@ rimCanvas.setAttribute("aria-hidden", "true");
 depthStack.insertBefore(rimCanvas, depthCanvases[1]);
 const rimHousing = new RimHousing(rimCanvas, screenStage, WIDTH, HEIGHT);
 let shadowsNeedPaint = true;
-const backdropContext = depthCanvases[0].getContext("2d", { alpha: false });
-const backdropImage = backdropContext.createImageData(WIDTH, HEIGHT);
+const backdropRenderer = new CanvasBackdropRenderer(depthCanvases[0], WIDTH, HEIGHT);
 const depthRenderers = depthCanvases.map((plane, index) => index === 0 ? null : new CanvasDepthRenderer(plane, WIDTH, HEIGHT));
 const ghostCanvas = document.querySelector("#depth-ghosts");
 const ghostContext = ghostCanvas.getContext("2d");
@@ -133,6 +139,8 @@ const softnessInput = document.querySelector("#softness-input");
 const softnessOutput = document.querySelector("#softness-value");
 const lightElevationInput = document.querySelector("#light-elevation-input");
 const lightElevationOutput = document.querySelector("#light-elevation-value");
+const lightAzimuthInput = document.querySelector("#light-azimuth-input");
+const lightAzimuthOutput = document.querySelector("#light-azimuth-value");
 const lightDistanceInput = document.querySelector("#light-distance-input");
 const lightDistanceOutput = document.querySelector("#light-distance-value");
 const thicknessInput = document.querySelector("#thickness-input");
@@ -182,6 +190,7 @@ let viewingDistanceAdjusted = false;
 let activeScreenProfile = null;
 let motionState = "off";
 const cardThicknessByMode = { stationary: 4, tilt: 4 };
+const lightElevationByMode = { stationary: 7, tilt: 3 };
 const suggestPhoneMotion = window.matchMedia("(pointer: coarse)").matches;
 
 function updateMotionControls(state = motionState, message = motionStatus.textContent) {
@@ -214,10 +223,14 @@ const motionController = new DeviceTiltController({
       cardThicknessByMode[wasEnabled ? "tilt" : "stationary"] = Number(thicknessInput.value);
       thicknessInput.defaultValue = "4";
       thicknessInput.value = String(cardThicknessByMode[enabled ? "tilt" : "stationary"]);
+      lightElevationByMode[wasEnabled ? "tilt" : "stationary"] = Number(lightElevationInput.value);
+      lightElevationInput.defaultValue = enabled ? "3" : "7";
+      lightElevationInput.value = String(lightElevationByMode[enabled ? "tilt" : "stationary"]);
       pendingMotionView ??= { x: 0, y: 0 };
     }
   },
 });
+motionController.setStrength(Number(motionStrengthInput.value));
 
 function applyPendingMotionView() {
   if (!pendingMotionView) return false;
@@ -250,10 +263,11 @@ function updateViewingCamera() {
   setSceneLightPlacement({
     distanceCm: Number(lightDistanceInput.value),
     elevationDegrees: Number(lightElevationInput.value),
+    azimuthDegrees: Number(lightAzimuthInput.value),
     gameWidthCm,
   });
-  const view = !wantsLayeredVideo() ? { x: 0, y: 0 }
-    : motionController.enabled ? latestMotionView : computeStationaryView({ gameWidthCm });
+  const view = resolveRenderedScenePose(!wantsLayeredVideo() ? { x: 0, y: 0 }
+    : motionController.enabled ? latestMotionView : computeStationaryView({ gameWidthCm }));
   setSceneLightRotation(view.rotation ?? NEUTRAL_ROOM_ROTATION);
   const camera = computeViewingCamera({ distanceCm, gameWidthCm, motionX: view.x, motionY: view.y });
   setSceneCamera(camera.x, camera.y, camera.focalDepth);
@@ -283,6 +297,8 @@ function updateDepthGeometry() {
   updateViewingCamera();
   lightDistanceOutput.textContent = `${Number(lightDistanceInput.value)} cm`;
   lightElevationOutput.textContent = `${Number(lightElevationInput.value)}°`;
+  const azimuth = Number(lightAzimuthInput.value);
+  lightAzimuthOutput.textContent = azimuth === 0 ? "Centered" : `${Math.abs(azimuth)}° ${azimuth < 0 ? "left" : "right"}`;
   motionStrengthOutput.textContent = `${Number(motionStrengthInput.value)}%`;
   const scene = currentSceneDepth();
   const { separation: depth } = scene;
@@ -332,17 +348,15 @@ function updateDepthGeometry() {
     plane.style.transform = "none";
     plane.style.filter = "none";
   });
-  const source = depthCanvases[1];
-  if (backgroundShadow.width !== source.width) backgroundShadow.width = source.width;
-  if (backgroundShadow.height !== source.height) backgroundShadow.height = source.height;
+  cardShadowRenderer.resize(width, width * HEIGHT / WIDTH, window.devicePixelRatio || 1);
   // The receiver is still at full separation, but the shadow's light ray
   // and penumbra cross only the air remaining behind the solid's rear face.
   const shadow = gameplayShadowProjection(scene, WIDTH, HEIGHT);
   backgroundShadow.style.transformOrigin = "50% 50%";
-  backgroundShadow.style.transform = `translate(${shadow.x * pixelScale}px, ${shadow.y * pixelScale}px) scale(${shadow.scale})`;
-  const shadowOpacity = shadow.opacity ?? 1;
-  backgroundShadow.style.filter = `brightness(0) opacity(${0.32 * shadowOpacity}) blur(${shadow.blur * pixelScale * softness}px)`;
-  backgroundShadow.style.visibility = depth > 0 && shadowOpacity > 0 ? "visible" : "hidden";
+  // The shadow renderer already projects the entire solid into display space.
+  backgroundShadow.style.transform = "none";
+  backgroundShadow.style.filter = `brightness(0) opacity(0.32) blur(${shadow.blur * pixelScale * softness}px)`;
+  backgroundShadow.style.visibility = depth > 0 ? "visible" : "hidden";
   // The backdrop is unbounded; the TV opening casts a translucent shadow
   // rather than clipping shadows or artwork to a smaller receiving card.
   backgroundShadow.style.clipPath = "none";
@@ -376,6 +390,9 @@ function setEffectsSettingsOpen(open) {
 function resetEffectsSettings() {
   cardThicknessByMode.stationary = 4;
   cardThicknessByMode.tilt = 4;
+  lightElevationByMode.stationary = 7;
+  lightElevationByMode.tilt = 3;
+  lightElevationInput.defaultValue = motionController.enabled ? "3" : "7";
   for (const control of effectsSettings.querySelectorAll("input, select")) {
     if (control instanceof HTMLInputElement) {
       if (control.type === "checkbox" || control.type === "radio") control.checked = control.defaultChecked;
@@ -420,6 +437,7 @@ recessedOpeningInput.addEventListener("change", updatePresentation);
 softnessInput.addEventListener("input", updatePresentation);
 lightDistanceInput.addEventListener("input", updatePresentation);
 lightElevationInput.addEventListener("input", updatePresentation);
+lightAzimuthInput.addEventListener("input", updatePresentation);
 solidSidesInput.addEventListener("change", updatePresentation);
 spriteReliefInput.addEventListener("change", updatePresentation);
 spriteReliefStyle.addEventListener("change", updatePresentation);
@@ -455,7 +473,7 @@ viewingDistanceInput.addEventListener("input", () => {
   updatePresentation();
 });
 screenProfileInput.addEventListener("change", updatePresentation);
-for (const input of [effectsButton, effectsSettingsButton, resetEffectsSettingsButton, motionButton, motionRecenterButton, motionTrackingInput, motionStrengthInput, viewingDistanceInput, screenProfileInput, depthInput, softnessInput, lightDistanceInput, lightElevationInput, rimSoftnessInput, thicknessInput, rimThicknessInput, rimRecessInput, consoleEdgeInput, rimInput, recessedOpeningInput, rimWidthInput, solidSidesInput, spriteReliefInput, spriteReliefStyle, thinOverlapsInput, dioramaInput]) {
+for (const input of [effectsButton, effectsSettingsButton, resetEffectsSettingsButton, motionButton, motionRecenterButton, motionTrackingInput, motionStrengthInput, viewingDistanceInput, screenProfileInput, depthInput, softnessInput, lightDistanceInput, lightElevationInput, lightAzimuthInput, rimSoftnessInput, thicknessInput, rimThicknessInput, rimRecessInput, consoleEdgeInput, rimInput, recessedOpeningInput, rimWidthInput, solidSidesInput, spriteReliefInput, spriteReliefStyle, thinOverlapsInput, dioramaInput]) {
   input.addEventListener("focus", () => {
     heldButtons = 0;
     stopRewind();
@@ -684,15 +702,13 @@ function renderVideo() {
         overlapFraction: thinOverlapsInput.checked ? 1 / 3 : 1 }
       : null;
     const rim = currentRimGeometry(scene);
+    backdropRenderer.paint(planes.subarray(0, planeBytes), separation);
     if (dioramaInput.checked && rim.enabled) {
-      dioramaFrame.paint(planes.subarray(0, planeBytes), separation, resolveShadowSoftness(Number(rimSoftnessInput.value)), rim.thickness, rim.frontDepth);
+      dioramaFrame.paint(backdropRenderer.outputRGBA, separation, resolveShadowSoftness(Number(rimSoftnessInput.value)), rim.thickness, rim.frontDepth);
     }
     for (let plane = 0; plane < 4; plane += 1) {
       const pixels = planes.subarray(plane * planeBytes, (plane + 1) * planeBytes);
-      if (plane === 0) {
-        backdropImage.data.set(pixels);
-        backdropContext.putImageData(backdropImage, 0, 0);
-      } else {
+      if (plane !== 0) {
         // Relief follows both priority relationships: front sprites over tiles,
         // and tiles over rear sprites. Caster artwork stays fixed and unmodified.
         const relief = plane === 3 ? spriteRelief
@@ -703,12 +719,17 @@ function renderVideo() {
       }
     }
     if (shadowsNeedPaint) {
-      backgroundShadowContext.clearRect(0, 0, backgroundShadow.width, backgroundShadow.height);
-      for (let plane = 1; plane < 4; plane += 1) {
-        // Project the original near silhouette once. Re-projecting already
-        // extruded walls would incorrectly send them past the backdrop.
-        backgroundShadowContext.drawImage(depthRenderers[plane].sourceCanvas, 0, 0, backgroundShadow.width, backgroundShadow.height);
+      const alpha = shadowCasterImage.data;
+      for (let offset = 3; offset < planeBytes; offset += 4) {
+        alpha[offset] = planes[planeBytes + offset] || planes[2 * planeBytes + offset]
+          || planes[3 * planeBytes + offset] ? 255 : 0;
       }
+      shadowCasterContext.putImageData(shadowCasterImage, 0, 0);
+      cardShadowRenderer.paint(shadowCasterCanvas, alpha, {
+        frontDepth: 0, backDepth: depth, receiverDepth: separation,
+      });
+      backgroundShadow.style.opacity = String(cardShadowRenderer.opacity);
+      backgroundShadow.style.visibility = separation > 0 && cardShadowRenderer.opacity > 0 ? "visible" : "hidden";
     }
     shadowsNeedPaint = false;
     renderDepthGhosts(rewinding ? new Uint8Array(0) : emulator.ghost_buffer());

@@ -73,7 +73,10 @@ test('charcoal walls use directional light with narrow bevels and separate rear 
       {x:128,y:240,nx:0,ny:-1}, {x:0,y:120,nx:1,ny:0}];
     for (const [index, point] of midpoints.entries()) {
       const dx=128-point.x,dy=-48-point.y,dz=(-48-.75)*19.2;
-      const shade=.45+.32*Math.max(0,(point.nx*dx+point.ny*dy)/Math.hypot(dx,dy,dz));
+      const length=Math.hypot(dx,dy,dz);
+      const referenceRadius=Math.hypot(-168,-48*19.2);
+      const attenuation=Math.min(1,(referenceRadius/length)**2);
+      const shade=.45+.32*Math.max(0,(point.nx*dx+point.ny*dy)/length)*attenuation;
       const expected=RIM_MATERIALS.charcoal.side.map(channel=>Math.round(channel*shade));
       assert.deepEqual(rgb(materials[index].stops[1].color),expected,'rim shading follows the frontal light at its physical midpoint');
       assert.ok(shade>=.45,'directional lighting never drops below ambient shade');

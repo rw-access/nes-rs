@@ -67,8 +67,12 @@ translation. The actual phone feel still needs hardware testing.
 whole centimeters. Phone presets start at 35 cm and tablet presets at 50 cm.
 It changes camera perspective and motion together, including the camera's
 normal distance as the device rotates. **Motion strength** remains an artistic
-gain: 50% uses the calibrated ray, lower values soften movement, higher values
-exaggerate it. Recenter keeps the selected viewing distance.
+gain: 50% uses the calibrated ray, while the experimental 100% default doubles
+the view response to reveal thin edges with smaller movements. Lower values
+soften movement. Camera and lighting share the amplified virtual pose, keeping
+their relative placement consistent. At 50% the forward pose follows measured
+phone rotation; amplified settings represent a virtual room. In-plane roll stays
+one-to-one. This is not head tracking. Recenter keeps the selected viewing distance.
 
 **Screen size** supplies an approximate physical display width. Auto uses the
 screen dimensions and pointer type to choose a phone or tablet size; it does
@@ -102,7 +106,8 @@ turning effects off closes the panel and disables its settings button. The defau
 preset is Background separation 85 game pixels, Card thickness 4 game pixels in
 both stationary and Tilt modes, Shadow softness
 18%, with Solid sides, Thickness + shadows layer relief, Thin overlaps, and TV
-rim shadow enabled. Light distance starts at 25 cm with 7° elevation. All depth uses center perspective;
+rim shadow enabled. Light distance starts at 25 cm with 3° elevation in Tilt,
+7° stationary, and an 8° left offset. All depth uses center perspective;
 there is no separate isometric mode or projection switch.
 The soundstage control is hidden for now; playback uses the original mono mix.
 Advanced settings separate **Scene geometry**, **Viewing setup**, and **Lighting**.
@@ -122,14 +127,16 @@ sizes alongside the percentages. Viewing distance alone uses estimated physical
 centimeters; screen size calibrates the camera, not the model dimensions.
 Light distance, elevation, and the two shadow softness controls are in Lighting.
 
-Cut edges use one warm unprinted board material with the shared light, instead
-of stretching artwork colors down the sides. The default four-pixel card is
+Cut edges inherit the exact RGB color of each adjoining sprite or tile pixel
+and receive shading from the shared light. Adjacent edge pixels of the same
+color merge into runs; color changes split the side material without adding
+internal walls. The default four-pixel card is
 roughly 1 mm on a phone-sized opening, but its physical display size scales
 with the game, rather than depending on an estimated device profile.
 
 One thin inner frame surrounds the game, without a decorative cabinet or a
 second dark bezel. Only that frame has projected depth.
-Its front edge starts slightly behind the foreground (5% recess). Its sides project
+Its front edge starts slightly behind the foreground (1% recess). Its sides project
 inward over exposed background, below every sprite and tile layer. A subtle
 0.5% corner radius rounds the opening for both flat and 2.5D output. The front
 rim, curved wall joins, and shadow share this outline; the outer corner radius
@@ -138,7 +145,7 @@ resolution and aspect ratio stay unchanged.
 
 **Rim** switches the entire frame off, including its face, sides, and shadow.
 **Rim width** ranges from a full frame (100%) to none (0%), defaulting to a
-hairline 2%, with 1% adjustment steps. It never changes game size or
+hairline 1%, with 1% adjustment steps. It never changes game size or
 position. **Rim thickness** controls
 its solid depth separately: use 0% for a flat paper border, or a small percentage
 for a thin surrounding tile. Turning the rim off retains these settings.
@@ -156,18 +163,31 @@ background color; clouds, hills, and HUD drawn as tiles remain with gameplay.
 NES drawing priority continues to determine occlusion, not physical distance.
 A nearby frontal light spreads shadows outward before the camera projects
 them onto their receiving surface. This can counter the camera's shrinking;
-shadows, sides, and the rim still share one perspective. The light crosses only
-the air behind each solid. At very small gaps the card meets the backdrop and
-the shadow becomes a contact edge.
-Gameplay artwork stays aligned.
+shadows, sides, and the rim still share one perspective. The caster is the complete extruded silhouette: front, rear, and connecting
+cut edges. Their projections are combined before applying translucency once,
+so solid thickness is neither added twice nor reduced to a rear-face shadow.
+At contact, the rear silhouette meets the receiving board while the exposed
+solid can still cast a shadow beyond that contact. Gameplay artwork stays aligned.
 
 **Light distance** ranges from 5 to 300 cm, default 25 cm, measured from the
-phone's initial screen center. **Light elevation** is 0–80°, default 7°, above
-the initial screen normal. Distance moves the fixture along that ray, preserving
+phone's initial screen center. **Light elevation** is 0–80°, above the initial
+screen normal: 3° by default in Tilt for a subtle downward cast after Recenter,
+and 7° in stationary mode. Manual elevation values are retained separately for
+each mode during the page session; Recenter preserves them. Distance moves
+the fixture along that ray, preserving
 its angle while making illumination steadier as the source moves farther away.
-Elevation changes the angle without changing the distance. Both affect side
-shading, gameplay shadows and rim shadows together; model dimensions and source
-art remain fixed. Viewing distance does not move the lamp.
+Elevation changes the angle without changing the distance. **Light horizontal
+angle** moves it left or right of the initial screen normal, from −60° to 60°,
+with an 8° left default. The slight offset separates the light from the viewing
+axis so its cast direction is easier to see. These controls affect side shading,
+backboard illumination, gameplay shadows and rim shadows together; model
+dimensions and source art remain fixed. Viewing distance does not move the lamp.
+
+The backboard receives ambient and Lambert diffuse illumination from this same
+room-fixed fixture. Each visible pixel is traced to its point on the farther
+board before shading, so changing the view does not paint the light gradient
+onto the front screen plane. The original printed gameplay faces retain their
+colors. Flat video bypasses this shading.
 
 Tilt / Recenter anchors the fixture in the initial phone frame. Rotation changes
 its local coordinates; disabling Tilt restores the static position. The app
@@ -178,7 +198,7 @@ back-facing rays fade safely. This replaces the old abstract 1–8× multiplier.
 25%. It follows changes to the foreground knob, limited by the distance left
 before the backdrop. The output indicates when this limit reduces the thickness.
 
-**Rim recess** moves the rim behind gameplay: 0% is flush, the default 5% is a
+**Rim recess** moves the rim behind gameplay: 0% is flush, the default 1% is a
 slight recess, and 100% places its front at the backdrop. Its front, sides, and shadow follow the
 same camera as the game. Gameplay stays fixed and paints over the rim; even a
 paper rim can recede. Its solid thickness is capped so the rear cannot pass the
@@ -244,16 +264,17 @@ reaches the former 200% blur multiplier at 100%. Its default is 18%.
 **Solid sides** toggles paper versus solid edges. **Card thickness** ranges
 from paper at 0 to 8 game pixels, defaulting to 4. The two scene sliders use
 integer model-pixel steps. Changing separation leaves thickness fixed except
-when the gap is shallower than the card. Gameplay shadow offset and blur use
-the air left behind the card; rim shadows use the rim's own clearance.
+when the gap is shallower than the card. The full solid determines
+the gameplay shadow silhouette; its diffusion uses the air behind the card.
+Rim shadows use the rim's own clearance.
 Turning Solid sides off preserves the selected material size. `V` still cycles Background,
 Sprites, and Both diagnostic views.
 
 Sidewalls join exposed pixel edges into continuous polygons with smooth edges
 at display resolution; the source artwork stays crisp. Rear edges converge toward
 the screen center. The camera does not tilt the picture, and Thickness never
-moves the front artwork. Cut edges use a warm unprinted board color,
-independent of the artwork printed on the face. Opaque tiles hide added front-sprite
+moves the front artwork. Cut edges extend the adjoining artwork color down
+the extrusion, including opaque black outlines, with directional lighting. Opaque tiles hide added front-sprite
 sidewalls so the cosmetic thickness does not project feet over a floor or pipe.
 During game loading transitions that temporarily stop drawing, retained picture
 pixels keep their layer attribution and effects until the game replaces them.

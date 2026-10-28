@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { relativeLookPose, relativeTiltPose } from "./device-tilt.js";
 import { cameraDepthScale, PERSPECTIVE_DEPTH_FACTOR, projectDepthPoint } from "./depth-mesh.js";
+import { getSceneLightPlacement, getSceneLightPosition, getSceneLightRotation, setSceneLightPlacement, setSceneLightRotation } from "./scene-lighting.js";
 import { getSceneCameraDepth, setSceneCamera } from "./scene-view.js";
-import { computeViewingCamera, estimateGameWidthCm, resolveScreenProfile, SCREEN_PROFILES, computeStationaryView, DESKTOP_GAME_WIDTH_CM } from "./viewing-model.js";
+import { computeViewingCamera, estimateGameWidthCm, resolveRenderedScenePose, resolveScreenProfile, SCREEN_PROFILES, computeStationaryView, DESKTOP_GAME_WIDTH_CM, SCENE_DEPTH_TO_NATIVE_PIXELS } from "./viewing-model.js";
 
 function assertNear(actual, expected, tolerance = 1e-11) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} differs from ${expected}`);
@@ -14,6 +16,44 @@ function slopes(motionX, motionY) {
   const y = motionY * scale;
   const length = Math.hypot(x, y, 1);
   return { x: x / length, y: y / length, z: 1 / length };
+}
+
+function multiplyVector(matrix, vector) {
+  return [
+    matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
+    matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
+    matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2],
+  ];
+}
+
+function assertProperRotation(matrix, tolerance = 1e-8) {
+  for (let row = 0; row < 3; row += 1) for (let other = 0; other < 3; other += 1) {
+    const dot = matrix.slice(row * 3, row * 3 + 3)
+      .reduce((sum, value, index) => sum + value * matrix[other * 3 + index], 0);
+    assertNear(dot, row === other ? 1 : 0, tolerance);
+  }
+  const determinant = matrix[0] * (matrix[4] * matrix[8] - matrix[5] * matrix[7])
+    - matrix[1] * (matrix[3] * matrix[8] - matrix[5] * matrix[6])
+    + matrix[2] * (matrix[3] * matrix[7] - matrix[4] * matrix[6]);
+  assertNear(determinant, 1, tolerance);
+}
+
+function rotationDifference(left, right) {
+  const trace = [0, 1, 2].reduce((sum, row) => sum + [0, 1, 2].reduce((dot, column) =>
+    dot + left[column * 3 + row] * right[column * 3 + row], 0), 0);
+  return Math.acos(Math.max(-1, Math.min(1, (trace - 1) / 2)));
+}
+
+function assertRenderedEye(pose, distanceCm = 35, gameWidthCm = 7) {
+  const camera = computeViewingCamera({
+    distanceCm, gameWidthCm, motionX: pose.x, motionY: pose.y,
+  });
+  const focalNative = distanceCm / gameWidthCm * 256;
+  const renderedEye = [camera.x * 256, camera.y * 240, -camera.focalDepth * SCENE_DEPTH_TO_NATIVE_PIXELS];
+  const transformedInitialEye = multiplyVector(pose.rotation, [0, 0, -focalNative]);
+  transformedInitialEye.forEach((value, index) => assertNear(value, renderedEye[index], 1e-8));
+  assertProperRotation(pose.rotation, 1e-8);
+  return { camera, renderedEye, focalNative };
 }
 
 test("screen profiles expose calibrated active widths and broad Auto estimates", () => {
@@ -180,4 +220,129 @@ test("viewing camera validates physical distance, width, motion, focal depth, an
   assert.throws(() => computeViewingCamera({ distanceCm: 35, gameWidthCm: 7, width: 0 }), RangeError);
   assert.throws(() => computeViewingCamera({ distanceCm: 100, gameWidthCm: 0.01 }), RangeError,
     "the computed view must fit the shared scene-camera bounds");
+});
+
+test("rendered pose keeps camera and measured eye coherent across arbitrary look tilts and strengths", () => {
+  const motions = [
+    [{ alpha: 83, beta: 37, gamma: -22 }, { alpha: 83, beta: 48, gamma: -8 }],
+    [{ alpha: 0, beta: 90, gamma: 0 }, { alpha: 85, beta: 90, gamma: 0 }],
+    [{ alpha: 217, beta: 71, gamma: -18 }, { alpha: 249, beta: 83, gamma: -5 }],
+    [{ alpha: 31, beta: 50, gamma: 12 }, { alpha: 80, beta: 62, gamma: 29 }],
+  ];
+  for (const strength of [0, 25, 50, 75, 100]) {
+    for (const [baseline, current] of motions) {
+      const measured = relativeLookPose(baseline, current, 0, 0, strength);
+      const rendered = resolveRenderedScenePose(measured);
+      assert.equal(rendered.x, measured.x);
+      assert.equal(rendered.y, measured.y);
+      assertProperRotation(rendered.rotation, 1e-8);
+      if (measured.rotation[8] >= 0.1 || measured.rotation[8] <= 0) assertRenderedEye(rendered);
+    }
+  }
+});
+
+test("rendered pose preserves forward strength-50, stationary, and pure-roll matrices exactly", () => {
+  const baseline = { alpha: 217, beta: 71, gamma: -18 };
+  const current = { alpha: 249, beta: 83, gamma: -5 };
+  const calibrated = relativeLookPose(baseline, current, 0, 0, 50);
+  assert.deepEqual(resolveRenderedScenePose(calibrated).rotation, calibrated.rotation);
+
+  const stationary = computeStationaryView({ gameWidthCm: DESKTOP_GAME_WIDTH_CM });
+  assert.deepEqual(resolveRenderedScenePose(stationary).rotation, stationary.rotation);
+
+  const roll = relativeLookPose(
+    { alpha: 0, beta: 0, gamma: 0 },
+    { alpha: 45, beta: 0, gamma: 0 },
+  );
+  assertNear(roll.x, 0);
+  assertNear(roll.y, 0);
+  assert.deepEqual(resolveRenderedScenePose(roll).rotation, roll.rotation);
+});
+
+test("rendered pose preserves a safe back-facing raw rotation without introducing a camera flip", () => {
+  const measured = relativeLookPose(
+    { alpha: 0, beta: 0, gamma: 0 },
+    { alpha: 0, beta: 180, gamma: 0 },
+  );
+  assert.ok(measured.rotation[8] <= 0);
+  const rendered = resolveRenderedScenePose(measured);
+  assert.deepEqual(rendered.rotation, measured.rotation);
+  assert.equal(rendered.x, measured.x);
+  assert.equal(rendered.y, measured.y);
+});
+
+test("rendered correction tapers continuously through the forward-to-backward boundary", () => {
+  const baseline = { alpha: 0, beta: 0, gamma: 0 };
+  for (const strength of [0, 25, 50, 75, 100]) {
+    for (const tracking of [relativeLookPose, relativeTiltPose]) {
+      for (const direction of [1, -1]) {
+        let previous = null;
+        for (let step = 0; step <= 120; step += 1) {
+          const angle = direction > 0 ? 84 + step * 0.1 : 96 - step * 0.1;
+          const measured = tracking(baseline, { alpha: 0, beta: angle, gamma: 0 }, 0, 0, strength);
+          const rendered = resolveRenderedScenePose(measured);
+          assertProperRotation(rendered.rotation, 1e-8);
+          if (previous) {
+            assert.ok(rotationDifference(previous, rendered.rotation) < 3 * Math.PI / 180,
+              `${tracking.name} strength ${strength} had a boundary jump near ${angle}°`);
+          }
+          previous = rendered.rotation;
+        }
+      }
+    }
+  }
+});
+
+test("the shared rendered rotation preserves eye-lamp distance and inverse-recovers both points", () => {
+  const originalPlacement = getSceneLightPlacement();
+  const originalRotation = [...getSceneLightRotation()];
+  const placement = { distanceCm: 25, elevationDegrees: 10, azimuthDegrees: 14, gameWidthCm: 7 };
+  const initialOrientation = { alpha: 83, beta: 37, gamma: -22 };
+  const currentOrientation = { alpha: 121, beta: 56, gamma: -4 };
+  try {
+    setSceneLightRotation([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    setSceneLightPlacement(placement);
+    const baselineLight = getSceneLightPosition();
+    const lamp0 = [baselineLight.x - 128, baselineLight.y - 120, baselineLight.z * SCENE_DEPTH_TO_NATIVE_PIXELS];
+    const raw = relativeLookPose(initialOrientation, currentOrientation, 0, 0, 100);
+    const rendered = resolveRenderedScenePose(raw);
+    const { renderedEye, focalNative } = assertRenderedEye(rendered);
+    const eye0 = [0, 0, -focalNative];
+    const transformedLamp = multiplyVector(rendered.rotation, lamp0);
+    const measuredEye = multiplyVector(rendered.rotation, eye0);
+    const initialDistance = Math.hypot(...eye0.map((value, index) => value - lamp0[index]));
+    const renderedDistance = Math.hypot(...measuredEye.map((value, index) => value - transformedLamp[index]));
+    assertNear(renderedDistance, initialDistance, 1e-8);
+    measuredEye.forEach((value, index) => assertNear(value, renderedEye[index], 1e-8));
+
+    const inverse = [
+      rendered.rotation[0], rendered.rotation[3], rendered.rotation[6],
+      rendered.rotation[1], rendered.rotation[4], rendered.rotation[7],
+      rendered.rotation[2], rendered.rotation[5], rendered.rotation[8],
+    ];
+    multiplyVector(inverse, measuredEye).forEach((value, index) => assertNear(value, eye0[index], 1e-8));
+    multiplyVector(inverse, transformedLamp).forEach((value, index) => assertNear(value, lamp0[index], 1e-8));
+  } finally {
+    setSceneLightPlacement(originalPlacement);
+    setSceneLightRotation(originalRotation);
+  }
+});
+
+test("rendered-pose resolver validates finite offsets and proper input rotations", () => {
+  const implicitIdentity = resolveRenderedScenePose({ x: 0, y: 0 });
+  assert.deepEqual(implicitIdentity.rotation, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  assert.ok(Object.isFrozen(implicitIdentity) && Object.isFrozen(implicitIdentity.rotation));
+  assertRenderedEye(resolveRenderedScenePose({ x: 0.2, y: -0.1 }));
+  for (const invalid of [null, {}, { x: NaN, y: 0 }, { x: 0, y: Infinity }]) {
+    assert.throws(() => resolveRenderedScenePose(invalid));
+  }
+  assert.throws(() => resolveRenderedScenePose({ x: Number.MAX_VALUE, y: 0 }), RangeError);
+  for (const rotation of [
+    [1, 0, 0, 0, 1, 0, 0, 0],
+    [1, 0, 0, 0, 1, 0, 0, 0, Infinity],
+    [2, 0, 0, 0, 1, 0, 0, 0, 1],
+    [1, 0, 0, 0, 1, 0, 0, 0, -1],
+  ]) {
+    assert.throws(() => resolveRenderedScenePose({ x: 0, y: 0, rotation }));
+  }
 });

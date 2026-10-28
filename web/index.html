@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111217">
     <title>nes-rs — cardboard viewbox</title>
-    <link rel="stylesheet" href="style.css?v=85">
+    <link rel="stylesheet" href="style.css?v=89">
   </head>
   <body>
     <main class="app-shell">
@@ -91,8 +91,8 @@
                 <small id="thickness-hint">Native NES pixels · Independent of backdrop distance</small>
               </label>
               <label for="rim-width-input">
-                <span>Rim width <output id="rim-width-value" for="rim-width-input">2%</output></span>
-                <input id="rim-width-input" type="range" min="0" max="100" step="1" value="2" aria-describedby="rim-width-hint">
+                <span>Rim width <output id="rim-width-value" for="rim-width-input">1%</output></span>
+                <input id="rim-width-input" type="range" min="0" max="100" step="1" value="1" aria-describedby="rim-width-hint">
                 <small id="rim-width-hint">Fraction of maximum frame width · Actual size shown in game pixels</small>
               </label>
               <label for="rim-thickness-input">
@@ -101,8 +101,8 @@
                 <small id="rim-thickness-hint">Percentage of foreground thickness · Limited by available gap</small>
               </label>
               <label for="rim-recess-input">
-                <span>Rim recess <output id="rim-recess-value" for="rim-recess-input">5% of gap</output></span>
-                <input id="rim-recess-input" type="range" min="0" max="100" step="1" value="5" aria-describedby="rim-recess-hint">
+                <span>Rim recess <output id="rim-recess-value" for="rim-recess-input">1% of gap</output></span>
+                <input id="rim-recess-input" type="range" min="0" max="100" step="1" value="1" aria-describedby="rim-recess-hint">
                 <small id="rim-recess-hint">Percentage of card gap · Zero is flush · Gameplay stays fixed</small>
               </label>
               <div class="surface-options">
@@ -138,9 +138,9 @@
                 <small id="motion-tracking-hint">Look around follows gyro rotation · Recenter after turning your body · Changing modes recenters</small>
               </label>
               <label for="motion-strength-input">
-                <span>Motion strength <output id="motion-strength-value" for="motion-strength-input">50%</output></span>
-                <input id="motion-strength-input" type="range" min="0" max="100" step="1" value="50" disabled aria-describedby="motion-strength-hint">
-                <small id="motion-strength-hint">Adjust the viewing response · Recenter resets your comfortable hold</small>
+                <span>Motion strength <output id="motion-strength-value" for="motion-strength-input">100%</output></span>
+                <input id="motion-strength-input" type="range" min="0" max="100" step="1" value="100" disabled aria-describedby="motion-strength-hint">
+                <small id="motion-strength-hint">50% follows measured tilt · 100% doubles the viewing response</small>
               </label>
               <label for="viewing-distance-input">
                 <span>Viewing distance <output id="viewing-distance-value" for="viewing-distance-input">~35 cm</output></span>
@@ -171,7 +171,12 @@
               <label for="light-elevation-input">
                 <span>Light elevation <output id="light-elevation-value" for="light-elevation-input">7°</output></span>
                 <input id="light-elevation-input" type="range" min="0" max="80" step="1" value="7" aria-describedby="light-elevation-hint">
-                <small id="light-elevation-hint">Angle above the initial screen normal · Independent of viewing distance</small>
+                <small id="light-elevation-hint">Angle above the initial screen normal · Defaults: 3° Tilt, 7° stationary</small>
+              </label>
+              <label for="light-azimuth-input">
+                <span>Light horizontal angle <output id="light-azimuth-value" for="light-azimuth-input">8° left</output></span>
+                <input id="light-azimuth-input" type="range" min="-60" max="60" step="1" value="-8" aria-describedby="light-azimuth-hint">
+                <small id="light-azimuth-hint">Lamp left or right of the initial screen normal · Stays fixed as the phone turns</small>
               </label>
               <label for="softness-input">
                 <span>Shadow softness <output id="softness-value" for="softness-input">18%</output></span>
@@ -194,6 +199,6 @@
 
       <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · Shift + Enter · R rewind · M mute · V layers</footer>
     </main>
-    <script type="module" src="app.js?v=85"></script>
+    <script type="module" src="app.js?v=89"></script>
   </body>
 </html>

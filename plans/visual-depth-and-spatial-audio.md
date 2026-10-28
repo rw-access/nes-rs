@@ -39,8 +39,9 @@ Model dimensions use native NES game pixels (256×240), including the Z axis.
 Card thickness is independent of backdrop separation. Shallow gaps cap solid
 thickness before it reaches the backdrop; zero separation restores flat video.
 The front artwork retains its original registration and colors. Side polygons
-use an unprinted board material with shared Lambert illumination rather than
-stretching the artwork down the extrusion.
+inherit the RGB of their adjoining source boundary pixels with shared Lambert
+illumination. Runs split when boundary colors change; opaque black outlines
+remain black. Interior color changes do not create internal walls.
 
 There is one thin rounded rim around the opening. Its face, side joins and
 receiving shadow use the same outline and camera. Rim thickness is relative to
@@ -85,10 +86,17 @@ its local coordinates with the same scene pose used by the camera. Eye distance
 does not move it. Stationary viewing restores its fixed reference placement.
 
 Shadow placement intersects light rays with receiving planes and then applies
-the shared camera projection. The solid card consumes part of the backdrop gap;
-only the remaining air contributes to cast-shadow clearance. Nearby sources can
+the shared camera projection. The complete extruded silhouette casts onto the backboard: both caps and all
+uncullled alpha boundaries are unioned before applying opacity. The solid card
+consumes part of the backdrop gap; remaining air sets the diffusion estimate. Nearby sources can
 expand shadows before camera projection. Side shading and rim shadows use the
-same source. Independent softness controls govern gameplay and rim diffusion.
+same source. Independent softness controls govern gameplay and rim diffusion. The backboard
+receives Lambert illumination with normalized inverse-square distance falloff
+at inverse-projected receiver points; source
+gameplay colors remain unchanged. Motion gain applies one common rendered
+rotation to the eye and fixture; 50% is calibrated while amplified values model
+a virtual room. See [the solid-card correction](solid-card-room-lighting.md) and
+[shared-pose correction](shared-view-light-pose.md).
 
 ## Default preset
 
@@ -96,12 +104,13 @@ same source. Independent softness controls govern gameplay and rim diffusion.
 | --- | --- |
 | Background separation | 85 game pixels |
 | Card thickness, stationary and Tilt | 4 game pixels |
-| Rim width | 2% |
+| Rim width | 1% |
 | Rim thickness | 25% of foreground |
-| Rim recess | 5% of gap |
+| Rim recess | 1% of gap |
 | Gameplay shadow softness | 18% |
 | Rim shadow softness | 100% |
-| Light distance / elevation | 25 cm / 7° |
+| Light distance / elevation / horizontal angle | 25 cm / 3° Tilt, 7° stationary / 8° left |
+| Motion strength | 100% experimental view gain; 50% calibrated |
 | Viewing distance | 35 cm phone/desktop; 50 cm tablet |
 | Solid sides, layer relief, thin overlaps, rim, rim shadow | On |
 | Shell-colored edge, recessed opening | Off |
@@ -109,7 +118,9 @@ same source. Independent softness controls govern gameplay and rim diffusion.
 Sliders use integer intervals. Reset defaults restores scene geometry, viewing,
 and lighting without clearing the ROM, save state, audio state, or Tilt state
 and without requesting permission. Manual card thickness can be retained
-separately for stationary and Tilt modes during the page session.
+separately for stationary and Tilt modes during the page session. Light
+elevation also retains a separate value per mode; Recenter preserves the
+selected value, and Reset defaults restores 3° Tilt / 7° stationary.
 
 ## Browser state and audio
 
@@ -130,6 +141,9 @@ unit conversions, calibrated motion and lifecycle, reset-related defaults, ROM
 storage, and audio alignment. Core tests exercise priority capture, forced-blank
 retention, feature-disabled behavior, mixer contributions, filtering, snapshots,
 and both scheduling paths. Build validation includes the WASM feature set.
+Side-material checks cover all four boundary orientations, holes, opaque black,
+and palette-only changes. Actual browser samples verify shaded edge RGB while
+source-face hashes remain unchanged.
 
 Run the relevant suites from the repository root:
 

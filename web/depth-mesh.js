@@ -2,8 +2,6 @@ import { getSceneLightRevision, shadowLightProjection, surfaceShade } from "./sc
 import { getSceneCameraDepth, getSceneVanishingPoint, getSceneViewOffset, getSceneViewRevision } from "./scene-view.js";
 
 export const MAX_DEPTH = 6;
-// The artwork is printed on the face; the cut edge is unprinted board.
-export const CARD_EDGE_COLOR = Object.freeze([204, 187, 154]);
 const MAX_DPR = 2;
 const MAX_CANVAS_WIDTH = 1536;
 const IDENTITY_PROJECTION = Object.freeze({ scale: 1, x: 0, y: 0 });
@@ -15,7 +13,7 @@ const RELIEF_MODES = new Set(["off", "shadows", "contact", "cutout"]);
 /**
  * Collect the silhouette edges that can carry an extruded side face.
  * Coordinates are native pixel boundaries. Each face has start/end points,
- * its unprinted board material, orientation, and a painter-order key.
+ * its source boundary color, orientation, and a painter-order key.
  */
 export function collectSideFaces(sourceRGBA, width, height) {
   validatePixels(sourceRGBA, width, height);
@@ -31,7 +29,7 @@ export function collectSideFaces(sourceRGBA, width, height) {
         y += 1;
         continue;
       }
-      const color = CARD_EDGE_COLOR;
+      const color = [sourceRGBA[offset], sourceRGBA[offset + 1], sourceRGBA[offset + 2]];
       const edgeX = x + 1;
       if (edgeX >= vanishingPoint.x) {
         y += 1;
@@ -41,7 +39,7 @@ export function collectSideFaces(sourceRGBA, width, height) {
       y += 1;
       while (y < height) {
         const nextOffset = (y * width + x) * 4;
-        if (!isOpaque(sourceRGBA, nextOffset)
+        if (!isOpaque(sourceRGBA, nextOffset) || !matchesRGB(sourceRGBA, nextOffset, color)
           || (x + 1 < width && isOpaque(sourceRGBA, nextOffset + 4))) break;
         y += 1;
       }
@@ -59,12 +57,13 @@ export function collectSideFaces(sourceRGBA, width, height) {
         y += 1;
         continue;
       }
-      const color = CARD_EDGE_COLOR;
+      const color = [sourceRGBA[offset], sourceRGBA[offset + 1], sourceRGBA[offset + 2]];
       const startY = y;
       y += 1;
       while (y < height) {
         const nextOffset = (y * width + x) * 4;
-        if (!isOpaque(sourceRGBA, nextOffset) || (x > 0 && isOpaque(sourceRGBA, nextOffset - 4))) break;
+        if (!isOpaque(sourceRGBA, nextOffset) || !matchesRGB(sourceRGBA, nextOffset, color)
+          || (x > 0 && isOpaque(sourceRGBA, nextOffset - 4))) break;
         y += 1;
       }
       faces.push(makeFace("left", x, startY, x, y, color, width, height, vanishingPoint));
@@ -80,7 +79,7 @@ export function collectSideFaces(sourceRGBA, width, height) {
         x += 1;
         continue;
       }
-      const color = CARD_EDGE_COLOR;
+      const color = [sourceRGBA[offset], sourceRGBA[offset + 1], sourceRGBA[offset + 2]];
       const edgeY = y + 1;
       if (edgeY >= vanishingPoint.y) {
         x += 1;
@@ -90,7 +89,7 @@ export function collectSideFaces(sourceRGBA, width, height) {
       x += 1;
       while (x < width) {
         const nextOffset = (y * width + x) * 4;
-        if (!isOpaque(sourceRGBA, nextOffset)
+        if (!isOpaque(sourceRGBA, nextOffset) || !matchesRGB(sourceRGBA, nextOffset, color)
           || (y + 1 < height && isOpaque(sourceRGBA, nextOffset + width * 4))) break;
         x += 1;
       }
@@ -107,12 +106,13 @@ export function collectSideFaces(sourceRGBA, width, height) {
         x += 1;
         continue;
       }
-      const color = CARD_EDGE_COLOR;
+      const color = [sourceRGBA[offset], sourceRGBA[offset + 1], sourceRGBA[offset + 2]];
       const startX = x;
       x += 1;
       while (x < width) {
         const nextOffset = (y * width + x) * 4;
-        if (!isOpaque(sourceRGBA, nextOffset) || (y > 0 && isOpaque(sourceRGBA, nextOffset - width * 4))) break;
+        if (!isOpaque(sourceRGBA, nextOffset) || !matchesRGB(sourceRGBA, nextOffset, color)
+          || (y > 0 && isOpaque(sourceRGBA, nextOffset - width * 4))) break;
         x += 1;
       }
       faces.push(makeFace("top", startX, y, x, y, color, width, height, vanishingPoint));
@@ -544,6 +544,10 @@ function makeFace(orientation, startX, startY, endX, endY, color, width, height,
 
 function orientationOrder(orientation) {
   return ({ bottom: 0, right: 1, top: 2, left: 3 })[orientation] ?? 4;
+}
+
+function matchesRGB(source, offset, color) {
+  return source[offset] === color[0] && source[offset + 1] === color[1] && source[offset + 2] === color[2];
 }
 
 function isOpaque(source, offset) {

@@ -43,33 +43,39 @@ export function setSceneLightPlacement(placement) {
   }
 
   const { distanceCm, elevationDegrees, gameWidthCm } = placement;
+  const azimuthDegrees = placement.azimuthDegrees === undefined ? 0 : placement.azimuthDegrees;
   if (!Number.isFinite(distanceCm) || distanceCm < 5 || distanceCm > 300) {
     throw new RangeError("Light placement distance must be from 5 to 300 cm");
   }
   if (!Number.isFinite(elevationDegrees) || elevationDegrees < 0 || elevationDegrees > 80) {
     throw new RangeError("Light placement elevation must be from 0 to 80 degrees");
   }
+  if (!Number.isFinite(azimuthDegrees) || azimuthDegrees < -60 || azimuthDegrees > 60) {
+    throw new RangeError("Light placement azimuth must be from -60 to 60 degrees");
+  }
   if (!Number.isFinite(gameWidthCm) || gameWidthCm <= 0) {
     throw new RangeError("Light placement game width must be a positive finite number");
   }
   const pixelsPerCm = 256 / gameWidthCm;
   const elevation = elevationDegrees * Math.PI / 180;
+  const azimuth = azimuthDegrees * Math.PI / 180;
   const position = [
-    0,
+    distanceCm * Math.cos(elevation) * Math.sin(azimuth) * pixelsPerCm,
     -distanceCm * Math.sin(elevation) * pixelsPerCm,
-    -distanceCm * Math.cos(elevation) * pixelsPerCm,
+    -distanceCm * Math.cos(elevation) * Math.cos(azimuth) * pixelsPerCm,
   ];
   if (!Number.isFinite(pixelsPerCm) || !position.every(Number.isFinite)
     || !Number.isFinite(Math.hypot(...position))) {
     throw new RangeError("Scene light placement produces a nonfinite position");
   }
 
-  if (sceneLightPlacement && samePlacement(sceneLightPlacement, { distanceCm, elevationDegrees, gameWidthCm })) {
+  if (sceneLightPlacement && samePlacement(sceneLightPlacement, { distanceCm, elevationDegrees, azimuthDegrees, gameWidthCm })) {
     return false;
   }
   sceneLightPlacement = Object.freeze({
     distanceCm,
     elevationDegrees,
+    azimuthDegrees,
     gameWidthCm,
   });
   sceneLightPlacementPosition = Object.freeze(position);
@@ -158,6 +164,7 @@ function lightPosition(width, height) {
 function samePlacement(left, right) {
   return left.distanceCm === right.distanceCm
     && left.elevationDegrees === right.elevationDegrees
+    && left.azimuthDegrees === right.azimuthDegrees
     && left.gameWidthCm === right.gameWidthCm
 }
 
@@ -225,6 +232,101 @@ export function shadowLightProjection(casterDepth, receiverDepth, width = 256, h
   return projection;
 }
 
+/** Diffuse irradiance of a backdrop point facing the viewer from the actual point light. */
+export function backdropIrradiance(point, width = 256, height = 240) {
+  const light = lightPosition(width, height);
+  return backdropIrradianceFromLight(point, light, width, height);
+}
+
+/** Diffuse backdrop irradiance using a light position precomputed for the same canvas. */
+export function backdropIrradianceFromLight(point, light, width = 256, height = 240) {
+  validateProjectionDimensions(width, height);
+  if (!point || typeof point !== "object"
+    || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+    throw new TypeError("Backdrop point must have finite x, y, and z coordinates");
+  }
+  validateBackdropDepth(point.z);
+  validateBackdropLight(light);
+  const dx = (light.x - point.x) * 256 / width;
+  const dy = (light.y - point.y) * 240 / height;
+  const dz = (light.z - point.z) * SCENE_DEPTH_TO_NATIVE_PIXELS;
+  const length = Math.hypot(dx, dy, dz);
+  if (!Number.isFinite(length)) throw new RangeError("Backdrop light direction must be finite");
+  if (length === 0) return 1;
+  const cosine = Math.max(0, Math.min(1, -dz / length));
+  const attenuation = inverseSquareAttenuation(sceneLightReferenceRadius(), length);
+  return 0.35 + 0.65 * cosine * attenuation;
+}
+
+/** Build a low-allocation irradiance sampler for many x/y points on one receiver plane. */
+export function createBackdropIrradianceSampler(light, depth, width = 256, height = 240) {
+  validateProjectionDimensions(width, height);
+  validateBackdropLight(light);
+  validateBackdropDepth(depth);
+
+  const xScale = 256 / width;
+  const yScale = 240 / height;
+  const lightX = light.x * xScale;
+  const lightY = light.y * yScale;
+  const dz = (light.z - depth) * SCENE_DEPTH_TO_NATIVE_PIXELS;
+  const dzSquared = dz * dz;
+  const referenceRadius = sceneLightReferenceRadius();
+  if (![lightX, lightY, dz].every(Number.isFinite)) {
+    throw new RangeError("Backdrop light direction must be finite");
+  }
+
+  return (x, y) => {
+    const dx = lightX - x * xScale;
+    const dy = lightY - y * yScale;
+    const squaredLength = dx * dx + dy * dy + dzSquared;
+    const length = Number.isFinite(squaredLength)
+      ? Math.sqrt(squaredLength)
+      : Math.hypot(dx, dy, dz);
+    if (length === 0) return 1;
+    const cosine = Math.max(0, Math.min(1, -dz / length));
+    const attenuation = inverseSquareAttenuation(referenceRadius, length);
+    return 0.35 + 0.65 * cosine * attenuation;
+  };
+}
+
+function validateProjectionDimensions(width, height) {
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new RangeError("Projection dimensions must be positive integers");
+  }
+}
+
+function validateBackdropLight(light) {
+  if (!light || typeof light !== "object"
+    || !Number.isFinite(light.x) || !Number.isFinite(light.y) || !Number.isFinite(light.z)) {
+    throw new TypeError("Light position must have finite x, y, and z coordinates");
+  }
+}
+
+function validateBackdropDepth(depth) {
+  if (!Number.isFinite(depth)) throw new TypeError("Backdrop depth must be finite");
+  if (depth < 0 || depth > 6) throw new RangeError("Backdrop depth must be from 0 to 6");
+}
+
+function sceneLightReferenceRadius() {
+  const baseline = sceneLightPlacementPosition ?? [
+    0,
+    (SCENE_LIGHT.yFraction - 0.5) * 240 * sceneLightDistance,
+    -SCENE_LIGHT.height * sceneLightDistance * SCENE_DEPTH_TO_NATIVE_PIXELS,
+  ];
+  const radius = Math.hypot(...baseline);
+  if (!(radius > 0) || !Number.isFinite(radius)) {
+    throw new RangeError("Reference light radius must be positive and finite");
+  }
+  return radius;
+}
+
+function inverseSquareAttenuation(referenceRadius, distance) {
+  if (distance === 0) return 1;
+  if (!Number.isFinite(distance)) return 0;
+  const ratio = Math.min(1, referenceRadius / distance);
+  return ratio * ratio;
+}
+
 function smoothstep(value) {
   const bounded = Math.max(0, Math.min(1, value));
   return bounded * bounded * (3 - 2 * bounded);
@@ -263,5 +365,6 @@ export function surfaceShade(orientation, inward = false, point = null, width = 
 
   const direction = inward ? -1 : 1;
   const diffuse = Math.max(0, direction * (normal.x * dx + normal.y * dy) / length);
-  return AMBIENT + DIFFUSE * diffuse;
+  const attenuation = inverseSquareAttenuation(sceneLightReferenceRadius(), length);
+  return AMBIENT + DIFFUSE * diffuse * attenuation;
 }
