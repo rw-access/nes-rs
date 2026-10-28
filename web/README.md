@@ -107,7 +107,7 @@ preset is Background separation 85 game pixels, Card thickness 4 game pixels in
 both stationary and Tilt modes, Shadow softness
 18%, with Solid sides, Thickness + shadows layer relief, Thin overlaps, and TV
 rim shadow enabled. Light distance starts at 25 cm with 3° elevation in Tilt,
-7° stationary, and an 8° left offset. All depth uses center perspective;
+7° stationary, and a centered horizontal position. All depth uses center perspective;
 there is no separate isometric mode or projection switch.
 The soundstage control is hidden for now; playback uses the original mono mix.
 Advanced settings separate **Scene geometry**, **Viewing setup**, and **Lighting**.
@@ -178,8 +178,7 @@ the fixture along that ray, preserving
 its angle while making illumination steadier as the source moves farther away.
 Elevation changes the angle without changing the distance. **Light horizontal
 angle** moves it left or right of the initial screen normal, from −60° to 60°,
-with an 8° left default. The slight offset separates the light from the viewing
-axis so its cast direction is easier to see. These controls affect side shading,
+with a centered 0° default, avoiding a preferred left/right cast direction. These controls affect side shading,
 backboard illumination, gameplay shadows and rim shadows together; model
 dimensions and source art remain fixed. Viewing distance does not move the lamp.
 

@@ -109,7 +109,7 @@ a virtual room. See [the solid-card correction](solid-card-room-lighting.md) and
 | Rim recess | 1% of gap |
 | Gameplay shadow softness | 18% |
 | Rim shadow softness | 100% |
-| Light distance / elevation / horizontal angle | 25 cm / 3° Tilt, 7° stationary / 8° left |
+| Light distance / elevation / horizontal angle | 25 cm / 3° Tilt, 7° stationary / centered 0° |
 | Motion strength | 100% experimental view gain; 50% calibrated |
 | Viewing distance | 35 cm phone/desktop; 50 cm tablet |
 | Solid sides, layer relief, thin overlaps, rim, rim shadow | On |
