@@ -59,9 +59,10 @@ separated contact shadows, so these effects deliberately approximate that cue.
 
 ## Viewing and motion
 
-Stationary 2.5D uses a shared fixed camera/lamp pose with the depth vanishing
-point inside the game. Perspective depth rays converge; there is no isometric
-mode. Changing viewing distance adjusts camera perspective without changing
+Stationary 2.5D uses a shared fixed 12° horizontal / 8° vertical camera/lamp
+pose across screen sizes. The vanishing point can lie outside the opening;
+back-plane point spacing still contracts with depth under perspective. There
+is no isometric mode. Changing viewing distance adjusts camera perspective without changing
 model dimensions or the lamp placement.
 
 Tilt is opt-in and requests motion permission only through its button. The
@@ -104,6 +105,7 @@ a virtual room. See [the solid-card correction](solid-card-room-lighting.md) and
 | --- | --- |
 | Background separation | 85 game pixels |
 | Card thickness, stationary and Tilt | 4 game pixels |
+| Stationary viewing angle | 12° horizontal / 8° vertical |
 | Rim width | 1% |
 | Rim thickness | 25% of foreground |
 | Rim recess | 1% of gap |

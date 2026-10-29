@@ -152,17 +152,13 @@ function validatePoseRotation(rotation) {
   }
 }
 
-/** A fixed box pose whose vanishing point stays inside the aperture at supported viewing distances. */
+/** A modest fixed viewing angle that keeps thin sides readable across screen sizes. */
 export function computeStationaryView({ gameWidthCm, width = NATIVE_WIDTH, height = 240 } = {}) {
-  // The pose is fixed at the 35 cm reference. Estimating a different eye
-  // distance changes camera perspective, never the box orientation or lamp.
-  const centered = computeViewingCamera({ distanceCm: 35, gameWidthCm, width, height });
-  const radius = centered.focalDepth * SCENE_DEPTH_TO_NATIVE_PIXELS;
-  const eyeX = width * 0.15, eyeY = height * 0.10;
-  const forwardSquared = radius * radius - eyeX * eyeX - eyeY * eyeY;
-  if (forwardSquared <= 0) throw new RangeError("Stationary camera is outside the supported scene bounds");
-  const eyeZ = Math.sqrt(forwardSquared);
-  const slopeX = eyeX / eyeZ, slopeY = eyeY / eyeZ;
+  // Validate the optical calibration through the shared camera bounds. The
+  // illustrative stationary angle stays fixed as opening size or distance changes.
+  computeViewingCamera({ distanceCm: 35, gameWidthCm, width, height });
+  const slopeX = Math.tan(12 * Math.PI / 180);
+  const slopeY = Math.tan(8 * Math.PI / 180);
   const yaw = Math.atan(slopeX), pitch = Math.atan(slopeY * Math.cos(yaw));
   const ch = Math.cos(yaw), sh = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
   return Object.freeze({

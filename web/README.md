@@ -26,9 +26,10 @@ available. ROM bytes stay on the device; each site address has its own cache.
 
 The mobile layout uses an edge-to-edge game opening and simple touch controls.
 There is no decorative television or controller skin. Desktop keeps keyboard
-controls and a stationary perspective view. With Tilt off, the depth vanishing
-point rests inside the game (65% across, 60% down at the 35 cm reference).
-Edges on opposite sides visibly converge. Camera, lighting, rim and shadows
+controls and a stationary perspective view. With Tilt off, a modest fixed
+12° horizontal / 8° vertical viewing angle keeps 4-pixel card sides readable
+on phones and larger screens. The vanishing point can lie outside the opening;
+back-plane point spacing still shrinks with depth under perspective. Camera, lighting, rim and shadows
 share the same box pose; the source artwork stays aligned. Turning Tilt on
 switches to the calibrated phone view, and
 turning it off restores the fixed view, including after recentering or a sensor

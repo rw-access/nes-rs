@@ -111,16 +111,16 @@ test("35 cm at a 7 cm game width preserves the legacy neutral camera", () => {
     "computing a profile does not mutate the global camera");
 });
 
-test("stationary perspective converges inside the game and keeps front artwork and physical units exact", () => {
+test("stationary perspective keeps a readable angle across screen sizes and preserves front artwork", () => {
   const previousDepth = getSceneCameraDepth();
   try {
     for (const gameWidthCm of [6.7, DESKTOP_GAME_WIDTH_CM]) {
       const pose = computeStationaryView({ gameWidthCm });
       const camera = computeViewingCamera({ distanceCm: 35, gameWidthCm, motionX: pose.x, motionY: pose.y });
       setSceneCamera(camera.x, camera.y, camera.focalDepth);
-      assertNear(camera.x, .15);
-      assertNear(camera.y, .10);
-      const vp = { x: 256 * .65, y: 240 * .60 };
+      assertNear(Math.atan(camera.x * 256 / (camera.focalDepth * 19.2)), 12 * Math.PI / 180);
+      assertNear(Math.atan(camera.y * 240 / (camera.focalDepth * 19.2)), 8 * Math.PI / 180);
+      const vp = { x: 256 * (0.5 + camera.x), y: 240 * (0.5 + camera.y) };
       const m = pose.rotation;
       assertNear(-m[2] / m[8], camera.x * 256 / (camera.focalDepth * 19.2));
       assertNear(-m[5] / m[8], camera.y * 240 / (camera.focalDepth * 19.2));
@@ -138,14 +138,13 @@ test("stationary perspective converges inside the game and keeps front artwork a
       }
       const left = projectDepthPoint({ x: 32, y: 120 }, 8 / 19.2);
       const right = projectDepthPoint({ x: 224, y: 120 }, 8 / 19.2);
-      assert.ok(left.x > 32 && right.x < 224, "opposite sides converge, rather than sharing an isometric offset");
-      if (gameWidthCm === DESKTOP_GAME_WIDTH_CM) {
-        const edge = projectDepthPoint({ x: 32, y: 32 }, 2 / 19.2);
-        assert.ok(edge.x - 32 > .7 && edge.y - 32 > .5, "desktop two-pixel card edges remain visible");
-      }
+      assert.ok(right.x - left.x < 224 - 32, "back-plane point separation shrinks under perspective, unlike an isometric translation");
+      const centerEdge = projectDepthPoint({ x: 128, y: 120 }, 4 / 19.2);
+      assert.ok(Math.hypot(centerEdge.x - 128, centerEdge.y - 120) > 0.95,
+        "a four-pixel card exposes about one native pixel even near the center on a phone");
       assert.ok(Object.isFrozen(pose) && Object.isFrozen(m));
     }
-    assert.throws(() => computeStationaryView({ gameWidthCm: 1000 }), RangeError);
+    assert.throws(() => computeStationaryView({ gameWidthCm: 0 }), RangeError);
   } finally {
     setSceneCamera(0, 0, previousDepth);
   }
@@ -154,11 +153,13 @@ test("stationary perspective converges inside the game and keeps front artwork a
 test("stationary pose and lamp rotation are independent of viewing distance while perspective remains finite", () => {
   const pose = computeStationaryView({ gameWidthCm: DESKTOP_GAME_WIDTH_CM });
   const rotatedZ = pose.rotation.slice(2).filter((_, index) => index % 3 === 0);
+  const reference = computeViewingCamera({ distanceCm: 35, gameWidthCm: DESKTOP_GAME_WIDTH_CM, motionX: pose.x, motionY: pose.y });
   for (const distanceCm of [20, 35, 50, 100]) {
     const camera = computeViewingCamera({ distanceCm, gameWidthCm: DESKTOP_GAME_WIDTH_CM, motionX: pose.x, motionY: pose.y });
-    assertNear(camera.x, .15 * distanceCm / 35);
-    assertNear(camera.y, .10 * distanceCm / 35);
-    assert.ok(camera.x < .5 && camera.y < .5, "the vanishing point stays inside the game");
+    assertNear(camera.x, reference.x * distanceCm / 35);
+    assertNear(camera.y, reference.y * distanceCm / 35);
+    assertNear(Math.atan(camera.x * 256 / (camera.focalDepth * 19.2)), 12 * Math.PI / 180);
+    assertNear(Math.atan(camera.y * 240 / (camera.focalDepth * 19.2)), 8 * Math.PI / 180);
     assertNear(-rotatedZ[0] / rotatedZ[2], camera.x * 256 / (camera.focalDepth * 19.2));
   }
 });
