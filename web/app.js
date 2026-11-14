@@ -19,8 +19,6 @@ import { RenderQuality, effectPixelRatio, frameBudget } from "./render-quality.j
 const NesWeb = wasm.NesWasm ?? wasm.NesWeb;
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
-const debugEndpoint = debugEnabled ? new URL("__debug", document.baseURI).href : null;
-const recordEndpoint = new URL("__record", document.baseURI).href;
 
 function debugValue(value) {
   if (value instanceof Error) {
@@ -39,12 +37,9 @@ function reportDebug(kind, ...values) {
     values: values.map(debugValue),
   };
   if (debugEnabled) {
-    fetch(debugEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(record),
-      keepalive: true,
-    }).catch(() => {});
+    const events = window.nesDebugEvents ??= [];
+    events.push(record);
+    if (events.length > 200) events.shift();
   }
   return record;
 }
@@ -193,6 +188,9 @@ const rewindButton = document.querySelector("#rewind-button");
 const recordButton = document.querySelector("#record-button");
 const stopRecordButton = document.querySelector("#stop-record-button");
 const recordingStatus = document.querySelector("#recording-status");
+recordButton.hidden = !debugEnabled;
+stopRecordButton.hidden = !debugEnabled;
+recordingStatus.hidden = !debugEnabled;
 
 let emulator = null;
 let romName = null;
@@ -566,13 +564,13 @@ function recordFrame(kind, metadata, details = {}) {
 }
 
 function setRecordingButtons(active) {
-  recordButton.disabled = !emulator || active;
+  recordButton.disabled = !debugEnabled || !emulator || active;
   stopRecordButton.disabled = !active;
   recordButton.classList.toggle("recording", active);
 }
 
 function startRecording() {
-  if (!emulator || recording) return;
+  if (!debugEnabled || !emulator || recording) return;
   recording = {
     version: 1,
     source: "nes-rs-browser",
@@ -589,7 +587,7 @@ function startRecording() {
   recordingStatus.textContent = "Recording · 0.0s · 0 frames";
 }
 
-async function stopRecording() {
+function stopRecording() {
   if (!recording) return;
   if (rewinding) stopRewind();
   const payload = {
@@ -600,23 +598,21 @@ async function stopRecording() {
   window.lastRecordingPayload = payload;
   recording = null;
   setRecordingButtons(false);
-  recordingStatus.textContent = "Uploading…";
   try {
-    const response = await fetch(recordEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const body = await response.text();
-    let result = {};
-    try { result = JSON.parse(body); } catch (_) {}
-    if (!response.ok || !result.ok) throw new Error(result.error || body || `HTTP ${response.status}`);
-    recordingStatus.textContent = `Saved · ${result.frames} frames`;
-    setStatus(`Recording saved on server as ${result.filename}`);
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `nes-replay-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    link.hidden = true;
+    document.body.append(link);
+    link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    recordingStatus.textContent = `Saved locally · ${payload.frames.length} frames`;
+    setStatus("Replay capture saved locally");
   } catch (error) {
-    reportDebug("record-upload", error);
-    recordingStatus.textContent = `Upload failed — retry: ${error?.message ?? error}`;
-    setStatus(`Could not upload recording: ${error}`);
+    reportDebug("capture-save", error);
+    recordingStatus.textContent = "Local save failed; capture remains available in this tab";
+    setStatus("Could not save replay capture locally");
   }
 }
 
@@ -989,7 +985,7 @@ async function loadRom(file, { fromCache = false, expectedGeneration = null } = 
     snapshotButton.disabled = false;
     restoreButton.disabled = true;
     rewindButton.disabled = false;
-    recordButton.disabled = false;
+    recordButton.disabled = !debugEnabled;
     stopRecordButton.disabled = true;
     recordingStatus.textContent = "Recording is off";
     rewinding = false;

@@ -33,7 +33,7 @@ standard controller, and Settings can force them on or off.
 
 The toolbar uses icons with accessible names and tooltips: open ROM, audio,
 depth, Tilt, fullscreen, Settings, and More. More holds save, restore, rewind,
-recording, and Recenter while Tilt is active. Settings opens a scrollable dialog;
+and Recenter while Tilt is active. Developer replay capture is hidden in normal play. Settings opens a scrollable dialog;
 Escape closes it. Fullscreen (`F`) hides the toolbar after inactivity, and moving
 the pointer, tapping, or using the keyboard reveals it. Browsers without the
 Fullscreen API use an immersive page layout instead; Escape or the fullscreen
@@ -110,9 +110,7 @@ static preset. This is not a reconstruction of physical game objects.
 the black **Rim** is off. It uses the surrounding shell material; foreground
 gameplay remains visible above the opening.
 
-For LAN debugging, append `?debug=1` to the URL. The development server
-collects browser errors and emulator/audio failures at `/__debug` and prints
-them to its terminal.
+For local diagnostics, append `?debug=1` to the URL. Browser errors and emulator/audio failures are retained in the tab as `window.nesDebugEvents` (up to 200 events). Diagnostics are never uploaded.
 
 ## Picture depth and stereo sound
 
@@ -353,14 +351,14 @@ node web/browser-check.mjs
 and screenshot output. Hardware Safari long-press behavior, motion sensors and
 real TV/controller latency still require device checks.
 
-## Capturing a play sequence
+## Local developer replay capture
 
-Load the ROM, press `● Record`, play normally, and include any rewind with `R`
-or the on-screen Rewind button. Press `Stop & upload` when finished. The server
-saves one JSON transcript outside the repository, by default under
-`/tmp/nes-rs-captures/`. Each transcript contains the controller state for each
-emulated frame plus button and rewind events, so it can be replayed later and
-rendered into a video.
+Replay capture is hidden during normal play. Explicit `?debug=1` mode exposes
+its controls in More. This is a controller-input transcript for developer replay,
+not a video recorder. Stop saves a JSON download locally; it never posts the
+capture to a server. ROM bytes, frame buffers and audio are not in the capture.
+The last payload remains in `window.lastRecordingPayload` in case the local
+save fails. Browser diagnostics are also retained locally, with no uploads.
 
 The generated wrapper exposes ROM loading, frame stepping, reusable video and
 audio buffers, controller updates, rewind, save-state objects, and a compact

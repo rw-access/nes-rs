@@ -32,10 +32,10 @@
           <button id="snapshot-button" type="button" aria-label="Save state" title="Save state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h12l4 4v14H3V3z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button>
           <button id="restore-button" type="button" aria-label="Restore state" title="Restore state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg></button>
           <button id="rewind-button" type="button" aria-label="Rewind while held" title="Rewind while held" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m11 5-9 7 9 7zm11 0-9 7 9 7z"/></svg></button>
-          <button id="record-button" type="button" aria-label="Start recording" title="Start recording" class="record-button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none"/></svg></button>
-          <button id="stop-record-button" type="button" aria-label="Stop recording and upload" title="Stop recording and upload" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none"/></svg></button>
+          <button id="record-button" type="button" aria-label="Start developer replay capture" title="Start developer replay capture" class="record-button" hidden disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none"/></svg></button>
+          <button id="stop-record-button" type="button" aria-label="Save replay capture locally" title="Save replay capture locally" hidden disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none"/></svg></button>
         </div>
-        <p id="recording-status" role="status">Recording is off</p>
+        <p id="recording-status" role="status" hidden>Developer replay capture is off</p>
         <p class="menu-hint">WASD / arrows · J K or Z X<br>Shift + Enter · R rewind · M mute · F fullscreen<br>Connect a controller to play on your TV.</p>
       </div>
 
@@ -214,6 +214,6 @@
 
       <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · Shift + Enter · R rewind · M mute · V layers</footer>
     </main>
-    <script type="module" src="app.js?v=91"></script>
+    <script type="module" src="app.js?v=95"></script>
   </body>
 </html>
