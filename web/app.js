@@ -13,6 +13,9 @@ import { DeviceTiltController } from "./device-tilt.js";
 import { loadCachedRom, saveCachedRom, clearCachedRom } from "./rom-store.js";
 import { resolveSceneDepth, resolveShadowSoftness, resolveRimThickness, resolveRimRecess, gameplayShadowProjection } from "./depth-model.js";
 
+import { ControllerInput, readGamepads, bindTouchControls } from "./play-controls.js";
+import { RenderQuality, effectPixelRatio, frameBudget } from "./render-quality.js";
+
 const NesWeb = wasm.NesWasm ?? wasm.NesWeb;
 
 const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
@@ -115,7 +118,15 @@ depthStack.insertBefore(rimCanvas, depthCanvases[1]);
 const rimHousing = new RimHousing(rimCanvas, screenStage, WIDTH, HEIGHT);
 let shadowsNeedPaint = true;
 const backdropRenderer = new CanvasBackdropRenderer(depthCanvases[0], WIDTH, HEIGHT);
-const depthRenderers = depthCanvases.map((plane, index) => index === 0 ? null : new CanvasDepthRenderer(plane, WIDTH, HEIGHT));
+const depthRenderers = depthCanvases.map((plane, index) => {
+  if (index === 0) return null;
+  // Keep the original printed faces at native resolution in their own crisp
+  // compositor layer; adaptive resolution only changes sides and shadows.
+  const front = document.createElement("canvas");
+  front.className = "depth-front";
+  plane.after(front);
+  return new CanvasDepthRenderer(plane, WIDTH, HEIGHT, front);
+});
 const ghostCanvas = document.querySelector("#depth-ghosts");
 const ghostContext = ghostCanvas.getContext("2d");
 const ghostImage = ghostContext.createImageData(WIDTH, HEIGHT);
@@ -164,7 +175,18 @@ const dioramaInput = document.querySelector("#diorama-input");
 const status = document.querySelector("#status");
 const romInput = document.querySelector("#rom-input");
 const audioButton = document.querySelector("#audio-button");
-const audioLabel = audioButton.querySelector(".tool-label");
+const appShell = document.querySelector(".app-shell");
+const gamePanel = document.querySelector(".game-panel");
+const fullscreenButton = document.querySelector("#fullscreen-button");
+const qualityInput = document.querySelector("#render-quality-input");
+const qualityStatus = document.querySelector("#render-quality-status");
+const touchLayoutInput = document.querySelector("#touch-layout-input");
+const quality = new RenderQuality();
+let gamepadConnected = false;
+let statusTimeout;
+let chromeTimeout;
+let ghostVisible = false;
+let presentationInterval = FRAME_MS;
 const snapshotButton = document.querySelector("#snapshot-button");
 const restoreButton = document.querySelector("#restore-button");
 const rewindButton = document.querySelector("#rewind-button");
@@ -202,7 +224,7 @@ function updateMotionControls(state = motionState, message = motionStatus.textCo
   motionRecenterButton.hidden = !enabled;
   motionRecenterButton.disabled = !enabled || state === "requesting" || state === "paused";
   motionStrengthInput.disabled = !enabled || state === "requesting";
-  motionStatus.hidden = state === "off" && !suggestPhoneMotion;
+  motionStatus.hidden = state === "off" || state === "active";
   motionStatus.textContent = state === "off" && suggestPhoneMotion
     ? "Tap Tilt while holding your phone comfortably, then move it to look inside."
     : message;
@@ -303,6 +325,7 @@ function updateDepthGeometry() {
   const scene = currentSceneDepth();
   const { separation: depth } = scene;
   const width = screenStage.clientWidth;
+  const renderDpr = effectPixelRatio(width, window.devicePixelRatio, quality.maxWidth);
   const pixelScale = screenStage.getBoundingClientRect().width / WIDTH;
   depthOutput.textContent = Number(depthInput.value) === 0 ? "Off" : `${depthInput.value} game px`;
   softnessOutput.textContent = Number(softnessInput.value) === 0 ? "Crisp" : `${softnessInput.value}%`;
@@ -329,7 +352,7 @@ function updateDepthGeometry() {
   screenWrap.style.setProperty("--opening-radius-y", `${HEIGHT * RIM_CORNER_FRACTION * pixelScale}px`);
   screenWrap.style.setProperty("--rim-radius-x", `${(WIDTH * RIM_CORNER_FRACTION + faceWidth) * pixelScale}px`);
   screenWrap.style.setProperty("--rim-radius-y", `${(HEIGHT * RIM_CORNER_FRACTION + faceWidth) * pixelScale}px`);
-  rimHousing.paint(depth, rim.thickness, window.devicePixelRatio || 1, rim.frontDepth, rim.enabled ? faceWidth : 0, rim.material, getComputedStyle(document.body).backgroundColor);
+  rimHousing.paint(depth, rim.thickness, renderDpr, rim.frontDepth, rim.enabled ? faceWidth : 0, rim.material, getComputedStyle(document.body).backgroundColor);
   thicknessInput.disabled = !solidSidesInput.checked;
   spriteReliefInput.disabled = !solidSidesInput.checked;
   spriteReliefStyle.disabled = !solidSidesInput.checked || !spriteReliefInput.checked;
@@ -343,12 +366,12 @@ function updateDepthGeometry() {
   ghostCanvas.style.transform = "none";
   depthCanvases.forEach((plane, index) => {
     if (index !== 0 && width > 0) {
-      depthRenderers[index].resize(width, width * HEIGHT / WIDTH, window.devicePixelRatio || 1);
+      depthRenderers[index].resize(width, width * HEIGHT / WIDTH, renderDpr);
     }
     plane.style.transform = "none";
     plane.style.filter = "none";
   });
-  cardShadowRenderer.resize(width, width * HEIGHT / WIDTH, window.devicePixelRatio || 1);
+  cardShadowRenderer.resize(width, width * HEIGHT / WIDTH, renderDpr);
   // The receiver is still at full separation, but the shadow's light ray
   // and penumbra cross only the air remaining behind the solid's rear face.
   const shadow = gameplayShadowProjection(scene, WIDTH, HEIGHT);
@@ -363,7 +386,7 @@ function updateDepthGeometry() {
   shadowsNeedPaint = true;
   dioramaCanvas.hidden = !dioramaInput.checked || !rim.enabled;
   document.querySelector("#screen-scene").style.transform = "none";
-  if (width > 0) dioramaFrame.resize(width, width * HEIGHT / WIDTH, window.devicePixelRatio || 1);
+  if (width > 0) dioramaFrame.resize(width, width * HEIGHT / WIDTH, renderDpr);
 }
 
 function wantsLayeredVideo() {
@@ -383,7 +406,16 @@ function updatePresentation() {
 }
 
 function setEffectsSettingsOpen(open) {
-  effectsSettings.hidden = !open;
+  if (open) {
+    setMoreOpen(false);
+    effectsSettings.hidden = false;
+    effectsSettings.showModal();
+    controllerInput.clear();
+    stopRewind();
+  } else {
+    effectsSettings.close();
+    effectsSettings.hidden = true;
+  }
   effectsSettingsButton.setAttribute("aria-expanded", String(open));
 }
 
@@ -413,6 +445,9 @@ function resetEffectsSettings() {
     latestMotionView = pendingMotionView;
     pendingMotionView = null;
   }
+  quality.setMode(qualityInput.value);
+  updateTouchLayout();
+  updateQualityStatus();
   updatePresentation();
 }
 
@@ -421,8 +456,7 @@ resetEffectsSettingsButton.addEventListener("click", resetEffectsSettings);
 effectsButton.addEventListener("click", () => {
   const enabled = effectsButton.getAttribute("aria-pressed") !== "true";
   effectsButton.setAttribute("aria-pressed", String(enabled));
-  effectsSettingsButton.disabled = !enabled;
-  if (!enabled) setEffectsSettingsOpen(false);
+
   updatePresentation();
 });
 depthInput.addEventListener("input", updatePresentation);
@@ -475,15 +509,28 @@ viewingDistanceInput.addEventListener("input", () => {
 screenProfileInput.addEventListener("change", updatePresentation);
 for (const input of [effectsButton, effectsSettingsButton, resetEffectsSettingsButton, motionButton, motionRecenterButton, motionTrackingInput, motionStrengthInput, viewingDistanceInput, screenProfileInput, depthInput, softnessInput, lightDistanceInput, lightElevationInput, lightAzimuthInput, rimSoftnessInput, thicknessInput, rimThicknessInput, rimRecessInput, consoleEdgeInput, rimInput, recessedOpeningInput, rimWidthInput, solidSidesInput, spriteReliefInput, spriteReliefStyle, thinOverlapsInput, dioramaInput]) {
   input.addEventListener("focus", () => {
-    heldButtons = 0;
+    controllerInput.clear();
     stopRewind();
     updateButtons();
   });
 }
-new ResizeObserver(updateDepthGeometry).observe(screenStage);
-window.addEventListener("resize", updateDepthGeometry);
-window.visualViewport?.addEventListener("resize", updateDepthGeometry);
-updateDepthGeometry();
+let resizePending = false;
+function scheduleResize() {
+  if (resizePending) return;
+  resizePending = true;
+  requestAnimationFrame(() => {
+    resizePending = false;
+    const padding = parseFloat(getComputedStyle(screenWrap).paddingLeft) * 2;
+    const width = Math.max(1, Math.min(gamePanel.clientWidth, (gamePanel.clientHeight - padding) * WIDTH / HEIGHT + padding));
+    screenWrap.style.width = `${width}px`;
+    updateDepthGeometry();
+    if (emulator) renderVideo();
+  });
+}
+new ResizeObserver(scheduleResize).observe(gamePanel);
+window.addEventListener("resize", scheduleResize);
+window.visualViewport?.addEventListener("resize", scheduleResize);
+scheduleResize();
 
 function recordingTime() {
   return recording ? Math.max(0, Math.round(performance.now() - recording.started_perf_at)) : 0;
@@ -583,10 +630,8 @@ const audio = new SpatialAudio({
 
 function updateAudioControls({ state, muted }) {
   const running = state === "running";
-  const label = muted ? "MUTE" : "AUDIO";
   const accessibleLabel = muted ? "Unmute audio" : running ? "Mute audio" : "Enable audio";
-  audioButton.dataset.muted = muted ? "true" : "false";
-  audioLabel.textContent = label;
+  audioButton.dataset.muted = String(muted || !running);
   audioButton.title = accessibleLabel;
   audioButton.setAttribute("aria-label", accessibleLabel);
 }
@@ -594,7 +639,12 @@ function updateAudioControls({ state, muted }) {
 // Soundstage controls are shelved; use the original mono mix for playback.
 audio.setWidth(0);
 
-function setStatus(message) { status.textContent = message; }
+function setStatus(message) {
+  status.textContent = message;
+  status.classList.add("is-visible");
+  clearTimeout(statusTimeout);
+  statusTimeout = setTimeout(() => status.classList.remove("is-visible"), 3500);
+}
 
 function displayModeLabel() {
   return DISPLAY_MODE_LABELS[emulator?.display_mode?.() ?? 2] ?? "Both";
@@ -611,21 +661,111 @@ function updateButtons() {
   if (emulator && !rewinding) emulator.set_controller(heldButtons);
 }
 
-function press(name) {
-  heldButtons |= BUTTONS[name];
-  recordInputEvent("button-down", { button: name });
+const controllerInput = new ControllerInput((buttons, previous) => {
+  heldButtons = buttons;
+  for (const [name, mask] of Object.entries(BUTTONS)) {
+    if ((buttons & mask) !== (previous & mask)) recordInputEvent(buttons & mask ? "button-down" : "button-up", { button: name });
+  }
+  for (const button of document.querySelectorAll("[data-button]")) button.classList.toggle("is-held", Boolean(buttons & BUTTONS[button.dataset.button]));
   updateButtons();
+});
+const clearTouchPointers = bindTouchControls(document.querySelector(".touch-controls"), controllerInput, BUTTONS);
+
+function updateTouchLayout() {
+  const show = touchLayoutInput.value === "show" || (touchLayoutInput.value === "auto" && window.matchMedia("(any-pointer: coarse)").matches && !gamepadConnected);
+  appShell.dataset.touch = String(show);
+  clearTouchPointers();
+  controllerInput.clear();
+  scheduleResize();
 }
 
-function release(name) {
-  heldButtons &= ~BUTTONS[name];
-  recordInputEvent("button-up", { button: name });
-  updateButtons();
+function updateQualityStatus() {
+  qualityStatus.textContent = `${quality.mode === "auto" ? "Auto · " : ""}${quality.level[0].toUpperCase() + quality.level.slice(1)} · Depth stays on at every quality level.`;
+}
+qualityInput.addEventListener("change", () => {
+  quality.setMode(qualityInput.value);
+  updateQualityStatus();
+  scheduleResize();
+});
+touchLayoutInput.addEventListener("change", updateTouchLayout);
+window.matchMedia("(any-pointer: coarse)").addEventListener("change", updateTouchLayout);
+document.querySelector("#welcome-load-button").addEventListener("click", () => romInput.click());
+document.querySelector("#close-settings-button").addEventListener("click", () => setEffectsSettingsOpen(false));
+effectsSettings.addEventListener("close", () => {
+  effectsSettings.hidden = true;
+  effectsSettingsButton.setAttribute("aria-expanded", "false");
+});
+
+function setMoreOpen(open) {
+  const menu = document.querySelector("#more-menu");
+  menu.hidden = !open;
+  document.querySelector("#more-button").setAttribute("aria-expanded", String(open));
+  if (open) menu.querySelector("button:not([hidden]):not(:disabled)")?.focus();
+  else if (menu.contains(document.activeElement)) document.querySelector("#more-button").focus();
+  if (!open) stopRewind();
+}
+document.querySelector("#more-button").addEventListener("click", () => setMoreOpen(document.querySelector("#more-menu").hidden));
+document.addEventListener("pointerdown", event => {
+  if (!event.target.closest("#more-menu, #more-button")) setMoreOpen(false);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !document.querySelector("#more-menu").hidden) {
+    event.preventDefault(); setMoreOpen(false);
+  }
+});
+
+function showChrome() {
+  appShell.classList.add("chrome-visible");
+  clearTimeout(chromeTimeout);
+  chromeTimeout = setTimeout(() => {
+    if (!effectsSettings.open && document.querySelector("#more-menu").hidden) appShell.classList.remove("chrome-visible");
+  }, 2400);
+}
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else if (appShell.requestFullscreen) await appShell.requestFullscreen();
+    else {
+      appShell.classList.toggle("is-immersive");
+      fullscreenButton.setAttribute("aria-pressed", String(appShell.classList.contains("is-immersive")));
+      fullscreenButton.setAttribute("aria-label", appShell.classList.contains("is-immersive") ? "Leave immersive view" : "Enter immersive view");
+    }
+    if (document.activeElement?.closest(".toolbar")) document.activeElement.blur();
+    showChrome();
+    scheduleResize();
+  } catch (error) { setStatus(`Fullscreen unavailable: ${error.message}`); }
+}
+fullscreenButton.addEventListener("click", toggleFullscreen);
+document.addEventListener("fullscreenchange", () => {
+  const active = Boolean(document.fullscreenElement);
+  appShell.classList.toggle("is-immersive", active);
+  fullscreenButton.setAttribute("aria-pressed", String(active));
+  fullscreenButton.title = active ? "Exit fullscreen" : "Enter fullscreen";
+  fullscreenButton.setAttribute("aria-label", fullscreenButton.title);
+  showChrome(); scheduleResize();
+});
+for (const name of ["pointermove", "pointerdown", "keydown"]) window.addEventListener(name, showChrome, { passive: true });
+// Protect long holds in the session controls as well as the gamepad.
+for (const name of ["contextmenu", "selectstart", "dragstart"]) {
+  document.querySelector("#more-menu").addEventListener(name, event => event.preventDefault());
+}
+updateTouchLayout();
+updateQualityStatus();
+
+function pollGamepads() {
+  const state = readGamepads(navigator.getGamepads?.() ?? [], BUTTONS);
+  if (state.connected !== gamepadConnected) {
+    gamepadConnected = state.connected;
+    updateTouchLayout();
+    if (state.connected) setStatus("Controller connected · Ready to play");
+  }
+  controllerInput.set("gamepad", effectsSettings.open || !document.hasFocus() ? 0 : state.buttons);
 }
 
 function startRewind() {
   if (!emulator || rewinding) return;
   rewinding = true;
+  rewindButton.classList.add("is-held");
   rewindFrames = 0;
   rewindStartedAt = performance.now();
   recordInputEvent("rewind-start");
@@ -638,6 +778,7 @@ function startRewind() {
 function stopRewind() {
   if (!rewinding) return;
   rewinding = false;
+  rewindButton.classList.remove("is-held");
   updateButtons();
   previousTime = performance.now();
   accumulator = 0;
@@ -645,10 +786,10 @@ function stopRewind() {
   reportDebug("rewind-stop");
 }
 
-function rewindFrame() {
+function rewindFrame(present = true) {
   if (!emulator) return null;
   const available = emulator.rewind();
-  const metadata = drawFrame(false);
+  const metadata = drawFrame(false, present);
   recordFrame("rewind", metadata, { available });
   rewindFrames += 1;
   if (debugEnabled && (rewindFrames === 1 || rewindFrames % 30 === 0 || !available)) {
@@ -663,11 +804,10 @@ function rewindFrame() {
   return metadata;
 }
 
-function drawFrame(scheduleAudio = true) {
+function drawFrame(scheduleAudio = true, present = true) {
   if (!emulator) return null;
   const metadata = emulator.step_frame();
-  renderVideo();
-  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${metadata.frame_number} · ${displayModeLabel()}`);
+  if (present) renderVideo();
   if (scheduleAudio) {
     try {
       audio.schedule(
@@ -687,6 +827,7 @@ function drawFrame(scheduleAudio = true) {
 }
 
 function renderVideo() {
+  const renderStarted = performance.now();
   const showDepth = wantsLayeredVideo() && emulator.display_mode() === 2
     && emulator.frame_metadata().depth_available;
   screenStage.dataset.depth = String(showDepth);
@@ -733,6 +874,9 @@ function renderVideo() {
     }
     shadowsNeedPaint = false;
     renderDepthGhosts(rewinding ? new Uint8Array(0) : emulator.ghost_buffer());
+    const renderMs = performance.now() - renderStarted;
+    if (quality.sample(Math.max(renderMs, presentationInterval - FRAME_MS))) { updateQualityStatus(); scheduleResize(); }
+    if (debugEnabled) window.nesRenderStats = { renderMs, quality: quality.level, maxWidth: quality.maxWidth };
     return;
   }
   const rgba = emulator.rgba_buffer();
@@ -745,6 +889,8 @@ function renderVideo() {
 
 function renderDepthGhosts(records) {
   // Keep historical ghosts as an overlay: they have no stored priority class.
+  if (!records.length && !ghostVisible) return;
+  ghostVisible = records.length > 0;
   ghostImage.data.fill(0);
   for (let offset = 0; offset < records.length; offset += GHOST_RECORD_BYTES) {
     const pixel = (records[offset + 1] * WIDTH + records[offset]) * 4;
@@ -787,30 +933,21 @@ function tick(now) {
       requestAnimationFrame(tick);
       return;
     }
+    pollGamepads();
     const viewChanged = applyPendingMotionView();
-    let drewVideo = false;
     if (!previousTime) previousTime = now;
+    presentationInterval = Math.min(now - previousTime, 100);
     accumulator += Math.min(now - previousTime, 250);
     previousTime = now;
-
-    if (emulator && rewinding) {
-      let frames = 0;
-      while (emulator && accumulator >= FRAME_MS && frames < 4) {
-        rewindFrame();
-        drewVideo = true;
-        accumulator -= FRAME_MS;
-        frames += 1;
+    const budget = frameBudget(accumulator, FRAME_MS);
+    accumulator = budget.remainder;
+    if (emulator) {
+      for (let frame = 0; frame < budget.frames; frame += 1) {
+        if (rewinding) rewindFrame(false);
+        else drawFrame(true, false);
       }
-    } else {
-      let frames = 0;
-      while (emulator && accumulator >= FRAME_MS && frames < 4) {
-        drawFrame();
-        drewVideo = true;
-        accumulator -= FRAME_MS;
-        frames += 1;
-      }
+      if (budget.frames > 0 || viewChanged) renderVideo();
     }
-    if (viewChanged && emulator && !drewVideo) renderVideo();
   } catch (error) {
     reportDebug("emulation-frame", error);
     console.error("Emulation frame failed", error);
@@ -847,7 +984,8 @@ async function loadRom(file, { fromCache = false, expectedGeneration = null } = 
     emulator.set_depth_enabled(wantsLayeredVideo());
     romName = file.name;
     savedSnapshot = null;
-    heldButtons = 0;
+    controllerInput.clear();
+    appShell.classList.add("has-rom");
     snapshotButton.disabled = false;
     restoreButton.disabled = true;
     rewindButton.disabled = false;
@@ -871,6 +1009,7 @@ async function loadRom(file, { fromCache = false, expectedGeneration = null } = 
     reportDebug("rom-load", error);
     audio.flush();
     if (replacingEmulator) {
+      appShell.classList.remove("has-rom");
       emulator?.free();
       emulator = null;
       snapshotButton.disabled = true;
@@ -971,6 +1110,7 @@ const keyboard = new Map([
   ["ArrowUp", "up"], ["ArrowDown", "down"], ["ArrowLeft", "left"], ["ArrowRight", "right"],
 ]);
 window.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || effectsSettings.open) return;
   if (event.target instanceof Element && (
     event.target.closest("input, select, textarea")
     || (["Enter", " "].includes(event.key) && event.target.closest("button, summary, a"))
@@ -987,6 +1127,14 @@ window.addEventListener("keydown", (event) => {
     if (!event.repeat) audio.toggleMute();
     return;
   }
+  if (key === "f") {
+    event.preventDefault();
+    if (!event.repeat) void toggleFullscreen();
+    return;
+  }
+  if (key === "Escape" && !document.fullscreenElement && appShell.classList.contains("is-immersive")) {
+    event.preventDefault(); void toggleFullscreen(); return;
+  }
   if (key === "v") {
     event.preventDefault();
     if (!event.repeat) cycleDisplayMode();
@@ -995,13 +1143,9 @@ window.addEventListener("keydown", (event) => {
   const name = keyboard.get(key);
   if (!name) return;
   event.preventDefault();
-  press(name);
+  controllerInput.set(`key-${key}`, BUTTONS[name]);
 });
 window.addEventListener("keyup", (event) => {
-  if (event.target instanceof Element && (
-    event.target.closest("input, select, textarea")
-    || (["Enter", " "].includes(event.key) && event.target.closest("button, summary, a"))
-  )) return;
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
   if (key === "r") {
     event.preventDefault();
@@ -1011,30 +1155,28 @@ window.addEventListener("keyup", (event) => {
   const name = keyboard.get(key);
   if (!name) return;
   event.preventDefault();
-  release(name);
+  controllerInput.set(`key-${key}`, 0);
 });
 window.addEventListener("blur", () => {
-  heldButtons = 0;
+  controllerInput.clear();
+  clearTouchPointers();
   stopRewind();
   updateButtons();
 });
 
-for (const button of document.querySelectorAll("[data-button]")) {
-  const name = button.dataset.button;
-  button.addEventListener("pointerdown", (event) => {
-    event.preventDefault();
-    button.setPointerCapture(event.pointerId);
-    press(name);
-  });
-  for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
-    button.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      release(name);
-    });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    controllerInput.clear(); clearTouchPointers(); stopRewind();
+    previousTime = 0; accumulator = 0;
   }
-}
+});
 
 const wasmReady = init("./pkg/nes_wasm_bg.wasm?v=13");
-await wasmReady;
-requestAnimationFrame(tick);
-void restoreLastRom();
+try {
+  await wasmReady;
+  requestAnimationFrame(tick);
+  void restoreLastRom();
+} catch (error) {
+  setStatus(`Could not start the emulator: ${error.message}`);
+  reportDebug("wasm-startup", error);
+}

@@ -5,41 +5,50 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111217">
     <title>nes-rs — cardboard viewbox</title>
-    <link rel="stylesheet" href="style.css?v=90">
+    <link rel="stylesheet" href="style.css?v=91">
   </head>
   <body>
     <main class="app-shell">
-      <p id="status" class="sr-only" role="status">Choose an iNES ROM to begin.</p>
+      <p id="status" class="status-toast" role="status">Choose an iNES ROM to begin.</p>
 
       <header class="toolbar" aria-label="Emulator toolbar">
-        <div class="toolbar-primary">
-          <label class="rom-picker" for="rom-input" title="Load a ROM">
-            <span aria-hidden="true">＋</span><span>Load ROM</span>
-            <input id="rom-input" type="file" accept=".nes,application/octet-stream">
-          </label>
-          <div class="toolbar-actions" aria-label="Playback and display">
-            <button id="audio-button" type="button" aria-label="Enable audio" title="Enable audio">
-              <span class="tool-label">Audio</span>
-            </button>
-            <button id="effects-button" type="button" aria-pressed="true" title="Toggle 2.5D effects">2.5D</button>
-            <button id="effects-settings-button" type="button" aria-label="2.5D settings" title="2.5D settings" aria-expanded="false" aria-controls="effects-settings">Settings</button>
-            <button id="motion-button" type="button" aria-pressed="false" aria-describedby="motion-status" title="Enable phone tilt">Tilt</button>
-            <button id="motion-recenter-button" type="button" aria-label="Recenter view" title="Recenter view" hidden>Recenter</button>
-          </div>
-        </div>
-        <div class="toolbar-secondary" aria-label="Save and recording">
-          <button id="snapshot-button" type="button" title="Save state" disabled>Save</button>
-          <button id="restore-button" type="button" title="Restore state" disabled>Restore</button>
-          <button id="rewind-button" type="button" title="Rewind while held" disabled>Rewind</button>
-          <button id="record-button" class="record-button" type="button" title="Start recording" disabled>Rec</button>
-          <button id="stop-record-button" type="button" title="Stop recording and upload" disabled>Stop</button>
-          <span id="recording-status" class="sr-only" role="status">Recording is off</span>
+        <label class="rom-picker" for="rom-input" title="Load a ROM">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10l-2 11H3z"/><path d="M3 7V4h6l2 3h9v2"/></svg><span class="sr-only">Load ROM</span>
+          <input id="rom-input" type="file" accept=".nes,application/octet-stream" aria-label="Load ROM">
+        </label>
+        <div class="toolbar-actions" aria-label="Playback and display">
+          <button id="audio-button" type="button" aria-label="Enable audio" title="Enable audio" data-muted="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m11 5-6 4H2v6h3l6 4z"/><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg></button>
+          <button id="effects-button" type="button" aria-label="Toggle 3D depth" title="Toggle 3D depth" aria-pressed="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 10 5-10 5L2 8z"/><path d="m2 12 10 5 10-5M2 16l10 5 10-5"/></svg></button>
+          <button id="motion-button" type="button" aria-label="Enable phone tilt" title="Enable phone tilt" aria-pressed="false" aria-describedby="motion-status"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2" transform="rotate(15 12 12)"/><path d="m2 9 2-3 1 4m17 5-2 3-1-4"/></svg></button>
+          <button id="fullscreen-button" type="button" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
+          <button id="effects-settings-button" type="button" aria-label="Open settings" title="Open settings" aria-expanded="false" aria-controls="effects-settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
+          <button id="more-button" type="button" aria-label="More controls" title="More controls" aria-controls="more-menu" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
         </div>
       </header>
+      <div id="more-menu" class="more-menu" hidden aria-label="More controls">
+        <span class="menu-heading">Play session</span>
+        <div class="session-actions">
+          <button id="motion-recenter-button" type="button" aria-label="Recenter view" title="Recenter view" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"/><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/></svg></button>
+          <button id="snapshot-button" type="button" aria-label="Save state" title="Save state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h12l4 4v14H3V3z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button>
+          <button id="restore-button" type="button" aria-label="Restore state" title="Restore state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg></button>
+          <button id="rewind-button" type="button" aria-label="Rewind while held" title="Rewind while held" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m11 5-9 7 9 7zm11 0-9 7 9 7z"/></svg></button>
+          <button id="record-button" type="button" aria-label="Start recording" title="Start recording" class="record-button" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7" fill="currentColor" stroke="none"/></svg></button>
+          <button id="stop-record-button" type="button" aria-label="Stop recording and upload" title="Stop recording and upload" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none"/></svg></button>
+        </div>
+        <p id="recording-status" role="status">Recording is off</p>
+        <p class="menu-hint">WASD / arrows · J K or Z X<br>Shift + Enter · R rewind · M mute · F fullscreen<br>Connect a controller to play on your TV.</p>
+      </div>
 
       <p id="motion-status" class="motion-status" role="status" aria-live="polite" hidden></p>
 
       <section class="game-panel" aria-label="Game screen">
+        <div id="welcome" class="welcome">
+          <span class="welcome-mark" aria-hidden="true">N<span>ES</span></span>
+          <h1>A little more dimension.</h1>
+          <p>Your classics, in a new light.</p>
+          <button id="welcome-load-button" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10l-2 11H3z"/><path d="M3 7V4h6l2 3h9v2"/></svg><span>Open a game</span></button>
+          <small>Choose a .nes ROM · Stays on your device</small>
+        </div>
         <div class="screen-wrap" data-rim="true">
           <div id="screen-stage" data-depth="false">
             <div id="screen-scene">
@@ -65,8 +74,8 @@
             <button class="hit-right" data-button="right" aria-label="Right"><span aria-hidden="true">▶</span></button>
           </div>
           <div class="menu-hitbox" aria-label="Menu buttons">
-            <button data-button="select" aria-label="Select">Select</button>
-            <button data-button="start" aria-label="Start">Start</button>
+            <button data-button="select" aria-label="Select" title="Select"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>
+            <button data-button="start" aria-label="Start" title="Start"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 10 7-10 7z"/></svg></button>
           </div>
           <div class="face-hitbox" aria-label="Action buttons">
             <button data-button="b" aria-label="B">B</button>
@@ -75,7 +84,13 @@
         </div>
       </section>
 
-      <section id="effects-settings" class="presentation-panel" aria-label="2.5D settings" hidden>
+      <dialog id="effects-settings" class="presentation-panel" aria-label="Settings" hidden>
+        <header class="settings-header"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Picture &amp; play</h2></div><button id="close-settings-button" type="button" aria-label="Close settings" title="Close settings" ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M6 18 18 6"/></svg></button></header>
+        <div class="play-settings">
+          <label for="render-quality-input">Rendering<select id="render-quality-input"><option value="auto" selected>Auto · adapts to your device</option><option value="high">High · finest edges</option><option value="balanced">Balanced</option><option value="performance">Performance</option></select></label>
+          <label for="touch-layout-input">Touch controls<select id="touch-layout-input"><option value="auto" selected>Auto</option><option value="show">Show</option><option value="hide">Hide</option></select></label>
+          <p id="render-quality-status" role="status">Depth stays on at every quality level.</p>
+        </div>
         <div class="presentation-controls">
           <fieldset class="settings-group scene-group">
             <legend>Scene geometry</legend>
@@ -195,10 +210,10 @@
         <footer class="settings-footer" aria-label="2.5D settings actions">
           <button id="reset-effects-settings-button" type="button" aria-label="Reset 2.5D settings to defaults" title="Restore every 2.5D setting to its default">Reset defaults</button>
         </footer>
-      </section>
+      </dialog>
 
       <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · Shift + Enter · R rewind · M mute · V layers</footer>
     </main>
-    <script type="module" src="app.js?v=90"></script>
+    <script type="module" src="app.js?v=91"></script>
   </body>
 </html>

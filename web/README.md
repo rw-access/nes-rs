@@ -22,22 +22,38 @@ The latest successfully loaded ROM is saved in this browser's IndexedDB and
 restored automatically on the next visit. Storage failures leave manual loading
 available. ROM bytes stay on the device; each site address has its own cache.
 
-## Phone viewbox
+## Immersive browser play
 
-The mobile layout uses an edge-to-edge game opening and simple touch controls.
-There is no decorative television or controller skin. Desktop keeps keyboard
-controls and a stationary perspective view. With Tilt off, a modest fixed
-12° horizontal / 8° vertical viewing angle keeps 4-pixel card sides readable
-on phones and larger screens. The vanishing point can lie outside the opening;
-back-plane point spacing still shrinks with depth under perspective. Camera, lighting, rim and shadows
-share the same box pose; the source artwork stays aligned. Turning Tilt on
-switches to the calibrated phone view, and
-turning it off restores the fixed view, including after recentering or a sensor
-failure. Flat video remains neutral.
+The game fits the available viewport without cropping or stretching its 256×240
+aspect ratio. Touch controls sit below the game in portrait and split into left
+and right rails in landscape. Desktop and TV layouts use the full available
+space; standard gamepads are supported. Connect a controller and press a button
+to let the browser discover it. Touch controls hide automatically with a connected
+standard controller, and Settings can force them on or off.
+
+The toolbar uses icons with accessible names and tooltips: open ROM, audio,
+depth, Tilt, fullscreen, Settings, and More. More holds save, restore, rewind,
+recording, and Recenter while Tilt is active. Settings opens a scrollable dialog;
+Escape closes it. Fullscreen (`F`) hides the toolbar after inactivity, and moving
+the pointer, tapping, or using the keyboard reveals it. Browsers without the
+Fullscreen API use an immersive page layout instead; Escape or the fullscreen
+icon leaves that layout. Mobile browser chrome may remain visible there.
+
+Touch controls suppress selection, drag and long-press callouts. The D-pad
+supports sliding and diagonals; separate fingers and keyboard/gamepad sources
+can hold the same action without releasing one another. Cancellation, focus
+loss and backgrounding clear held input.
+
+There is no decorative television or controller skin. With Tilt off, a modest
+fixed 12° horizontal / 8° vertical viewing angle keeps card sides readable on
+phones and larger screens. Camera, lighting, rim and shadows share the same box
+pose; the source artwork stays aligned. Turning Tilt on switches to the
+calibrated phone view, and turning it off restores the fixed view. Flat video
+remains neutral.
 
 On an HTTPS connection, tap **Tilt** while holding your phone comfortably and
 allow motion access if prompted. That initial pose becomes the neutral view.
-The adjacent crosshair button recenters immediately; **Motion strength** in
+The crosshair in More recenters immediately; **Motion strength** in
 the advanced settings controls the response. Screen rotation and returning
 to the tab establish a fresh baseline. Disabling Tilt restores the static view.
 Permission denial or missing sensor data leaves the ordinary view available.
@@ -100,10 +116,9 @@ them to its terminal.
 
 ## Picture depth and stereo sound
 
-The compact **2.5D** toolbar button switches between the original flat picture
+The **Depth** (stacked layers) toolbar icon switches between the original flat picture
 and the depth effect without changing your selected settings. It starts on.
-The adjacent settings button opens the visual controls while effects are on;
-turning effects off closes the panel and disables its settings button. The default
+The settings icon opens the visual and play controls, including when depth is off. The default
 preset is Background separation 85 game pixels, Card thickness 4 game pixels in
 both stationary and Tilt modes, Shadow softness
 18%, with Solid sides, Thickness + shadows layer relief, Thin overlaps, and TV
@@ -294,11 +309,49 @@ triangle, noise, DMC order, with `audio_samples * 5` valid floats. Its optional
 order. Enable it with `set_depth_enabled(true)` and only consume it when frame
 metadata reports `depth_available`.
 
+## Rendering performance
+
+Auto starts with a 768-pixel maximum effect width, lowers it to 512 after two
+sustained slow sample windows, and restores Balanced after ten fast windows.
+It considers both JavaScript rendering cost and delayed animation callbacks.
+High allows up to 1536 effect pixels; Balanced and Performance can also be
+selected explicitly in Settings. Every level keeps the same geometry, lighting,
+depth and native NES artwork. Printed faces use independent native-resolution
+canvases with nearest-neighbor scaling, so lowering effect resolution does not
+soften the game pixels. Only sides and shadows change resolution.
+
+The emulator advances up to four catch-up frames per animation callback and
+presents only the final state. Audio and recording still consume each simulated
+frame. Excess wall-clock backlog is discarded after that bound. Empty receiving
+masks skip relief rendering, and empty ghost overlays skip image uploads.
+
+For diagnostics, `?debug=1` exposes `window.nesRenderStats` (last render time,
+quality and effect width). The synthetic stress benchmark forces raster
+completion with a small readback; its software-rendered headless timing is not
+a hardware FPS guarantee. Run `node web/render-bench.mjs` with Playwright
+installed, or set `PLAYWRIGHT_MODULE` to an existing package's `index.mjs`.
+
 Run the browser presentation helper tests with:
 
 ```sh
 node --test web/*.test.mjs
 ```
+
+The optional integration suite runs a generated synthetic NROM through the real
+WASM bridge, checks portrait, landscape, 320px phone, tablet, desktop and 4K TV
+layouts, tests simultaneous touch holds and diagonal sliding, keyboard aliases,
+controller disconnects, settings, state save/restore, quality and fullscreen:
+
+```sh
+python3 web/dev_server.py --port 8765
+# In a second terminal, with Playwright installed:
+node web/browser-check.mjs
+```
+
+`CHROMIUM_PATH`, `PLAYWRIGHT_MODULE`, `NES_PREVIEW_URL`, `NES_TEST_LAYOUT`, and
+`NES_SCREENSHOT_DIR` can override the browser, dependency, URL, single layout,
+and screenshot output. Hardware Safari long-press behavior, motion sensors and
+real TV/controller latency still require device checks.
 
 ## Capturing a play sequence
 

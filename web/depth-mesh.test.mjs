@@ -816,6 +816,24 @@ test("sprite relief modes add a clipped rear-projected shadow and opt-in tile fa
     zeroRenderer.paint(source, 0.5, tilePixels, projection, { mode: "contact", softness: 1 });
     assert.equal(zeroRenderer.tileSupportedFaces.length, 1, "zero thickness preserves reusable contact classification");
 
+    const effect = new MockCanvas(12, 12);
+    const front = new MockCanvas(1, 1);
+    const separate = new CanvasDepthRenderer(effect, 10, 10, front);
+    const empty = rgba(10, 10);
+    const relief = { mode: "contact", receiverRGBA: empty, overlapFraction: 1 / 3 };
+    separate.paint(source, 0.5, empty, projection, relief);
+    assert.equal(front.width, 10, "original artwork keeps native resolution");
+    assert.deepEqual(separate.sourceImage.data, new Uint8ClampedArray(source));
+    assert.equal(effect.context.drawCalls.length, 0, "source art is not downsampled into the effect buffer");
+    assert.equal(separate.reliefCanvas, null, "empty receiver and occluder skip full-size relief passes");
+    assert.equal(separate.paint(source, 0.5, empty, projection, relief), false, "empty masks still cache correctly");
+    separate.paint(source, 0.5, tilePixels, projection, relief);
+    assert.ok(separate.reliefCanvas, "overlap relief returns when mask coverage appears");
+    separate.resize(6, 6);
+    separate.paint(source, 0.5, empty, projection, relief);
+    assert.equal(front.width, 10, "lower effect quality never resizes printed faces");
+    assert.equal(separate.occluderHasCoverage, false);
+
     assert.throws(() => renderer.paint(source, 0.5, tilePixels, projection, { mode: "unknown", softness: 1 }), RangeError);
     assert.throws(() => renderer.paint(source, 0.5, tilePixels, projection, { mode: "contact", softness: 2.01 }), RangeError);
     assert.throws(() => renderer.paint(source, 0.5, tilePixels, projection, { mode: "contact", overlapFraction: -0.01 }), RangeError);

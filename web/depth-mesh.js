@@ -230,7 +230,7 @@ export function projectDepthPoint(point, depth, width = 256, height = 240) {
 
 /** Paint continuous side quads, optional tile relief, then exact source artwork. */
 export class CanvasDepthRenderer {
-  constructor(canvas, width = 256, height = 240) {
+  constructor(canvas, width = 256, height = 240, frontCanvas = null) {
     if (!canvas || typeof canvas.getContext !== "function") throw new TypeError("A canvas element is required");
     validateDimensions(width, height);
     this.canvas = canvas;
@@ -238,7 +238,10 @@ export class CanvasDepthRenderer {
     this.height = height;
     this.context = canvas.getContext("2d", { alpha: true });
     if (!this.context) throw new Error("Canvas 2D context is unavailable");
-    this.sourceCanvas = makeCanvas(width, height);
+    this.separateFront = frontCanvas !== null;
+    this.sourceCanvas = frontCanvas ?? makeCanvas(width, height);
+    this.sourceCanvas.width = width;
+    this.sourceCanvas.height = height;
     this.sourceContext = this.sourceCanvas.getContext("2d", { alpha: true });
     if (!this.sourceContext) throw new Error("Canvas 2D context is unavailable");
     this.sourceImage = this.sourceContext.createImageData(width, height);
@@ -246,10 +249,12 @@ export class CanvasDepthRenderer {
     this.occluderContext = null;
     this.occluderImage = null;
     this.hasOccluder = false;
+    this.occluderHasCoverage = false;
     this.receiverCanvas = null;
     this.receiverContext = null;
     this.receiverImage = null;
     this.hasReceiver = false;
+    this.receiverHasCoverage = false;
     this.reliefCanvas = null;
     this.reliefContext = null;
     this.lastPixels = this.sourceImage.data;
@@ -317,7 +322,7 @@ export class CanvasDepthRenderer {
     if (changedReceiver) this.updateReceiver(relief.receiverRGBA);
     // Support depends on native coverage, not thickness. Keep it valid at zero
     // so raising thickness again doesn't reuse an empty classification.
-    if (relief.mode === "contact" && this.hasOccluder) {
+    if (relief.mode === "contact" && this.occluderHasCoverage) {
       if (changedPixels || changedView || changedOccluder || changedProjection || changedReliefMode || resized) {
         this.tileSupportedFaces = collectTileSupportedFaces(
           this.faces, this.occluderImage.data, this.width, this.height, occluderProjection,
@@ -328,9 +333,9 @@ export class CanvasDepthRenderer {
     }
     const reliefFaces = relief.mode === "contact" ? this.tileSupportedFaces
       : relief.mode === "cutout" ? this.faces : [];
-    const useReceiverShadow = depth > 0 && relief.mode !== "off" && this.hasReceiver && relief.overlapFraction === 1;
-    const capReceiverWalls = depth > 0 && relief.mode !== "off" && this.hasReceiver && relief.overlapFraction < 1;
-    const useRelief = depth > 0 && relief.mode !== "off" && this.hasOccluder;
+    const useReceiverShadow = depth > 0 && relief.mode !== "off" && this.receiverHasCoverage && relief.overlapFraction === 1;
+    const capReceiverWalls = depth > 0 && relief.mode !== "off" && this.receiverHasCoverage && relief.overlapFraction < 1;
+    const useRelief = depth > 0 && relief.mode !== "off" && this.occluderHasCoverage;
     // Only overlap geometry changes depth; the source face and backdrop caster stay fixed.
     const reliefDepth = depth * relief.overlapFraction;
 
@@ -348,7 +353,7 @@ export class CanvasDepthRenderer {
     if (depth > 0) {
       for (const face of this.faces) paintFace(context, face, depth, this.width, this.height);
 
-      if (this.hasOccluder) {
+      if (this.occluderHasCoverage) {
         applyAlphaMask(context, this.occluderCanvas, this.width, this.height, occluderProjection, "destination-out");
       }
 
@@ -372,7 +377,7 @@ export class CanvasDepthRenderer {
     // Restore the original, unshifted image last so its pixel colors and
     // aligned top surface stay exact over every side quad.
     context.imageSmoothingEnabled = false;
-    context.drawImage(this.sourceCanvas, 0, 0, this.width, this.height);
+    if (!this.separateFront) context.drawImage(this.sourceCanvas, 0, 0, this.width, this.height);
     this.lastDepth = depth;
     this.lastLightingRevision = lightingRevision;
     this.lastViewRevision = viewRevision;
@@ -390,6 +395,7 @@ export class CanvasDepthRenderer {
   updateOccluder(occluderRGBA) {
     if (occluderRGBA === null) {
       this.hasOccluder = false;
+      this.occluderHasCoverage = false;
       return;
     }
     if (!this.occluderCanvas) {
@@ -399,7 +405,11 @@ export class CanvasDepthRenderer {
       this.occluderImage = this.occluderContext.createImageData(this.width, this.height);
     }
     const target = this.occluderImage.data;
-    for (let offset = 0; offset < target.length; offset += 4) target[offset + 3] = occluderRGBA[offset + 3];
+    this.occluderHasCoverage = false;
+    for (let offset = 3; offset < target.length; offset += 4) {
+      target[offset] = occluderRGBA[offset];
+      this.occluderHasCoverage ||= target[offset] > 0;
+    }
     this.occluderContext.putImageData(this.occluderImage, 0, 0);
     this.hasOccluder = true;
   }
@@ -407,6 +417,7 @@ export class CanvasDepthRenderer {
   updateReceiver(receiverRGBA) {
     if (receiverRGBA === null) {
       this.hasReceiver = false;
+      this.receiverHasCoverage = false;
       return;
     }
     if (!this.receiverCanvas) {
@@ -416,7 +427,11 @@ export class CanvasDepthRenderer {
       this.receiverImage = this.receiverContext.createImageData(this.width, this.height);
     }
     const target = this.receiverImage.data;
-    for (let offset = 0; offset < target.length; offset += 4) target[offset + 3] = receiverRGBA[offset + 3];
+    this.receiverHasCoverage = false;
+    for (let offset = 3; offset < target.length; offset += 4) {
+      target[offset] = receiverRGBA[offset];
+      this.receiverHasCoverage ||= target[offset] > 0;
+    }
     this.receiverContext.putImageData(this.receiverImage, 0, 0);
     this.hasReceiver = true;
   }
