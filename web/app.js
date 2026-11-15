@@ -1,534 +1,482 @@
 import init, * as wasm from "./pkg/nes_wasm.js";
 import { SpatialAudio } from "./spatial-audio.js";
-import { CanvasDepthRenderer, cameraDepthScale, projectDepthPoint } from "./depth-mesh.js";
-import { DioramaFrame } from "./diorama-frame.js";
-import { CanvasBackdropRenderer } from "./backdrop-lighting.js";
-import { CanvasCardShadowRenderer } from "./card-shadow.js";
-import { RimHousing, RIM_MATERIALS } from "./rim-housing.js";
-import { RIM_CORNER_FRACTION } from "./rim-outline.js";
-import { setSceneLightPlacement, setSceneLightRotation, getSceneLightRevision } from "./scene-lighting.js";
-import { setSceneCamera, getSceneViewRevision } from "./scene-view.js";
-import { resolveScreenProfile, estimateGameWidthCm, computeViewingCamera, SCENE_DEPTH_TO_NATIVE_PIXELS, computeStationaryView, resolveRenderedScenePose } from "./viewing-model.js";
-import { DeviceTiltController } from "./device-tilt.js";
-import { loadCachedRom, saveCachedRom, clearCachedRom } from "./rom-store.js";
-import { resolveSceneDepth, resolveShadowSoftness, resolveRimThickness, resolveRimRecess, gameplayShadowProjection } from "./depth-model.js";
-
 import { ControllerInput, readGamepads, bindTouchControls } from "./play-controls.js";
-import { RenderQuality, effectPixelRatio, frameBudget } from "./render-quality.js";
+import { loadCachedRom, saveCachedRom, MAX_ROM_BYTES } from "./rom-store.js";
+import { frameBudget } from "./render-quality.js";
+import { DeviceTiltController } from "./device-tilt.js";
 
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search), debugEnabled = params.get("debug") === "1";
+const WIDTH = 256, HEIGHT = 240, FRAME_MS = 1000 / 60;
+const BUTTONS = { a: 1, b: 2, select: 4, start: 8, up: 16, down: 32, left: 64, right: 128 };
 const NesWeb = wasm.NesWasm ?? wasm.NesWeb;
-
-const debugEnabled = new URLSearchParams(window.location.search).get("debug") === "1";
-
-function debugValue(value) {
-  if (value instanceof Error) {
-    return { name: value.name, message: value.message, stack: value.stack };
-  }
-  if (typeof value === "string") return value;
-  try { return JSON.parse(JSON.stringify(value)); }
-  catch (_) { return String(value); }
+const appShell = document.querySelector(".app-shell"), gamePanel = document.querySelector(".game-panel");
+const screenWrap = document.querySelector(".screen-wrap"), canvas = $("screen");
+const context = canvas.getContext("2d", { alpha: false }), image = context.createImageData(WIDTH, HEIGHT);
+const effectsSettings = $("effects-settings"), effectsSettingsButton = $("effects-settings-button");
+const rewindButton = $("rewind-button"), recordButton = $("record-button"), stopRecordButton = $("stop-record-button");
+const recordingStatus = $("recording-status"), audioButton = $("audio-button"), status = $("status");
+const touchLayoutInput = $("touch-layout-input"), romInput = $("rom-input");
+const snapshotButton = $("snapshot-button"), restoreButton = $("restore-button");
+let emulator = null, emulatorId = 0, romName = null, savedSnapshot = null, recording = null;
+let mode = "flat", viewer = null, viewerPromise = null, modeGeneration = 0;
+let paused = false, heldButtons = 0, rewinding = false, rewindFrames = 0, rewindStartedAt = 0;
+let previousTime = 0, accumulator = 0, romLoadGeneration = 0, cacheWrites = Promise.resolve();
+let gamepadConnected = false, statusTimeout, chromeTimeout, presetGeneration = 0;
+let flatFrames = 0, gameFrames = 0, flatStatsAt = performance.now(), lastFlatFrames = 0, lastGameFrames = 0;
+const rewindSources = new Set();
+const transitionCanvas = document.createElement("canvas");
+transitionCanvas.className = "view-transition"; transitionCanvas.hidden = true; transitionCanvas.setAttribute("aria-hidden", "true");
+gamePanel.append(transitionCanvas);
+let viewFade = null, xrPageFade = null, tiltEnabled = false;
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+function cancelViewFade() {
+  const animation = viewFade; viewFade = null; animation?.cancel();
+  transitionCanvas.hidden = true; transitionCanvas.width = transitionCanvas.height = 1;
 }
+function captureOutgoingView() {
+  if (reducedMotion() || !transitionCanvas.animate || viewer?.presenting) return false;
+  const previousOpacity = transitionCanvas.hidden ? 0 : Number(getComputedStyle(transitionCanvas).opacity);
+  const previous = document.createElement("canvas");
+  if (previousOpacity > 0) { previous.width = transitionCanvas.width; previous.height = transitionCanvas.height; previous.getContext("2d").drawImage(transitionCanvas, 0, 0); }
+  cancelViewFade();
+  const ratio = Math.min(devicePixelRatio || 1, 1.25);
+  transitionCanvas.width = Math.max(1, Math.round(gamePanel.clientWidth * ratio));
+  transitionCanvas.height = Math.max(1, Math.round(gamePanel.clientHeight * ratio));
+  const ctx = transitionCanvas.getContext("2d");
+  ctx.fillStyle = "#111217"; ctx.fillRect(0, 0, transitionCanvas.width, transitionCanvas.height);
+  if (mode === "flat") {
+    const panel = gamePanel.getBoundingClientRect(), picture = canvas.getBoundingClientRect();
+    ctx.imageSmoothingEnabled = false;
+    if (emulator) ctx.drawImage(canvas, (picture.x - panel.x) * ratio, (picture.y - panel.y) * ratio, picture.width * ratio, picture.height * ratio);
+  } else if (!viewer?.captureFrame(transitionCanvas)) return false;
+  if (previousOpacity > 0) { ctx.globalAlpha = previousOpacity; ctx.drawImage(previous, 0, 0, transitionCanvas.width, transitionCanvas.height); ctx.globalAlpha = 1; }
+  return true;
+}
+function fadeOutgoingView() {
+  transitionCanvas.hidden = false;
+  const animation = transitionCanvas.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: "ease-out" });
+  viewFade = animation;
+  animation.finished.then(() => { if (viewFade === animation) cancelViewFade(); }).catch(() => {});
+}
+function updateMotionButton() {
+  const selected = tiltEnabled && mode === "depth" && !viewer?.presenting;
+  $("motion-button").setAttribute("aria-pressed", String(selected));
+  const label = selected ? "Turn tilt off" : "Enable phone tilt";
+  $("motion-button").setAttribute("aria-label", label); $("motion-button").title = label;
+}
+
+recordButton.hidden = stopRecordButton.hidden = recordingStatus.hidden = !debugEnabled;
+const showFPSInput = $("show-fps-input"), FPS_STORAGE_KEY = "nes.show-fps.v1";
+try { showFPSInput.checked = localStorage.getItem(FPS_STORAGE_KEY) === "true"; } catch (_) { /* Storage is optional. */ }
+function updateFPSVisibility(persist = false) {
+  $("fps").hidden = !showFPSInput.checked;
+  viewer?.setFPSVisible(showFPSInput.checked);
+  if (persist) { try { localStorage.setItem(FPS_STORAGE_KEY, String(showFPSInput.checked)); } catch (_) { /* Keep the choice for this visit. */ } }
+}
+showFPSInput.addEventListener("change", () => updateFPSVisibility(true));
+updateFPSVisibility();
+
 
 function reportDebug(kind, ...values) {
-  const record = {
-    timestamp: new Date().toISOString(),
-    kind,
-    url: window.location.href,
-    values: values.map(debugValue),
-  };
-  if (debugEnabled) {
-    const events = window.nesDebugEvents ??= [];
-    events.push(record);
-    if (events.length > 200) events.shift();
+  if (!debugEnabled) return;
+  const events = window.nesDebugEvents ??= [];
+  events.push({ timestamp: new Date().toISOString(), kind, values: values.map(v => v instanceof Error ? { name: v.name, message: v.message } : v) });
+  if (events.length > 200) events.shift();
+}
+window.addEventListener("error", event => reportDebug("window.error", event.message));
+window.addEventListener("unhandledrejection", event => reportDebug("unhandledrejection", event.reason?.message));
+function setStatus(message) {
+  status.textContent = message; status.classList.add("is-visible");
+  clearTimeout(statusTimeout); statusTimeout = setTimeout(() => status.classList.remove("is-visible"), 3500);
+}
+const audio = new SpatialAudio({
+  onState: ({ state, muted }) => {
+    const label = muted ? "Unmute audio" : state === "running" ? "Mute audio" : "Enable audio";
+    audioButton.dataset.muted = String(muted || state !== "running");
+    audioButton.title = label; audioButton.setAttribute("aria-label", label);
+  },
+  onError: error => setStatus(`Audio unavailable: ${error.message}`),
+});
+audio.setWidth(0);
+function resetClock() { previousTime = 0; accumulator = 0; }
+function returnToGame() {
+  if (effectsSettings.open) return;
+  if (!$("more-menu").hidden) setMoreOpen(false);
+  const active = document.activeElement;
+  if (active instanceof HTMLElement && active.closest(".toolbar, #more-menu")) active.blur();
+  const surface = mode === "flat" ? canvas : $("stage");
+  if (document.activeElement !== surface) surface.focus({ preventScroll: true });
+}
+gamePanel.addEventListener("pointerdown", returnToGame);
+document.querySelector(".touch-controls").addEventListener("pointerdown", returnToGame);
+
+function isPlaying() { return Boolean(emulator && !paused && !effectsSettings.open); }
+function updateButtons() { if (emulator && !rewinding) emulator.set_controller(heldButtons); }
+const controllerInput = new ControllerInput((buttons, previous) => {
+  heldButtons = buttons;
+  for (const [name, mask] of Object.entries(BUTTONS)) {
+    if ((buttons & mask) !== (previous & mask)) recordInputEvent(buttons & mask ? "button-down" : "button-up", { button: name });
   }
-  return record;
+  for (const button of document.querySelectorAll("[data-button]")) button.classList.toggle("is-held", Boolean(buttons & BUTTONS[button.dataset.button]));
+  updateButtons();
+});
+const clearTouchPointers = bindTouchControls(document.querySelector(".touch-controls"), controllerInput, BUTTONS);
+function setRewind(source, active) {
+  if (active) rewindSources.add(source); else rewindSources.delete(source);
+  const next = Boolean(isPlaying() && rewindSources.size);
+  if (next === rewinding) return;
+  rewinding = next; audio.flush(); resetClock();
+  rewindButton.classList.toggle("is-held", next);
+  if (next) {
+    rewindFrames = 0; rewindStartedAt = performance.now(); recordInputEvent("rewind-start"); setStatus("Rewinding · release L1 / R to resume");
+  } else { updateButtons(); recordInputEvent("rewind-stop"); }
 }
-
-window.addEventListener("error", (event) => {
-  reportDebug("window.error", event.error || event.message);
-});
-window.addEventListener("unhandledrejection", (event) => {
-  reportDebug("unhandledrejection", event.reason);
-});
-
-if (debugEnabled) {
-  for (const level of ["log", "info", "warn", "error"]) {
-    const original = console[level].bind(console);
-    console[level] = (...values) => {
-      original(...values);
-      reportDebug(`console.${level}`, ...values);
-    };
+function stopRewind() { rewindSources.clear(); setRewind("reset", false); }
+function clearInput() { controllerInput.clear(); clearTouchPointers(); stopRewind(); resetClock(); }
+function setPaused(value) {
+  paused = Boolean(value); clearInput(); audio.flush();
+  const label = paused ? "Play game" : "Pause game";
+  $("play").setAttribute("aria-label", label); $("play").title = label;
+  $("play").setAttribute("aria-pressed", String(!paused));
+  $("play").querySelector("path").setAttribute("d", paused ? "m7 3 14 9-14 9z" : "M6 4h4v16H6zm8 0h4v16h-4z");
+  if (emulator) setStatus(paused ? "Game frozen · look around to inspect it" : "Playing");
+}
+function updateTouchLayout() {
+  const show = touchLayoutInput.value === "show" || (touchLayoutInput.value === "auto" && matchMedia("(any-pointer: coarse)").matches && !gamepadConnected);
+  appShell.dataset.touch = String(show); clearInput(); resize();
+}
+function pollGamepads(presenting = false, visible = true) {
+  const pads = navigator.getGamepads?.() ?? [], state = readGamepads(pads, BUTTONS);
+  if (state.connected !== gamepadConnected) {
+    gamepadConnected = state.connected; updateTouchLayout();
+    if (state.connected) setStatus("Controller connected · hold L1 to rewind");
   }
+  const enabled = isPlaying() && visible && (presenting || document.hasFocus());
+  controllerInput.set("gamepad", enabled ? state.buttons : 0);
+  if (enabled && state.buttons) returnToGame();
+  setRewind("gamepad", enabled && Array.from(pads).some(p => p?.connected && p.mapping === "standard" && p.buttons[4]?.pressed));
 }
-
-const WIDTH = 256;
-const HEIGHT = 240;
-const FRAME_MS = 1000 / 60;
-const DISPLAY_MODE_LABELS = ["Background", "Sprites", "Both"];
-const GHOST_RECORD_BYTES = 6;
-const NEUTRAL_ROOM_ROTATION = Object.freeze([1, 0, 0, 0, 1, 0, 0, 0, 1]);
-
-const BUTTONS = Object.freeze({
-  a: 1 << 0,
-  b: 1 << 1,
-  select: 1 << 2,
-  start: 1 << 3,
-  up: 1 << 4,
-  down: 1 << 5,
-  left: 1 << 6,
-  right: 1 << 7,
-});
-
-const canvas = document.querySelector("#screen");
-const context = canvas.getContext("2d", { alpha: false });
-const image = context.createImageData(WIDTH, HEIGHT);
-const screenStage = document.querySelector("#screen-stage");
-const screenWrap = document.querySelector(".screen-wrap");
-const depthStack = document.querySelector("#depth-stack");
-const depthCanvases = [...depthStack.querySelectorAll("canvas")];
-const dioramaCanvas = document.createElement("canvas");
-dioramaCanvas.className = "diorama-box";
-dioramaCanvas.hidden = true;
-dioramaCanvas.setAttribute("aria-hidden", "true");
-depthStack.insertBefore(dioramaCanvas, depthCanvases[1]);
-const dioramaFrame = new DioramaFrame(dioramaCanvas, WIDTH, HEIGHT);
-// The complete gameplay surface casts one shadow onto the backdrop. NES
-// drawing priority determines occlusion, not physical gaps between objects.
-const backgroundShadow = document.createElement("canvas");
-backgroundShadow.className = "layer-shadow";
-backgroundShadow.setAttribute("aria-hidden", "true");
-depthStack.insertBefore(backgroundShadow, depthCanvases[1]);
-const cardShadowRenderer = new CanvasCardShadowRenderer(backgroundShadow, WIDTH, HEIGHT);
-const shadowCasterCanvas = document.createElement("canvas");
-shadowCasterCanvas.width = WIDTH;
-shadowCasterCanvas.height = HEIGHT;
-const shadowCasterContext = shadowCasterCanvas.getContext("2d");
-const shadowCasterImage = shadowCasterContext.createImageData(WIDTH, HEIGHT);
-// Like a surrounding tile, rim sides sit over backdrop and below all gameplay.
-const rimCanvas = document.createElement("canvas");
-rimCanvas.id = "tv-rim";
-rimCanvas.hidden = true;
-rimCanvas.setAttribute("aria-hidden", "true");
-depthStack.insertBefore(rimCanvas, depthCanvases[1]);
-const rimHousing = new RimHousing(rimCanvas, screenStage, WIDTH, HEIGHT);
-let shadowsNeedPaint = true;
-const backdropRenderer = new CanvasBackdropRenderer(depthCanvases[0], WIDTH, HEIGHT);
-const depthRenderers = depthCanvases.map((plane, index) => {
-  if (index === 0) return null;
-  // Keep the original printed faces at native resolution in their own crisp
-  // compositor layer; adaptive resolution only changes sides and shadows.
-  const front = document.createElement("canvas");
-  front.className = "depth-front";
-  plane.after(front);
-  return new CanvasDepthRenderer(plane, WIDTH, HEIGHT, front);
-});
-const ghostCanvas = document.querySelector("#depth-ghosts");
-const ghostContext = ghostCanvas.getContext("2d");
-const ghostImage = ghostContext.createImageData(WIDTH, HEIGHT);
-const effectsButton = document.querySelector("#effects-button");
-const effectsSettingsButton = document.querySelector("#effects-settings-button");
-const effectsSettings = document.querySelector("#effects-settings");
-const resetEffectsSettingsButton = document.querySelector("#reset-effects-settings-button");
-const motionButton = document.querySelector("#motion-button");
-const motionRecenterButton = document.querySelector("#motion-recenter-button");
-const motionStatus = document.querySelector("#motion-status");
-const motionTrackingInput = document.querySelector("#motion-tracking-input");
-const motionStrengthInput = document.querySelector("#motion-strength-input");
-const motionStrengthOutput = document.querySelector("#motion-strength-value");
-const viewingDistanceInput = document.querySelector("#viewing-distance-input");
-const viewingDistanceOutput = document.querySelector("#viewing-distance-value");
-const screenProfileInput = document.querySelector("#screen-profile-input");
-const screenProfileHint = document.querySelector("#screen-profile-hint");
-const depthInput = document.querySelector("#depth-input");
-const depthOutput = document.querySelector("#depth-value");
-const softnessInput = document.querySelector("#softness-input");
-const softnessOutput = document.querySelector("#softness-value");
-const lightElevationInput = document.querySelector("#light-elevation-input");
-const lightElevationOutput = document.querySelector("#light-elevation-value");
-const lightAzimuthInput = document.querySelector("#light-azimuth-input");
-const lightAzimuthOutput = document.querySelector("#light-azimuth-value");
-const lightDistanceInput = document.querySelector("#light-distance-input");
-const lightDistanceOutput = document.querySelector("#light-distance-value");
-const thicknessInput = document.querySelector("#thickness-input");
-const thicknessOutput = document.querySelector("#thickness-value");
-const rimThicknessInput = document.querySelector("#rim-thickness-input");
-const rimThicknessOutput = document.querySelector("#rim-thickness-value");
-const rimRecessInput = document.querySelector("#rim-recess-input");
-const rimRecessOutput = document.querySelector("#rim-recess-value");
-const rimSoftnessInput = document.querySelector("#rim-softness-input");
-const rimSoftnessOutput = document.querySelector("#rim-softness-value");
-const consoleEdgeInput = document.querySelector("#console-edge-input");
-const rimInput = document.querySelector("#rim-input");
-const recessedOpeningInput = document.querySelector("#recessed-opening-input");
-const rimWidthInput = document.querySelector("#rim-width-input");
-const rimWidthOutput = document.querySelector("#rim-width-value");
-const solidSidesInput = document.querySelector("#solid-sides-input");
-const spriteReliefInput = document.querySelector("#sprite-relief-input");
-const spriteReliefStyle = document.querySelector("#sprite-relief-style");
-const thinOverlapsInput = document.querySelector("#thin-overlaps-input");
-const dioramaInput = document.querySelector("#diorama-input");
-const status = document.querySelector("#status");
-const romInput = document.querySelector("#rom-input");
-const audioButton = document.querySelector("#audio-button");
-const appShell = document.querySelector(".app-shell");
-const gamePanel = document.querySelector(".game-panel");
-const fullscreenButton = document.querySelector("#fullscreen-button");
-const qualityInput = document.querySelector("#render-quality-input");
-const qualityStatus = document.querySelector("#render-quality-status");
-const touchLayoutInput = document.querySelector("#touch-layout-input");
-const quality = new RenderQuality();
-let gamepadConnected = false;
-let statusTimeout;
-let chromeTimeout;
-let ghostVisible = false;
-let presentationInterval = FRAME_MS;
-const snapshotButton = document.querySelector("#snapshot-button");
-const restoreButton = document.querySelector("#restore-button");
-const rewindButton = document.querySelector("#rewind-button");
-const recordButton = document.querySelector("#record-button");
-const stopRecordButton = document.querySelector("#stop-record-button");
-const recordingStatus = document.querySelector("#recording-status");
-recordButton.hidden = !debugEnabled;
-stopRecordButton.hidden = !debugEnabled;
-recordingStatus.hidden = !debugEnabled;
-
-let emulator = null;
-let romName = null;
-let savedSnapshot = null;
-let heldButtons = 0;
-let previousTime = 0;
-let accumulator = 0;
-let rewinding = false;
-let rewindFrames = 0;
-let rewindStartedAt = 0;
-let recording = null;
-let romLoadGeneration = 0;
-let romCacheWrites = Promise.resolve();
-let pendingMotionView = null;
-let latestMotionView = { x: 0, y: 0 };
-let viewingDistanceAdjusted = false;
-let activeScreenProfile = null;
-let motionState = "off";
-const cardThicknessByMode = { stationary: 4, tilt: 4 };
-const lightElevationByMode = { stationary: 7, tilt: 3 };
-const suggestPhoneMotion = window.matchMedia("(pointer: coarse)").matches;
-
-function updateMotionControls(state = motionState, message = motionStatus.textContent) {
-  motionState = state;
-  const enabled = ["requesting", "calibrating", "active", "paused"].includes(state);
-  motionButton.setAttribute("aria-pressed", String(enabled));
-  motionButton.disabled = state === "requesting" || (!wantsLayeredVideo() && !enabled);
-  motionButton.title = enabled ? "Turn phone tilt off" : "Enable phone tilt";
-  motionRecenterButton.hidden = !enabled;
-  motionRecenterButton.disabled = !enabled || state === "requesting" || state === "paused";
-  motionStrengthInput.disabled = !enabled || state === "requesting";
-  motionStatus.hidden = state === "off" || state === "active";
-  motionStatus.textContent = state === "off" && suggestPhoneMotion
-    ? "Tap Tilt while holding your phone comfortably, then move it to look inside."
-    : message;
+function drawFrame(scheduleAudio = true) {
+  const metadata = emulator.step_frame(); gameFrames++;
+  if (scheduleAudio) {
+    try { audio.schedule(emulator.audio_buffer().subarray(0, metadata.audio_samples), emulator.audio_stem_buffer().subarray(0, metadata.audio_samples * 5), metadata.audio_sample_rate, metadata.audio_discontinuity); }
+    catch (error) { reportDebug("audio-scheduling", error); audio.flush(); }
+  }
+  recordFrame("frame", metadata);
+  return metadata;
 }
-
-const motionController = new DeviceTiltController({
-  trackingMode: motionTrackingInput.value,
-  // Sensor callbacks only queue a camera change. The existing render loop
-  // applies the latest one before drawing, avoiding a second video loop.
-  onView: view => { pendingMotionView = view; },
-  onStatus: ({ state, message }) => {
-    const wasEnabled = motionButton.getAttribute("aria-pressed") === "true";
-    updateMotionControls(state, message);
-    // Starting/stopping can leave an already-neutral sensor pose unchanged.
-    // Still render the switch between the static and calibrated cameras.
-    const enabled = motionButton.getAttribute("aria-pressed") === "true";
-    if (wasEnabled !== enabled) {
-      cardThicknessByMode[wasEnabled ? "tilt" : "stationary"] = Number(thicknessInput.value);
-      thicknessInput.defaultValue = "4";
-      thicknessInput.value = String(cardThicknessByMode[enabled ? "tilt" : "stationary"]);
-      lightElevationByMode[wasEnabled ? "tilt" : "stationary"] = Number(lightElevationInput.value);
-      lightElevationInput.defaultValue = enabled ? "3" : "7";
-      lightElevationInput.value = String(lightElevationByMode[enabled ? "tilt" : "stationary"]);
-      pendingMotionView ??= { x: 0, y: 0 };
+function renderVideo(reset = false) {
+  if (mode !== "flat") { viewer?.refresh(reset); return; }
+  if (!emulator) return;
+  image.data.set(emulator.rgba_buffer()); context.putImageData(image, 0, 0); flatFrames++;
+}
+// Exactly one scheduler advances the core: window RAF in flat mode; the shared
+// renderer's animation loop in both desktop depth modes and headset sessions.
+function advance(now, { visible = !document.hidden, presenting = false } = {}) {
+  try {
+    pollGamepads(presenting, visible);
+    if (!visible || !isPlaying()) { resetClock(); return 0; }
+    if (!previousTime) previousTime = now;
+    accumulator += Math.min(100, Math.max(0, now - previousTime)); previousTime = now;
+    const budget = frameBudget(accumulator, FRAME_MS); accumulator = budget.remainder;
+    for (let n = 0; n < budget.frames; n++) {
+      const available = rewinding ? emulator.rewind() : false;
+      const metadata = drawFrame(!rewinding);
+      if (rewinding) { recordFrame("rewind", metadata, { available }); rewindFrames++; }
+      metadata.free?.();
     }
+    if (budget.frames) renderVideo();
+    return budget.frames;
+  } catch (error) {
+    reportDebug("emulation-frame", error); setPaused(true); setStatus(`Emulation stopped: ${error.message}`); return 0;
+  }
+}
+function tick(now) {
+  if (mode === "flat") {
+    advance(now);
+    if (now - flatStatsAt >= 1000) {
+      const seconds = (now - flatStatsAt) / 1000;
+      $("fps").textContent = `Render ${Math.round((flatFrames - lastFlatFrames) / seconds)} fps · Game ${Math.round((gameFrames - lastGameFrames) / seconds)} fps · Scene — fps`;
+      flatStatsAt = now; lastFlatFrames = flatFrames; lastGameFrames = gameFrames;
+    }
+  }
+  requestAnimationFrame(tick);
+}
+async function ensureViewer() {
+  viewerPromise ??= import("./vr.js?v=8").then(({ createDioramaView }) => {
+    viewer = createDioramaView({ buttons: BUTTONS, input: controllerInput, audio, getEmulator: () => emulator,
+      isPlaying, isRewinding: () => rewinding, setRewind, clearInput, resetClock, pause: () => setPaused(true),
+      tick: (now, state) => mode === "flat" ? 0 : advance(now, state),
+      activateForVR: () => {
+        const ready = mode === "flat" ? setMode("orbit") : Promise.resolve();
+        const generation = modeGeneration;
+        return { ready, isCurrent: () => generation === modeGeneration && mode !== "flat" };
+      },
+      sessionChanged: presenting => {
+        cancelViewFade(); xrPageFade?.cancel();
+        if (!presenting && !reducedMotion()) xrPageFade = $("stage").animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180 });
+        if (presenting && effectsSettings.open) setSettingsOpen(false);
+        motionController.setPaused(presenting || mode !== "depth"); updateMotionButton(); clearInput();
+        if (!presenting) returnToGame();
+      },
+    });
+    viewer.setFPSVisible(showFPSInput.checked);
+    if (preferred && !defaultsApplied) { viewer.applySettings(preferred); defaultsApplied = true; }
+    updateSettings();
+    return viewer;
+  }).catch(error => { viewerPromise = null; throw error; });
+  return viewerPromise;
+}
+async function setMode(next) {
+  if (!["flat", "depth", "orbit"].includes(next)) next = "depth";
+  const generation = ++modeGeneration;
+  try {
+    const scene = next === "flat" ? viewer : await ensureViewer();
+    if (generation !== modeGeneration) return;
+    if (scene?.presenting) await scene.exitVR();
+    if (generation !== modeGeneration) return;
+    const crossfade = mode !== next && (mode === "flat" || next === "flat") && captureOutgoingView();
+    clearInput(); audio.flush(); mode = next;
+    await scene?.setMode(next);
+    if (generation !== modeGeneration) return;
+    // Keep native scene layers available across camera switches, including
+    // while paused in flat mode. Only the active view performs rendering.
+    emulator?.set_depth_enabled(true);
+    appShell.dataset.view = next;
+    $("view-mode").value = next;
+    $("effects-button").setAttribute("aria-pressed", String(next !== "flat"));
+    $("orbit-button").setAttribute("aria-pressed", String(next === "orbit"));
+    $("enter-vr").hidden = false;
+    motionController.setPaused(next !== "depth" || Boolean(scene?.presenting)); updateMotionButton();
+    const url = new URL(location.href); url.searchParams.set("view", next); history.replaceState(null, "", url);
+    renderVideo(true); resize();
+    if (crossfade) fadeOutgoingView();
+    $("look-picker-hint").textContent = next === "flat" ? "Picture settings affect the 3D views. Original 2D colors stay unchanged." : "The same frozen scene, rendered with the same 3D model in every view.";
+  } catch (error) { setStatus(`3D unavailable: ${error.message}`); $("fatal").hidden = false; if (next !== "flat") void setMode("flat"); }
+}
+const motionController = new DeviceTiltController({
+  onView: view => viewer?.setTilt(view, !motionController.enabled),
+  onStatus: ({ state, message }) => {
+    tiltEnabled = ["requesting", "calibrating", "active", "paused"].includes(state); updateMotionButton();
+    $("motion-status").hidden = state === "off" || state === "active";
+    $("motion-status").textContent = message;
   },
 });
-motionController.setStrength(Number(motionStrengthInput.value));
-
-function applyPendingMotionView() {
-  if (!pendingMotionView) return false;
-  latestMotionView = pendingMotionView;
-  pendingMotionView = null;
-  const revision = getSceneViewRevision();
-  const lightingRevision = getSceneLightRevision();
-  updateDepthGeometry();
-  return revision !== getSceneViewRevision() || lightingRevision !== getSceneLightRevision();
-}
-
-function updateViewingCamera() {
-  const screenWidth = window.screen.width || window.innerWidth;
-  const screenHeight = window.screen.height || window.innerHeight;
-  const profile = resolveScreenProfile(screenProfileInput.value, {
-    screenWidth, screenHeight,
-    coarsePointer: window.matchMedia("(pointer: coarse)").matches,
-  });
-  if (!viewingDistanceAdjusted && activeScreenProfile !== profile.id) {
-    viewingDistanceInput.value = String(profile.defaultDistanceCm);
+$("motion-button").addEventListener("click", () => {
+  modeGeneration++;
+  if (motionController.enabled && mode === "depth" && !viewer?.presenting) motionController.stop();
+  else {
+    // Motion permission must be requested directly in this user gesture.
+    if (!motionController.enabled) void motionController.start();
+    void setMode("depth");
   }
-  activeScreenProfile = profile.id;
-  const gameWidthCm = estimateGameWidthCm({
-    profile, screenWidth, screenHeight,
-    stageCssWidth: Math.max(1, screenStage.getBoundingClientRect().width),
-    viewportScale: window.visualViewport?.scale || 1,
+});
+$("motion-recenter-button").remove();
+$("recenter").addEventListener("click", () => { viewer?.recenter(); motionController.recenter(); });
+$("effects-button").addEventListener("click", () => void setMode(mode === "flat" ? "depth" : "flat"));
+$("orbit-button").addEventListener("click", () => void setMode(mode === "orbit" ? "depth" : "orbit"));
+$("view-mode").addEventListener("change", event => void setMode(event.target.value));
+$("play").addEventListener("click", () => { setPaused(!paused); if (!paused) returnToGame(); });
+
+function resize() {
+  const width = Math.max(1, Math.min(gamePanel.clientWidth, gamePanel.clientHeight * WIDTH / HEIGHT));
+  screenWrap.style.width = `${width}px`;
+}
+new ResizeObserver(resize).observe(gamePanel); window.addEventListener("resize", () => { cancelViewFade(); resize(); });
+touchLayoutInput.addEventListener("change", updateTouchLayout);
+matchMedia("(any-pointer: coarse)").addEventListener("change", updateTouchLayout);
+function setMoreOpen(open) {
+  $("more-menu").hidden = !open; $("more-button").setAttribute("aria-expanded", String(open));
+  if (!open) setRewind("pointer", false);
+}
+$("more-button").addEventListener("click", () => setMoreOpen($("more-menu").hidden));
+document.addEventListener("pointerdown", event => { if (!event.target.closest("#more-menu, #more-button")) setMoreOpen(false); });
+for (const name of ["contextmenu", "selectstart", "dragstart"]) $("more-menu").addEventListener(name, event => event.preventDefault());
+function showChrome() {
+  appShell.classList.add("chrome-visible"); clearTimeout(chromeTimeout);
+  chromeTimeout = setTimeout(() => { if (!effectsSettings.open && $("more-menu").hidden && !viewer?.presenting) appShell.classList.remove("chrome-visible"); }, 2400);
+}
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else if (appShell.requestFullscreen) await appShell.requestFullscreen();
+    else appShell.classList.toggle("is-immersive");
+    updateFullscreenControls();
+    showChrome(); returnToGame();
+  } catch (error) { setStatus(`Fullscreen unavailable: ${error.message}`); }
+}
+function updateFullscreenControls() {
+  const active = Boolean(document.fullscreenElement) || appShell.classList.contains("is-immersive");
+  const label = active ? "Exit fullscreen" : "Enter fullscreen";
+  for (const id of ["fullscreen-button", "fullscreen-more-button"]) {
+    $(id).setAttribute("aria-pressed", String(active)); $(id).setAttribute("aria-label", label); $(id).title = label;
+  }
+}
+$("fullscreen-button").addEventListener("click", toggleFullscreen);
+$("fullscreen-more-button").addEventListener("click", () => { setMoreOpen(false); void toggleFullscreen(); });
+document.addEventListener("fullscreenchange", () => {
+  appShell.classList.toggle("is-immersive", Boolean(document.fullscreenElement));
+  updateFullscreenControls(); resize();
+});
+for (const name of ["pointermove", "pointerdown", "keydown"]) window.addEventListener(name, showChrome, { passive: true });
+
+const PRESETS = [
+  { id: "miniature", name: "Miniature relief", description: "70 cm · close layers, thick paper edges", values: { size: "70", gap: "4", thickness: "30" } },
+  { id: "pressed", name: "Pressed layers", description: "140 cm · sandwiched layers, no air gap", values: { size: "140", gap: "0", thickness: "30" } },
+  { id: "airy", name: "Paper theatre", description: "90 cm · a deeper backdrop, thin cards", values: { size: "90", gap: "24", thickness: "16" } },
+];
+const settingsControls = ["size", "gap", "thickness", "material-finish-input", "vr-resolution", "shadows"];
+const factoryDefaults = Object.fromEntries(settingsControls.map(id => [id, $(id).type === "checkbox" ? $(id).defaultChecked : $(id).tagName === "SELECT" ? [...$(id).options].find(o => o.defaultSelected)?.value ?? $(id).options[0].value : $(id).defaultValue]));
+const DEFAULT_KEY = "nes.scene-defaults.v1";
+let preferred = null, defaultsApplied = false;
+const valueOf = id => $(id).type === "checkbox" ? $(id).checked : $(id).value;
+function validSetting(id, value) {
+  const c = $(id);
+  if (c.type === "checkbox") return typeof value === "boolean";
+  if (typeof value !== "string" || value === "") return false;
+  if (c.tagName === "SELECT") return [...c.options].some(o => o.value === value);
+  return Number.isFinite(Number(value)) && Number(value) >= Number(c.min) && Number(value) <= Number(c.max) && (Number(value) - Number(c.min)) % Number(c.step) === 0;
+}
+try {
+  const saved = JSON.parse(localStorage.getItem(DEFAULT_KEY));
+  if (saved?.version === 1 && saved.values && settingsControls.every(id => validSetting(id, saved.values[id]))) preferred = saved.values;
+} catch (_) { /* Optional local preferences. */ }
+const presetCards = PRESETS.map(preset => {
+  const button = document.createElement("button"); button.type = "button"; button.className = "look-card";
+  const preview = document.createElement("img"); preview.alt = `${preset.name} preview`; preview.hidden = true;
+  const title = document.createElement("strong"); title.textContent = preset.name;
+  const hint = document.createElement("small"); hint.textContent = preset.description;
+  button.append(preview, title, hint); $("look-presets").append(button);
+  button.addEventListener("click", async () => {
+    try { const scene = await ensureViewer(); scene.applySettings(preset.values); updateSettings(); }
+    catch (error) { setStatus(error.message); }
   });
-  const distanceCm = Number(viewingDistanceInput.value);
-  // The fixture is in the initial phone frame, independent of eye distance.
-  setSceneLightPlacement({
-    distanceCm: Number(lightDistanceInput.value),
-    elevationDegrees: Number(lightElevationInput.value),
-    azimuthDegrees: Number(lightAzimuthInput.value),
-    gameWidthCm,
-  });
-  const view = resolveRenderedScenePose(!wantsLayeredVideo() ? { x: 0, y: 0 }
-    : motionController.enabled ? latestMotionView : computeStationaryView({ gameWidthCm }));
-  setSceneLightRotation(view.rotation ?? NEUTRAL_ROOM_ROTATION);
-  const camera = computeViewingCamera({ distanceCm, gameWidthCm, motionX: view.x, motionY: view.y });
-  setSceneCamera(camera.x, camera.y, camera.focalDepth);
-  viewingDistanceOutput.textContent = `~${distanceCm} cm`;
-  screenProfileHint.textContent = profile.shortWidthCm === null
-    ? `Desktop estimate · Visible game width ~${gameWidthCm.toFixed(1)} cm`
-    : `${profile.label} estimate · Visible game width ~${gameWidthCm.toFixed(1)} cm`;
+  return { preset, button, preview };
+});
+for (const id of settingsControls) {
+  const control = $(id), note = document.createElement("small"); note.className = "setting-default"; note.hidden = true;
+  control.closest("label").append(note); control.dataset.note = `${id}-default`; note.id = control.dataset.note;
+  control.setAttribute("aria-describedby", [control.getAttribute("aria-describedby"), note.id].filter(Boolean).join(" "));
 }
-
-function currentSceneDepth() {
-  const enabled = effectsButton.getAttribute("aria-pressed") === "true";
-  return resolveSceneDepth(enabled ? Number(depthInput.value) : 0, Number(thicknessInput.value), solidSidesInput.checked);
+function updateSettings() {
+  const defaults = preferred ?? factoryDefaults; let changed = 0;
+  for (const id of settingsControls) {
+    const modified = valueOf(id) !== defaults[id], note = $($(id).dataset.note);
+    if (modified) changed++;
+    $(id).dataset.modified = String(modified); $(id).closest("label").classList.toggle("is-modified", modified); note.hidden = !modified;
+    const text = $(id).type === "checkbox" ? defaults[id] ? "On" : "Off" : $(id).tagName === "SELECT" ? [...$(id).options].find(o => o.value === defaults[id])?.textContent : defaults[id] + (id === "thickness" ? " mm" : " cm");
+    note.textContent = `${preferred ? "Your default" : "Default"}: ${text}`;
+  }
+  $("settings-change-summary").textContent = changed ? `${changed} settings changed` : preferred ? "At your preferred default" : "All settings at default";
+  $("reset-effects-settings-button").disabled = changed === 0; $("factory-defaults-button").hidden = !preferred;
+  for (const { preset, button } of presetCards) button.setAttribute("aria-pressed", String(Object.entries(preset.values).every(([id, value]) => valueOf(id) === value)));
 }
-
-function currentRimGeometry(scene) {
-  const enabled = (rimInput.checked || recessedOpeningInput.checked) && Number(rimWidthInput.value) > 0;
-  const frontDepth = enabled ? resolveRimRecess(scene, Number(rimRecessInput.value)) : 0;
-  return {
-    enabled,
-    frontDepth,
-    material: !rimInput.checked || consoleEdgeInput.checked ? "console" : "charcoal",
-    thickness: enabled ? resolveRimThickness(scene, Number(rimThicknessInput.value), frontDepth) : 0,
-  };
-}
-
-function updateDepthGeometry() {
-  updateViewingCamera();
-  lightDistanceOutput.textContent = `${Number(lightDistanceInput.value)} cm`;
-  lightElevationOutput.textContent = `${Number(lightElevationInput.value)}°`;
-  const azimuth = Number(lightAzimuthInput.value);
-  lightAzimuthOutput.textContent = azimuth === 0 ? "Centered" : `${Math.abs(azimuth)}° ${azimuth < 0 ? "left" : "right"}`;
-  motionStrengthOutput.textContent = `${Number(motionStrengthInput.value)}%`;
-  const scene = currentSceneDepth();
-  const { separation: depth } = scene;
-  const width = screenStage.clientWidth;
-  const renderDpr = effectPixelRatio(width, window.devicePixelRatio, quality.maxWidth);
-  const pixelScale = screenStage.getBoundingClientRect().width / WIDTH;
-  depthOutput.textContent = Number(depthInput.value) === 0 ? "Off" : `${depthInput.value} game px`;
-  softnessOutput.textContent = Number(softnessInput.value) === 0 ? "Crisp" : `${softnessInput.value}%`;
-  const softness = resolveShadowSoftness(Number(softnessInput.value));
-  const rim = currentRimGeometry(scene);
-  screenWrap.dataset.rim = String(rim.enabled);
-  screenWrap.style.setProperty("--rim-width", String(Number(rimWidthInput.value) / 100));
-  rimWidthInput.disabled = !rimInput.checked && !recessedOpeningInput.checked;
-  rimThicknessInput.disabled = !rim.enabled || !solidSidesInput.checked;
-  rimRecessInput.disabled = !rim.enabled;
-  consoleEdgeInput.disabled = !rim.enabled || !rimInput.checked;
-  rimRecessOutput.textContent = Number(rimRecessInput.value) === 0 ? "Flush" : `${rimRecessInput.value}% · ${Number((rim.frontDepth * SCENE_DEPTH_TO_NATIVE_PIXELS).toFixed(2))} game px`;
-  dioramaInput.disabled = !rim.enabled;
-  rimSoftnessInput.disabled = !rim.enabled || !dioramaInput.checked;
-  rimSoftnessOutput.textContent = Number(rimSoftnessInput.value) === 0 ? "Crisp" : `${rimSoftnessInput.value}%`;
-  const rimCenter = projectDepthPoint({ x: WIDTH / 2, y: HEIGHT / 2 }, rim.frontDepth, WIDTH, HEIGHT);
-  const rimScale = cameraDepthScale(rim.frontDepth);
-  screenWrap.style.setProperty("--rim-transform", `translate(${(rimCenter.x - WIDTH / 2) * pixelScale}px, ${(rimCenter.y - HEIGHT / 2) * pixelScale}px) scale(${rimScale})`);
-  screenWrap.style.setProperty("--rim-face-color", RIM_MATERIALS[rim.material].front);
-  const faceWidth = pixelScale > 0 ? parseFloat(getComputedStyle(screenWrap).paddingLeft) * Number(rimWidthInput.value) / 100 / pixelScale : 0;
-  rimWidthOutput.textContent = Number(rimWidthInput.value) === 0 ? "None"
-    : `${rimWidthInput.value}% · ${Number(faceWidth.toFixed(2))} game px`;
-  screenWrap.style.setProperty("--opening-radius-x", `${WIDTH * RIM_CORNER_FRACTION * pixelScale}px`);
-  screenWrap.style.setProperty("--opening-radius-y", `${HEIGHT * RIM_CORNER_FRACTION * pixelScale}px`);
-  screenWrap.style.setProperty("--rim-radius-x", `${(WIDTH * RIM_CORNER_FRACTION + faceWidth) * pixelScale}px`);
-  screenWrap.style.setProperty("--rim-radius-y", `${(HEIGHT * RIM_CORNER_FRACTION + faceWidth) * pixelScale}px`);
-  rimHousing.paint(depth, rim.thickness, renderDpr, rim.frontDepth, rim.enabled ? faceWidth : 0, rim.material, getComputedStyle(document.body).backgroundColor);
-  thicknessInput.disabled = !solidSidesInput.checked;
-  spriteReliefInput.disabled = !solidSidesInput.checked;
-  spriteReliefStyle.disabled = !solidSidesInput.checked || !spriteReliefInput.checked;
-  thinOverlapsInput.disabled = !solidSidesInput.checked || !spriteReliefInput.checked;
-  const cardLimited = scene.thickness + 1e-10 < Number(thicknessInput.value) / SCENE_DEPTH_TO_NATIVE_PIXELS;
-  thicknessOutput.textContent = solidSidesInput.checked
-    ? `${thicknessInput.value} game px${cardLimited ? " (limited by gap)" : ""}`
-    : "Paper";
-  const rimLimited = rim.thickness + 1e-10 < scene.thickness * Number(rimThicknessInput.value) / 100;
-  rimThicknessOutput.textContent = `${rimThicknessInput.value}% · ${Number((rim.thickness * SCENE_DEPTH_TO_NATIVE_PIXELS).toFixed(2))} game px${rim.enabled && rimLimited ? " (limited)" : ""}`;
-  ghostCanvas.style.transform = "none";
-  depthCanvases.forEach((plane, index) => {
-    if (index !== 0 && width > 0) {
-      depthRenderers[index].resize(width, width * HEIGHT / WIDTH, renderDpr);
+async function buildPreviews(generation) {
+  try {
+    const scene = await ensureViewer();
+    // Wait for the shared shader prewarm and first scene, yielding to the UI.
+    for (let attempt = 0; attempt < 80; attempt++) {
+      if (generation !== presetGeneration || !effectsSettings.open || scene.presenting) return;
+      const images = await scene.capturePresets(PRESETS);
+      if (images.length) { if (generation === presetGeneration) images.forEach((src, i) => { presetCards[i].preview.src = src; presetCards[i].preview.hidden = false; }); return; }
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
-    plane.style.transform = "none";
-    plane.style.filter = "none";
-  });
-  cardShadowRenderer.resize(width, width * HEIGHT / WIDTH, renderDpr);
-  // The receiver is still at full separation, but the shadow's light ray
-  // and penumbra cross only the air remaining behind the solid's rear face.
-  const shadow = gameplayShadowProjection(scene, WIDTH, HEIGHT);
-  backgroundShadow.style.transformOrigin = "50% 50%";
-  // The shadow renderer already projects the entire solid into display space.
-  backgroundShadow.style.transform = "none";
-  backgroundShadow.style.filter = `brightness(0) opacity(0.32) blur(${shadow.blur * pixelScale * softness}px)`;
-  backgroundShadow.style.visibility = depth > 0 ? "visible" : "hidden";
-  // The backdrop is unbounded; the TV opening casts a translucent shadow
-  // rather than clipping shadows or artwork to a smaller receiving card.
-  backgroundShadow.style.clipPath = "none";
-  shadowsNeedPaint = true;
-  dioramaCanvas.hidden = !dioramaInput.checked || !rim.enabled;
-  document.querySelector("#screen-scene").style.transform = "none";
-  if (width > 0) dioramaFrame.resize(width, width * HEIGHT / WIDTH, renderDpr);
+  } catch (error) { reportDebug("preset-preview", error); }
 }
-
-function wantsLayeredVideo() {
-  return currentSceneDepth().separation > 0;
-}
-
-function updatePresentation() {
-  motionController.setPaused(!wantsLayeredVideo());
-  if (!wantsLayeredVideo()) {
-    pendingMotionView = null;
-    latestMotionView = { x: 0, y: 0 };
-  }
-  updateMotionControls();
-  updateDepthGeometry();
-  emulator?.set_depth_enabled(wantsLayeredVideo());
-  if (emulator) renderVideo();
-}
-
-function setEffectsSettingsOpen(open) {
+function setSettingsOpen(open) {
+  clearInput(); audio.flush();
   if (open) {
-    setMoreOpen(false);
-    effectsSettings.hidden = false;
-    effectsSettings.showModal();
-    controllerInput.clear();
-    stopRewind();
-  } else {
-    effectsSettings.close();
-    effectsSettings.hidden = true;
-  }
+    setMoreOpen(false); effectsSettings.hidden = false; effectsSettings.showModal();
+    updateSettings(); $("settings-action-status").textContent = ""; void buildPreviews(++presetGeneration);
+  } else { viewer?.cancelPreviews(); presetGeneration++; effectsSettings.close(); effectsSettings.hidden = true; resetClock(); }
   effectsSettingsButton.setAttribute("aria-expanded", String(open));
 }
+effectsSettingsButton.addEventListener("click", () => setSettingsOpen(!effectsSettings.open));
+$("close-settings-button").addEventListener("click", () => setSettingsOpen(false));
+effectsSettings.addEventListener("close", () => { viewer?.cancelPreviews(); presetGeneration++; effectsSettings.hidden = true; effectsSettingsButton.setAttribute("aria-expanded", "false"); clearInput(); returnToGame(); });
+for (const name of ["input", "change"]) effectsSettings.addEventListener(name, updateSettings);
+$("save-defaults-button").addEventListener("click", () => {
+  preferred = Object.fromEntries(settingsControls.map(id => [id, valueOf(id)])); updateSettings();
+  try { localStorage.setItem(DEFAULT_KEY, JSON.stringify({ version: 1, values: preferred })); $("settings-action-status").textContent = "Preferred default saved on this device"; }
+  catch (_) { $("settings-action-status").textContent = "Preferred default set for this visit; browser storage is unavailable"; }
+});
+$("reset-effects-settings-button").addEventListener("click", async () => { try { (await ensureViewer()).applySettings(preferred ?? factoryDefaults); updateSettings(); } catch (error) { setStatus(error.message); } });
+$("factory-defaults-button").addEventListener("click", async () => {
+  preferred = null; try { localStorage.removeItem(DEFAULT_KEY); } catch (_) { /* Storage is optional. */ }
+  try { (await ensureViewer()).applySettings(factoryDefaults); updateSettings(); } catch (error) { setStatus(error.message); }
+});
 
-function resetEffectsSettings() {
-  cardThicknessByMode.stationary = 4;
-  cardThicknessByMode.tilt = 4;
-  lightElevationByMode.stationary = 7;
-  lightElevationByMode.tilt = 3;
-  lightElevationInput.defaultValue = motionController.enabled ? "3" : "7";
-  for (const control of effectsSettings.querySelectorAll("input, select")) {
-    if (control instanceof HTMLInputElement) {
-      if (control.type === "checkbox" || control.type === "radio") control.checked = control.defaultChecked;
-      else control.value = control.defaultValue;
-    } else if (control.multiple) {
-      for (const option of control.options) option.selected = option.defaultSelected;
-    } else {
-      const defaultIndex = [...control.options].findIndex(option => option.defaultSelected);
-      control.selectedIndex = defaultIndex < 0 ? 0 : defaultIndex;
-    }
-  }
-
-  viewingDistanceAdjusted = false;
-  activeScreenProfile = null;
-  motionController.setTrackingMode(motionTrackingInput.value);
-  motionController.setStrength(Number(motionStrengthInput.value));
-  if (pendingMotionView) {
-    latestMotionView = pendingMotionView;
-    pendingMotionView = null;
-  }
-  quality.setMode(qualityInput.value);
-  updateTouchLayout();
-  updateQualityStatus();
-  updatePresentation();
+async function loadRom(file, { fromCache = false, expectedGeneration = null } = {}) {
+  if (expectedGeneration !== null && expectedGeneration !== romLoadGeneration) return false;
+  const generation = ++romLoadGeneration;
+  let candidate = null;
+  try {
+    if (file.size > MAX_ROM_BYTES) throw new Error("Choose a ROM under 64 MiB");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length > MAX_ROM_BYTES) throw new Error("Choose a ROM under 64 MiB");
+    await wasmReady;
+    if (generation !== romLoadGeneration) return false;
+    // Validate before replacing the running game, including its rewind history.
+    candidate = NesWeb.load_rom(bytes); candidate.set_depth_enabled(true);
+    if (generation !== romLoadGeneration) { candidate.free(); return false; }
+    clearInput(); audio.flush(); emulator?.free(); emulator = candidate; candidate = null; emulatorId++;
+    romName = file.name; savedSnapshot?.free?.(); savedSnapshot = null; setPaused(false);
+    appShell.classList.add("has-rom"); snapshotButton.disabled = rewindButton.disabled = $("play").disabled = false;
+    restoreButton.disabled = true; recordButton.disabled = !debugEnabled;
+    renderVideo(true); accumulator = FRAME_MS;
+    setStatus(`${file.name} loaded${fromCache ? " from this browser" : ""}`);
+    if (!fromCache) cacheWrites = cacheWrites.catch(() => {}).then(() => saveCachedRom(file.name, bytes));
+    return true;
+  } catch (error) { candidate?.free(); if (generation === romLoadGeneration) setStatus(`Could not load ROM: ${error.message}`); return false; }
 }
-
-effectsSettingsButton.addEventListener("click", () => setEffectsSettingsOpen(effectsSettings.hidden));
-resetEffectsSettingsButton.addEventListener("click", resetEffectsSettings);
-effectsButton.addEventListener("click", () => {
-  const enabled = effectsButton.getAttribute("aria-pressed") !== "true";
-  effectsButton.setAttribute("aria-pressed", String(enabled));
-
-  updatePresentation();
+async function restoreLastRom() {
+  if (romLoadGeneration) return;
+  const generation = romLoadGeneration, cached = await loadCachedRom();
+  if (generation !== romLoadGeneration || !cached.ok || !cached.bytes) return;
+  await loadRom({ name: cached.name, arrayBuffer: async () => cached.bytes.buffer }, { fromCache: true, expectedGeneration: generation });
+}
+romInput.addEventListener("change", () => { if (romInput.files?.[0]) void loadRom(romInput.files[0]); });
+romInput.addEventListener("click", () => { romInput.value = ""; });
+$("welcome-load-button").addEventListener("click", () => romInput.click());
+audioButton.addEventListener("click", async () => {
+  try { if (audio.context?.state === "running") audio.toggleMute(); else await audio.enable(); }
+  catch (error) { setStatus(`Audio unavailable: ${error.message}`); }
 });
-depthInput.addEventListener("input", updatePresentation);
-thicknessInput.addEventListener("input", updatePresentation);
-rimThicknessInput.addEventListener("input", updatePresentation);
-rimRecessInput.addEventListener("input", updatePresentation);
-rimSoftnessInput.addEventListener("input", updatePresentation);
-consoleEdgeInput.addEventListener("change", updatePresentation);
-rimWidthInput.addEventListener("input", updatePresentation);
-rimInput.addEventListener("change", updatePresentation);
-recessedOpeningInput.addEventListener("change", updatePresentation);
-softnessInput.addEventListener("input", updatePresentation);
-lightDistanceInput.addEventListener("input", updatePresentation);
-lightElevationInput.addEventListener("input", updatePresentation);
-lightAzimuthInput.addEventListener("input", updatePresentation);
-solidSidesInput.addEventListener("change", updatePresentation);
-spriteReliefInput.addEventListener("change", updatePresentation);
-spriteReliefStyle.addEventListener("change", updatePresentation);
-thinOverlapsInput.addEventListener("change", updatePresentation);
-dioramaInput.addEventListener("change", updatePresentation);
-motionButton.addEventListener("click", () => {
-  if (motionController.enabled) {
-    motionController.stop();
-    if (applyPendingMotionView() && emulator) renderVideo();
-  } else {
-    // start() invokes the iOS permission API during this user gesture.
-    void motionController.start().then(() => {
-      motionController.setPaused(!wantsLayeredVideo());
-      if (applyPendingMotionView() && emulator) renderVideo();
-    });
+snapshotButton.addEventListener("click", () => {
+  if (!emulator) return; savedSnapshot?.free?.(); savedSnapshot = emulator.save_snapshot(); restoreButton.disabled = false; setStatus("State saved");
+});
+restoreButton.addEventListener("click", () => {
+  if (!emulator || !savedSnapshot) return;
+  clearInput(); audio.flush(); emulator.restore_snapshot(savedSnapshot); updateButtons();
+  // The core refreshes its exported picture/metadata on the next frame.
+  const metadata = drawFrame(false); metadata.free?.(); renderVideo(true); setStatus("State restored");
+});
+rewindButton.addEventListener("pointerdown", event => { event.preventDefault(); rewindButton.setPointerCapture(event.pointerId); setRewind("pointer", true); });
+for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) rewindButton.addEventListener(name, event => { event.preventDefault(); setRewind("pointer", false); });
+const keyboard = new Map(Object.entries({ w: "up", a: "left", s: "down", d: "right", j: "a", k: "b", z: "a", x: "b", Shift: "select", Enter: "start", "+": "start", "=": "start", "-": "select", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }));
+window.addEventListener("keydown", event => {
+  if (event.defaultPrevented || effectsSettings.open || event.target.closest?.("input, select, textarea") || (["Enter", " "].includes(event.key) && event.target.closest?.("button, summary, a"))) return;
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "Escape") { if (!$("more-menu").hidden) { event.preventDefault(); setMoreOpen(false); } return; }
+  if (key === "r") { event.preventDefault(); returnToGame(); setRewind("keyboard", true); return; }
+  if (["m", "f", "v"].includes(key)) {
+    event.preventDefault(); if (event.repeat) return;
+    if (key === "m") audio.toggleMute();
+    if (key === "f") void toggleFullscreen();
+    if (key === "v" && emulator) { emulator.cycle_display_mode(); renderVideo(true); }
+    return;
   }
+  const name = keyboard.get(key); if (!name) return;
+  event.preventDefault(); returnToGame(); controllerInput.set(`key-${event.code || key}`, isPlaying() ? BUTTONS[name] : 0);
 });
-motionRecenterButton.addEventListener("click", () => {
-  motionController.recenter();
-  if (applyPendingMotionView() && emulator) renderVideo();
+window.addEventListener("keyup", event => {
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "r") { event.preventDefault(); setRewind("keyboard", false); }
+  if (keyboard.has(key)) { event.preventDefault(); controllerInput.set(`key-${event.code || key}`, 0); }
 });
-motionTrackingInput.addEventListener("change", () => {
-  motionController.setTrackingMode(motionTrackingInput.value);
-  applyPendingMotionView();
-  updatePresentation();
-});
-motionStrengthInput.addEventListener("input", () => {
-  motionController.setStrength(Number(motionStrengthInput.value));
-  motionStrengthOutput.textContent = `${Number(motionStrengthInput.value)}%`;
-});
-viewingDistanceInput.addEventListener("input", () => {
-  viewingDistanceAdjusted = true;
-  updatePresentation();
-});
-screenProfileInput.addEventListener("change", updatePresentation);
-for (const input of [effectsButton, effectsSettingsButton, resetEffectsSettingsButton, motionButton, motionRecenterButton, motionTrackingInput, motionStrengthInput, viewingDistanceInput, screenProfileInput, depthInput, softnessInput, lightDistanceInput, lightElevationInput, lightAzimuthInput, rimSoftnessInput, thicknessInput, rimThicknessInput, rimRecessInput, consoleEdgeInput, rimInput, recessedOpeningInput, rimWidthInput, solidSidesInput, spriteReliefInput, spriteReliefStyle, thinOverlapsInput, dioramaInput]) {
-  input.addEventListener("focus", () => {
-    controllerInput.clear();
-    stopRewind();
-    updateButtons();
-  });
-}
-let resizePending = false;
-function scheduleResize() {
-  if (resizePending) return;
-  resizePending = true;
-  requestAnimationFrame(() => {
-    resizePending = false;
-    const padding = parseFloat(getComputedStyle(screenWrap).paddingLeft) * 2;
-    const width = Math.max(1, Math.min(gamePanel.clientWidth, (gamePanel.clientHeight - padding) * WIDTH / HEIGHT + padding));
-    screenWrap.style.width = `${width}px`;
-    updateDepthGeometry();
-    if (emulator) renderVideo();
-  });
-}
-new ResizeObserver(scheduleResize).observe(gamePanel);
-window.addEventListener("resize", scheduleResize);
-window.visualViewport?.addEventListener("resize", scheduleResize);
-scheduleResize();
+window.addEventListener("blur", () => { clearInput(); audio.flush(); });
+document.addEventListener("visibilitychange", () => { clearInput(); audio.flush(); });
 
 function recordingTime() {
   return recording ? Math.max(0, Math.round(performance.now() - recording.started_perf_at)) : 0;
@@ -616,563 +564,28 @@ function stopRecording() {
   }
 }
 
-const audio = new SpatialAudio({
-  onState: updateAudioControls,
-  onError: (error) => {
-    reportDebug("audio", error);
-    setStatus(`Audio unavailable: ${error.message}`);
-  },
-});
-
-function updateAudioControls({ state, muted }) {
-  const running = state === "running";
-  const accessibleLabel = muted ? "Unmute audio" : running ? "Mute audio" : "Enable audio";
-  audioButton.dataset.muted = String(muted || !running);
-  audioButton.title = accessibleLabel;
-  audioButton.setAttribute("aria-label", accessibleLabel);
-}
-
-// Soundstage controls are shelved; use the original mono mix for playback.
-audio.setWidth(0);
-
-function setStatus(message) {
-  status.textContent = message;
-  status.classList.add("is-visible");
-  clearTimeout(statusTimeout);
-  statusTimeout = setTimeout(() => status.classList.remove("is-visible"), 3500);
-}
-
-function displayModeLabel() {
-  return DISPLAY_MODE_LABELS[emulator?.display_mode?.() ?? 2] ?? "Both";
-}
-
-function cycleDisplayMode() {
-  if (!emulator) return;
-  emulator.cycle_display_mode();
-  renderVideo();
-  setStatus(`${rewinding ? "Rewinding · " : ""}Frame ${emulator.frame_metadata().frame_number} · ${displayModeLabel()}`);
-}
-
-function updateButtons() {
-  if (emulator && !rewinding) emulator.set_controller(heldButtons);
-}
-
-const controllerInput = new ControllerInput((buttons, previous) => {
-  heldButtons = buttons;
-  for (const [name, mask] of Object.entries(BUTTONS)) {
-    if ((buttons & mask) !== (previous & mask)) recordInputEvent(buttons & mask ? "button-down" : "button-up", { button: name });
-  }
-  for (const button of document.querySelectorAll("[data-button]")) button.classList.toggle("is-held", Boolean(buttons & BUTTONS[button.dataset.button]));
-  updateButtons();
-});
-const clearTouchPointers = bindTouchControls(document.querySelector(".touch-controls"), controllerInput, BUTTONS);
-
-function updateTouchLayout() {
-  const show = touchLayoutInput.value === "show" || (touchLayoutInput.value === "auto" && window.matchMedia("(any-pointer: coarse)").matches && !gamepadConnected);
-  appShell.dataset.touch = String(show);
-  clearTouchPointers();
-  controllerInput.clear();
-  scheduleResize();
-}
-
-function updateQualityStatus() {
-  qualityStatus.textContent = `${quality.mode === "auto" ? "Auto · " : ""}${quality.level[0].toUpperCase() + quality.level.slice(1)} · Depth stays on at every quality level.`;
-}
-qualityInput.addEventListener("change", () => {
-  quality.setMode(qualityInput.value);
-  updateQualityStatus();
-  scheduleResize();
-});
-touchLayoutInput.addEventListener("change", updateTouchLayout);
-window.matchMedia("(any-pointer: coarse)").addEventListener("change", updateTouchLayout);
-document.querySelector("#welcome-load-button").addEventListener("click", () => romInput.click());
-document.querySelector("#close-settings-button").addEventListener("click", () => setEffectsSettingsOpen(false));
-effectsSettings.addEventListener("close", () => {
-  effectsSettings.hidden = true;
-  effectsSettingsButton.setAttribute("aria-expanded", "false");
-});
-
-function setMoreOpen(open) {
-  const menu = document.querySelector("#more-menu");
-  menu.hidden = !open;
-  document.querySelector("#more-button").setAttribute("aria-expanded", String(open));
-  if (open) menu.querySelector("button:not([hidden]):not(:disabled)")?.focus();
-  else if (menu.contains(document.activeElement)) document.querySelector("#more-button").focus();
-  if (!open) stopRewind();
-}
-document.querySelector("#more-button").addEventListener("click", () => setMoreOpen(document.querySelector("#more-menu").hidden));
-document.addEventListener("pointerdown", event => {
-  if (!event.target.closest("#more-menu, #more-button")) setMoreOpen(false);
-});
-document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !document.querySelector("#more-menu").hidden) {
-    event.preventDefault(); setMoreOpen(false);
-  }
-});
-
-function showChrome() {
-  appShell.classList.add("chrome-visible");
-  clearTimeout(chromeTimeout);
-  chromeTimeout = setTimeout(() => {
-    if (!effectsSettings.open && document.querySelector("#more-menu").hidden) appShell.classList.remove("chrome-visible");
-  }, 2400);
-}
-async function toggleFullscreen() {
-  try {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else if (appShell.requestFullscreen) await appShell.requestFullscreen();
-    else {
-      appShell.classList.toggle("is-immersive");
-      fullscreenButton.setAttribute("aria-pressed", String(appShell.classList.contains("is-immersive")));
-      fullscreenButton.setAttribute("aria-label", appShell.classList.contains("is-immersive") ? "Leave immersive view" : "Enter immersive view");
-    }
-    if (document.activeElement?.closest(".toolbar")) document.activeElement.blur();
-    showChrome();
-    scheduleResize();
-  } catch (error) { setStatus(`Fullscreen unavailable: ${error.message}`); }
-}
-fullscreenButton.addEventListener("click", toggleFullscreen);
-document.addEventListener("fullscreenchange", () => {
-  const active = Boolean(document.fullscreenElement);
-  appShell.classList.toggle("is-immersive", active);
-  fullscreenButton.setAttribute("aria-pressed", String(active));
-  fullscreenButton.title = active ? "Exit fullscreen" : "Enter fullscreen";
-  fullscreenButton.setAttribute("aria-label", fullscreenButton.title);
-  showChrome(); scheduleResize();
-});
-for (const name of ["pointermove", "pointerdown", "keydown"]) window.addEventListener(name, showChrome, { passive: true });
-// Protect long holds in the session controls as well as the gamepad.
-for (const name of ["contextmenu", "selectstart", "dragstart"]) {
-  document.querySelector("#more-menu").addEventListener(name, event => event.preventDefault());
-}
-updateTouchLayout();
-updateQualityStatus();
-
-function pollGamepads() {
-  const state = readGamepads(navigator.getGamepads?.() ?? [], BUTTONS);
-  if (state.connected !== gamepadConnected) {
-    gamepadConnected = state.connected;
-    updateTouchLayout();
-    if (state.connected) setStatus("Controller connected · Ready to play");
-  }
-  controllerInput.set("gamepad", effectsSettings.open || !document.hasFocus() ? 0 : state.buttons);
-}
-
-function startRewind() {
-  if (!emulator || rewinding) return;
-  rewinding = true;
-  rewindButton.classList.add("is-held");
-  rewindFrames = 0;
-  rewindStartedAt = performance.now();
-  recordInputEvent("rewind-start");
-  audio.flush();
-  accumulator = 0;
-  setStatus("Rewinding…");
-  reportDebug("rewind-start");
-}
-
-function stopRewind() {
-  if (!rewinding) return;
-  rewinding = false;
-  rewindButton.classList.remove("is-held");
-  updateButtons();
-  previousTime = performance.now();
-  accumulator = 0;
-  recordInputEvent("rewind-stop");
-  reportDebug("rewind-stop");
-}
-
-function rewindFrame(present = true) {
-  if (!emulator) return null;
-  const available = emulator.rewind();
-  const metadata = drawFrame(false, present);
-  recordFrame("rewind", metadata, { available });
-  rewindFrames += 1;
-  if (debugEnabled && (rewindFrames === 1 || rewindFrames % 30 === 0 || !available)) {
-    reportDebug("rewind-frame", {
-      available,
-      rewind_frames: rewindFrames,
-      elapsed_ms: performance.now() - rewindStartedAt,
-      frame_number: metadata ? String(metadata.frame_number) : null,
-      audio_samples: metadata?.audio_samples ?? null,
-    });
-  }
-  return metadata;
-}
-
-function drawFrame(scheduleAudio = true, present = true) {
-  if (!emulator) return null;
-  const metadata = emulator.step_frame();
-  if (present) renderVideo();
-  if (scheduleAudio) {
-    try {
-      audio.schedule(
-        emulator.audio_buffer().subarray(0, metadata.audio_samples),
-        emulator.audio_stem_buffer().subarray(0, metadata.audio_samples * 5),
-        metadata.audio_sample_rate,
-        metadata.audio_discontinuity,
-      );
-    } catch (error) {
-      reportDebug("audio-scheduling", error);
-      console.error("Audio scheduling failed", error);
-      setStatus(`Frame ${metadata.frame_number} · audio unavailable`);
-    }
-  }
-  recordFrame("frame", metadata);
-  return metadata;
-}
-
-function renderVideo() {
-  const renderStarted = performance.now();
-  const showDepth = wantsLayeredVideo() && emulator.display_mode() === 2
-    && emulator.frame_metadata().depth_available;
-  screenStage.dataset.depth = String(showDepth);
-  if (showDepth) {
-    const planes = emulator.depth_buffer();
-    const planeBytes = WIDTH * HEIGHT * 4;
-    const rearSpritePixels = planes.subarray(planeBytes, 2 * planeBytes);
-    const tilePixels = planes.subarray(2 * planeBytes, 3 * planeBytes);
-    const scene = currentSceneDepth();
-    const { separation, thickness: depth } = scene;
-    const spriteRelief = spriteReliefInput.checked && solidSidesInput.checked
-      ? { mode: spriteReliefStyle.value, softness: resolveShadowSoftness(Number(softnessInput.value)),
-        overlapFraction: thinOverlapsInput.checked ? 1 / 3 : 1 }
-      : null;
-    const rim = currentRimGeometry(scene);
-    backdropRenderer.paint(planes.subarray(0, planeBytes), separation);
-    if (dioramaInput.checked && rim.enabled) {
-      dioramaFrame.paint(backdropRenderer.outputRGBA, separation, resolveShadowSoftness(Number(rimSoftnessInput.value)), rim.thickness, rim.frontDepth);
-    }
-    for (let plane = 0; plane < 4; plane += 1) {
-      const pixels = planes.subarray(plane * planeBytes, (plane + 1) * planeBytes);
-      if (plane !== 0) {
-        // Relief follows both priority relationships: front sprites over tiles,
-        // and tiles over rear sprites. Caster artwork stays fixed and unmodified.
-        const relief = plane === 3 ? spriteRelief
-          : plane === 2 && spriteRelief ? { ...spriteRelief, receiverRGBA: rearSpritePixels } : null;
-        const painted = depthRenderers[plane].paint(pixels, depth,
-          plane === 3 ? tilePixels : null, undefined, relief);
-        shadowsNeedPaint ||= painted;
-      }
-    }
-    if (shadowsNeedPaint) {
-      const alpha = shadowCasterImage.data;
-      for (let offset = 3; offset < planeBytes; offset += 4) {
-        alpha[offset] = planes[planeBytes + offset] || planes[2 * planeBytes + offset]
-          || planes[3 * planeBytes + offset] ? 255 : 0;
-      }
-      shadowCasterContext.putImageData(shadowCasterImage, 0, 0);
-      cardShadowRenderer.paint(shadowCasterCanvas, alpha, {
-        frontDepth: 0, backDepth: depth, receiverDepth: separation,
-      });
-      backgroundShadow.style.opacity = String(cardShadowRenderer.opacity);
-      backgroundShadow.style.visibility = separation > 0 && cardShadowRenderer.opacity > 0 ? "visible" : "hidden";
-    }
-    shadowsNeedPaint = false;
-    renderDepthGhosts(rewinding ? new Uint8Array(0) : emulator.ghost_buffer());
-    const renderMs = performance.now() - renderStarted;
-    if (quality.sample(Math.max(renderMs, presentationInterval - FRAME_MS))) { updateQualityStatus(); scheduleResize(); }
-    if (debugEnabled) window.nesRenderStats = { renderMs, quality: quality.level, maxWidth: quality.maxWidth };
-    return;
-  }
-  const rgba = emulator.rgba_buffer();
-  image.data.set(rgba);
-  if (!rewinding && emulator.display_mode() !== 0) {
-    blendGhosts(image.data, emulator.ghost_buffer());
-  }
-  context.putImageData(image, 0, 0);
-}
-
-function renderDepthGhosts(records) {
-  // Keep historical ghosts as an overlay: they have no stored priority class.
-  if (!records.length && !ghostVisible) return;
-  ghostVisible = records.length > 0;
-  ghostImage.data.fill(0);
-  for (let offset = 0; offset < records.length; offset += GHOST_RECORD_BYTES) {
-    const pixel = (records[offset + 1] * WIDTH + records[offset]) * 4;
-    const sourceAlpha = records[offset + 5] / 255;
-    const oldAlpha = ghostImage.data[pixel + 3] / 255;
-    const alpha = sourceAlpha + oldAlpha * (1 - sourceAlpha);
-    if (!alpha) continue;
-    for (let component = 0; component < 3; component += 1) {
-      ghostImage.data[pixel + component] = Math.round((records[offset + 2 + component] * sourceAlpha
-        + ghostImage.data[pixel + component] * oldAlpha * (1 - sourceAlpha)) / alpha);
-    }
-    ghostImage.data[pixel + 3] = Math.round(alpha * 255);
-  }
-  ghostContext.putImageData(ghostImage, 0, 0);
-}
-
-function blendGhosts(rgba, records) {
-  if (records.length === 0) return;
-  if (records.length % GHOST_RECORD_BYTES !== 0) {
-    throw new Error("invalid ghost record length");
-  }
-
-  for (let offset = 0; offset < records.length; offset += GHOST_RECORD_BYTES) {
-    const x = records[offset];
-    const y = records[offset + 1];
-    const opacity = records[offset + 5] / 255;
-    const inverse = 1 - opacity;
-    const pixel = (y * WIDTH + x) * 4;
-    rgba[pixel] = Math.round(records[offset + 2] * opacity + rgba[pixel] * inverse);
-    rgba[pixel + 1] = Math.round(records[offset + 3] * opacity + rgba[pixel + 1] * inverse);
-    rgba[pixel + 2] = Math.round(records[offset + 4] * opacity + rgba[pixel + 2] * inverse);
-  }
-}
-
-function tick(now) {
-  try {
-    if (document.visibilityState !== "visible") {
-      previousTime = 0;
-      accumulator = 0;
-      requestAnimationFrame(tick);
-      return;
-    }
-    pollGamepads();
-    const viewChanged = applyPendingMotionView();
-    if (!previousTime) previousTime = now;
-    presentationInterval = Math.min(now - previousTime, 100);
-    accumulator += Math.min(now - previousTime, 250);
-    previousTime = now;
-    const budget = frameBudget(accumulator, FRAME_MS);
-    accumulator = budget.remainder;
-    if (emulator) {
-      for (let frame = 0; frame < budget.frames; frame += 1) {
-        if (rewinding) rewindFrame(false);
-        else drawFrame(true, false);
-      }
-      if (budget.frames > 0 || viewChanged) renderVideo();
-    }
-  } catch (error) {
-    reportDebug("emulation-frame", error);
-    console.error("Emulation frame failed", error);
-    emulator = null;
-    savedSnapshot = null;
-    rewinding = false;
-    snapshotButton.disabled = true;
-    restoreButton.disabled = true;
-    rewindButton.disabled = true;
-    setStatus(`Emulation stopped: ${error?.message ?? error}`);
-  }
-  requestAnimationFrame(tick);
-}
-
-async function loadRom(file, { fromCache = false, expectedGeneration = null } = {}) {
-  if (expectedGeneration !== null && expectedGeneration !== romLoadGeneration) return false;
-  const generation = ++romLoadGeneration;
-  let replacingEmulator = false;
-  try {
-    setStatus(`${fromCache ? "Restoring" : "Reading"} ${file.name}…`);
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    await wasmReady;
-    if (generation !== romLoadGeneration) return false;
-    audio.flush();
-    // Layered-render keeps several frame planes in the core. Release the
-    // previous Rust allocation before asking WASM to allocate the next ROM;
-    // otherwise repeated loads can exhaust the module heap before load_rom
-    // gets a chance to return.
-    const previousEmulator = emulator;
-    replacingEmulator = true;
-    emulator = null;
-    previousEmulator?.free();
-    emulator = NesWeb.load_rom(bytes);
-    emulator.set_depth_enabled(wantsLayeredVideo());
-    romName = file.name;
-    savedSnapshot = null;
-    controllerInput.clear();
-    appShell.classList.add("has-rom");
-    snapshotButton.disabled = false;
-    restoreButton.disabled = true;
-    rewindButton.disabled = false;
-    recordButton.disabled = !debugEnabled;
-    stopRecordButton.disabled = true;
-    recordingStatus.textContent = "Recording is off";
-    rewinding = false;
-    previousTime = performance.now();
-    accumulator = FRAME_MS;
-    setStatus(`${file.name} loaded${fromCache ? " from this browser" : ""} · press Enable audio to hear it`);
-    if (!fromCache) {
-      // Serialize successful loads so a slower write cannot replace a newer
-      // ROM. Invalid ROMs never replace the previous cached entry.
-      romCacheWrites = romCacheWrites.catch(() => {}).then(() => saveCachedRom(file.name, bytes)).then(result => {
-        if (result && !result.ok) reportDebug("rom-cache-write", result.reason);
-      }).catch(error => reportDebug("rom-cache-write", error));
-    }
-    return true;
-  } catch (error) {
-    if (generation !== romLoadGeneration) return false;
-    reportDebug("rom-load", error);
-    audio.flush();
-    if (replacingEmulator) {
-      appShell.classList.remove("has-rom");
-      emulator?.free();
-      emulator = null;
-      snapshotButton.disabled = true;
-      restoreButton.disabled = true;
-      rewindButton.disabled = true;
-      recordButton.disabled = true;
-      stopRecordButton.disabled = true;
-    }
-    setStatus(`Could not load ROM: ${error}`);
-    if (fromCache) {
-      romCacheWrites = romCacheWrites.catch(() => {}).then(() => clearCachedRom());
-    }
-    return false;
-  }
-}
-
-async function restoreLastRom() {
-  // A manual selection may already be waiting for WASM initialization.
-  if (romLoadGeneration !== 0) return;
-  const generation = romLoadGeneration;
-  const cached = await loadCachedRom();
-  if (generation !== romLoadGeneration) return;
-  if (!cached.ok) {
-    reportDebug("rom-cache-read", cached.reason);
-    return;
-  }
-  if (!cached.bytes) return;
-  await loadRom({ name: cached.name, arrayBuffer: async () => cached.bytes.buffer }, {
-    fromCache: true, expectedGeneration: generation,
-  });
-}
-
-romInput.addEventListener("change", () => {
-  if (romInput.files?.[0]) void loadRom(romInput.files[0]);
-});
-
-// Allow selecting the same ROM again after an invalid load or a picker
-// cancellation. Android file pickers otherwise may not emit `change`.
-romInput.addEventListener("click", () => { romInput.value = ""; });
-
-audioButton.addEventListener("click", async () => {
-  try {
-    if (audio.context?.state === "running") audio.toggleMute();
-    else await audio.enable();
-  }
-  catch (error) {
-    reportDebug("audio", error);
-    setStatus(`Audio unavailable: ${error}`);
-  }
-});
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") {
-    audio.flush();
-    previousTime = 0;
-    accumulator = 0;
-    return;
-  }
-  if (!audio.context) return;
-  // iPad may interrupt/suspend Web Audio when the tab loses focus or the
-  // device is locked. Re-resume the existing context when it returns.
-  audio.enable().catch((error) => reportDebug("audio-resume", error));
-});
-
-snapshotButton.addEventListener("click", () => {
-  if (!emulator) return;
-  savedSnapshot = emulator.save_snapshot();
-  restoreButton.disabled = false;
-  setStatus("State saved");
-});
-
-restoreButton.addEventListener("click", () => {
-  if (!emulator || !savedSnapshot) return;
-  emulator.restore_snapshot(savedSnapshot);
-  audio.flush();
-  accumulator = FRAME_MS;
-  setStatus("State restored");
-});
-
-rewindButton.addEventListener("pointerdown", (event) => {
-  event.preventDefault();
-  rewindButton.setPointerCapture(event.pointerId);
-  startRewind();
-});
-
 recordButton.addEventListener("click", startRecording);
-stopRecordButton.addEventListener("click", () => { void stopRecording(); });
-for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
-  rewindButton.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    stopRewind();
-  });
-}
-
-const keyboard = new Map([
-  ["w", "up"], ["a", "left"], ["s", "down"], ["d", "right"],
-  ["j", "a"], ["k", "b"], ["z", "a"], ["x", "b"], ["Shift", "select"], ["Enter", "start"],
-  ["ArrowUp", "up"], ["ArrowDown", "down"], ["ArrowLeft", "left"], ["ArrowRight", "right"],
-]);
-window.addEventListener("keydown", (event) => {
-  if (event.defaultPrevented || effectsSettings.open) return;
-  if (event.target instanceof Element && (
-    event.target.closest("input, select, textarea")
-    || (["Enter", " "].includes(event.key) && event.target.closest("button, summary, a"))
-  )) return;
-  reportDebug("keydown", event.key);
-  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if (key === "r") {
-    event.preventDefault();
-    startRewind();
-    return;
-  }
-  if (key === "m") {
-    event.preventDefault();
-    if (!event.repeat) audio.toggleMute();
-    return;
-  }
-  if (key === "f") {
-    event.preventDefault();
-    if (!event.repeat) void toggleFullscreen();
-    return;
-  }
-  if (key === "Escape" && !document.fullscreenElement && appShell.classList.contains("is-immersive")) {
-    event.preventDefault(); void toggleFullscreen(); return;
-  }
-  if (key === "v") {
-    event.preventDefault();
-    if (!event.repeat) cycleDisplayMode();
-    return;
-  }
-  const name = keyboard.get(key);
-  if (!name) return;
-  event.preventDefault();
-  controllerInput.set(`key-${key}`, BUTTONS[name]);
-});
-window.addEventListener("keyup", (event) => {
-  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if (key === "r") {
-    event.preventDefault();
-    stopRewind();
-    return;
-  }
-  const name = keyboard.get(key);
-  if (!name) return;
-  event.preventDefault();
-  controllerInput.set(`key-${key}`, 0);
-});
-window.addEventListener("blur", () => {
-  controllerInput.clear();
-  clearTouchPointers();
-  stopRewind();
-  updateButtons();
-});
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") {
-    controllerInput.clear(); clearTouchPointers(); stopRewind();
-    previousTime = 0; accumulator = 0;
-  }
-});
-
+stopRecordButton.addEventListener("click", stopRecording);
 const wasmReady = init("./pkg/nes_wasm_bg.wasm?v=13");
+updateTouchLayout(); updateSettings(); resize();
+if (debugEnabled) window.nesPlayerDebug = () => {
+  const metadata = emulator?.frame_metadata();
+  const frame = metadata ? String(metadata.frame_number) : null; metadata?.free?.();
+  return { mode, emulatorId, frame, paused, playing: isPlaying(), rewinding, buttons: heldButtons, gameFrames,
+    audioState: audio.context?.state ?? "uninitialized", savedState: Boolean(savedSnapshot) };
+};
 try {
-  await wasmReady;
-  requestAnimationFrame(tick);
+  await wasmReady; requestAnimationFrame(tick);
+  const initial = params.get("view") ?? "depth";
+  await setMode(initial);
   void restoreLastRom();
-} catch (error) {
-  setStatus(`Could not start the emulator: ${error.message}`);
-  reportDebug("wasm-startup", error);
-}
+  // Prepare a connected headset even when the player starts in original 2D.
+  if (mode === "flat") {
+    const unavailable = () => {
+      if (mode !== "flat" || viewer) return;
+      $("enter-vr").setAttribute("aria-label", "VR headset unavailable"); $("enter-vr").title = "VR headset unavailable";
+    };
+    if (navigator.xr) void navigator.xr.isSessionSupported("immersive-vr").then(supported => supported ? ensureViewer() : unavailable()).catch(unavailable);
+    else unavailable();
+  }
+} catch (error) { setStatus(`Could not start the player: ${error.message}`); }

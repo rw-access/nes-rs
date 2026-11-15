@@ -217,3 +217,24 @@ test("invalid canvas, dimensions, source arrays, and scene depths are rejected",
   assert.throws(() => renderer.paint(new Uint8Array(4 * 3 * 4), 6.1), RangeError);
   assert.throws(() => projectBackdropReceiverPoint(Infinity, 0, 1), TypeError);
 });
+
+test("changing shading strength refreshes cached lighting while retaining source colors and alpha", async () => {
+  const { getSceneShadingStrength, setSceneShadingStrength } = await import("./scene-lighting.js");
+  const original = getSceneShadingStrength();
+  try {
+    resetScene();
+    const source = solidRGBA(16, 12, [124, 148, 252, 175]);
+    const renderer = new CanvasBackdropRenderer(new MockCanvas(), 16, 12);
+    setSceneShadingStrength(1);
+    renderer.paint(source, 4);
+    const strong = renderer.outputRGBA.slice();
+    setSceneShadingStrength(0.45);
+    assert.equal(renderer.paint(source, 4), true, "strength invalidates the light cache");
+    assert.ok(renderer.outputRGBA[0] > strong[0], "gentler shading lifts backdrop brightness");
+    assert.equal(renderer.outputRGBA[3], 175);
+    assert.equal(renderer.paint(source, 4), false);
+    setSceneShadingStrength(0);
+    renderer.paint(source, 4);
+    assert.deepEqual(renderer.outputRGBA, new Uint8ClampedArray(source), "zero strength retains original backdrop colors exactly");
+  } finally { setSceneShadingStrength(original); resetScene(); }
+});

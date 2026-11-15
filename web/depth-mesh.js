@@ -1,4 +1,5 @@
-import { getSceneLightRevision, shadowLightProjection, surfaceShade } from "./scene-lighting.js";
+import { CanvasMaterialLayer } from "./material-layer.js";
+import { getSceneLightRevision, shadowLightProjection, surfaceShade, sceneShadowOpacity } from "./scene-lighting.js";
 import { getSceneCameraDepth, getSceneVanishingPoint, getSceneViewOffset, getSceneViewRevision } from "./scene-view.js";
 
 export const MAX_DEPTH = 6;
@@ -245,6 +246,7 @@ export class CanvasDepthRenderer {
     this.sourceContext = this.sourceCanvas.getContext("2d", { alpha: true });
     if (!this.sourceContext) throw new Error("Canvas 2D context is unavailable");
     this.sourceImage = this.sourceContext.createImageData(width, height);
+    this.materialLayer = new CanvasMaterialLayer(this.sourceCanvas, width, height);
     this.occluderCanvas = null;
     this.occluderContext = null;
     this.occluderImage = null;
@@ -315,8 +317,9 @@ export class CanvasDepthRenderer {
     if (changedPixels) {
       this.sourceImage.data.set(sourceRGBA);
       this.hasPixels = true;
-      this.sourceContext.putImageData(this.sourceImage, 0, 0);
+
     }
+    this.materialLayer.paint(this.sourceImage.data, changedPixels);
     if (changedPixels || changedView) this.faces = collectSideFaces(sourceRGBA, this.width, this.height);
     if (changedOccluder) this.updateOccluder(occluderRGBA);
     if (changedReceiver) this.updateReceiver(relief.receiverRGBA);
@@ -498,7 +501,7 @@ function paintReliefShadow(context, sourceCanvas, depth, width, height,
   const blur = light.travel * softness * cameraScale * Math.max(scaleX, scaleY);
   context.save();
   context.setTransform(1, 0, 0, 1, 0, 0);
-  context.globalAlpha = RELIEF_SHADOW_OPACITY * (light.opacity ?? 1);
+  context.globalAlpha = sceneShadowOpacity(RELIEF_SHADOW_OPACITY) * (light.opacity ?? 1);
   context.imageSmoothingEnabled = false;
   context.filter = blur > 0 ? `blur(${blur}px)` : "none";
   context.translate(outputWidth / 2 + light.x * cameraScale * scaleX,

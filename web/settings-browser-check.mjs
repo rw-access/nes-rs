@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import { launch, base, range } from "./player-test-tools.mjs";
+const browser = await launch();
+try {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const errors = []; page.on("pageerror", e => errors.push(e.message));
+  await page.goto(base + "?debug=1&view=depth");
+  await page.waitForFunction(() => document.querySelector("#stage").dataset.ready === "true");
+  await page.locator("#effects-settings-button").click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".look-card img")].every(img => img.naturalWidth > 100));
+  assert.equal(await page.locator("#show-fps-input").isChecked(), false);
+  await page.locator("#show-fps-input").check();
+  assert.equal(await page.locator("#fps").isVisible(), true, "requested FPS also works for the sample scene");
+  const cards = await page.locator(".look-card").evaluateAll(nodes => nodes.map(el => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width }; }));
+  assert.ok(cards[0].width > 300 && cards[1].y > cards[0].y && cards[1].x === cards[0].x);
+  // Canceling an in-progress preview cannot change the live camera mode.
+  await range(page, "thickness", 27);
+  await page.locator("#close-settings-button").click();
+  await page.waitForTimeout(100);
+  assert.equal((await page.evaluate(() => window.nesVRDebug())).mode, "depth");
+  await page.locator("#effects-settings-button").click();
+  await page.locator(".look-card").nth(1).click();
+  assert.equal(await page.locator("#size").inputValue(), "140");
+  assert.equal(await page.locator("#gap").inputValue(), "0");
+  assert.equal(await page.locator("#thickness").inputValue(), "30");
+  await page.locator("#save-defaults-button").click();
+  await range(page, "gap", 15);
+  assert.equal(await page.locator("#gap").getAttribute("data-modified"), "true");
+  assert.match(await page.locator("#gap-default").textContent(), /Your default: 0 cm/);
+  await page.locator("#reset-effects-settings-button").click();
+  assert.equal(await page.locator("#gap").inputValue(), "0");
+  await page.reload(); await page.waitForFunction(() => window.nesVRDebug?.().sides > 0);
+  assert.equal(await page.locator("#gap").inputValue(), "0");
+  assert.equal(await page.locator("#size").inputValue(), "140");
+  assert.equal(await page.locator("#show-fps-input").isChecked(), true, "FPS choice survives reload independently of scene defaults");
+  await page.locator("#effects-settings-button").click();
+  await page.locator("#factory-defaults-button").click();
+  assert.equal(await page.locator("#size").inputValue(), "70");
+  assert.equal(await page.locator("#show-fps-input").isChecked(), true);
+  await page.locator("#show-fps-input").uncheck();
+  assert.equal(await page.locator("#fps").evaluate(el => el.hidden), true);
+  await page.screenshot({ path: "/tmp/nes-shared-check/mobile-settings.png" });
+  assert.deepEqual(errors, []);
+  console.log("Same-model presets: mobile single column, cancellation camera, preferred defaults, modified indicators, reset, reload and factory restore passed");
+} finally { await browser.close(); }

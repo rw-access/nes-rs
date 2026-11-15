@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import { launch, base, range } from "./player-test-tools.mjs";
+const browser = await launch();
+try {
+  const page = await browser.newPage(), posts = [], errors = [];
+  page.on("request", r => { if (r.method() === "POST") posts.push(r.url()); }); page.on("pageerror", e => errors.push(e.message));
+  await page.goto(base + "vr.html?debug=1&look=miniature");
+  await page.waitForFunction(() => window.nesVRDebug?.().triangles > 100);
+  assert.equal(new URL(page.url()).pathname.endsWith("vr.html"), false, "legacy links route to the same player");
+  const initial = await page.evaluate(() => window.nesVRDebug());
+  await page.locator("#effects-settings-button").click();
+  await range(page, "size", 500); await range(page, "gap", 0); await range(page, "thickness", 30);
+  await page.locator("#close-settings-button").click();
+  await page.waitForFunction(() => !window.nesVRDebug().meshBusy);
+  const large = await page.evaluate(() => window.nesVRDebug());
+  assert.ok(large.receiverZ < large.rearCapZ); assert.ok(large.shadowBounds[2] > 15);
+  assert.equal(large.stageSizeCm, 500); assert.ok(large.geometries <= initial.geometries + 3);
+  await page.waitForTimeout(200); const idle = (await page.evaluate(() => window.nesVRDebug())).framesRendered;
+  await page.waitForTimeout(200); assert.equal((await page.evaluate(() => window.nesVRDebug())).framesRendered, idle, "static stage stops rendering");
+  await page.locator("#effects-settings-button").click(); await range(page, "thickness", 0);
+  await page.locator("#close-settings-button").click();
+  await page.waitForFunction(() => document.querySelector("#stage").dataset.vertices === "0");
+  assert.deepEqual(posts, []); assert.deepEqual(errors, []);
+  await page.close();
+  const diagnostic = await browser.newPage(), reports = [];
+  await diagnostic.route("**/__graphics-log", route => { reports.push(JSON.parse(route.request().postData())); return route.fulfill({ status: 204 }); });
+  await diagnostic.goto(base + "?view=depth&diagnostics=1");
+  await diagnostic.waitForFunction(() => document.querySelector("#stage").dataset.ready === "true");
+  assert.ok(reports.length > 1);
+  assert.ok(reports.every(r => Object.keys(r).every(key => ["kind", "details"].includes(key)) && !/rom_name|input_events|controller|imageData/.test(JSON.stringify(r))));
+  console.log("Unified GPU scene: legacy routing, room-scale bounds, zero gap, resource disposal, idle rendering, zero thickness and bounded opt-in diagnostics passed");
+} finally { await browser.close(); }

@@ -157,14 +157,42 @@ Open <http://localhost:8000/> in a browser. Use the frontend's ROM file picker
 to load an iNES `.nes` ROM; the browser reads the selected file and passes its
 bytes to the emulator. ROM files are not bundled into the WASM package.
 
-#### GitHub Pages
+One player owns the running game, audio and controller state across all views.
+The stacked-layers button switches between original 2D and a fixed-camera 3D
+view; the cube button enables orbiting the same diorama. The headset button
+opens that same scene in WebXR when a compatible headset runtime is available.
+Old `vr.html` links route into the player without a separate emulator.
 
-The repository includes `.github/workflows/pages.yml`, which builds and
-deploys the browser frontend automatically whenever `main` changes. To enable
-it, open the repository's **Settings → Pages** page and set **Source** to
-**GitHub Actions**. After the first successful run, the site will be available
-at `https://<owner>.github.io/nes-rs/` (or the custom domain configured in
-GitHub Pages).
+Layered, orbiting and VR views share the actual cutout-prism geometry,
+materials, lighting and shadows. These are extruded native emulator planes,
+not reconstructed game objects. Layered view fits the game head-on at its
+original aspect ratio and extends the same lit backdrop sideways; portrait
+keeps clear space above and below the game. Layered, Tilt, Orbit and VR sit
+together in the toolbar. Desktop modes ease the camera or crossfade from the
+current view, respecting reduced-motion preferences; Tilt is selectable from
+any view. Headset entry reveals the scene while preserving immediate head
+tracking. Orbit and VR retain the tabletop presentation. Drag with one finger to orbit, and pinch
+with two fingers or scroll to zoom. Original 2D presents the unmodified RGBA
+picture. Settings previews render the current frozen scene through the same
+GPU renderer; shared presets, material finish and geometry settings apply to
+all depth views. The optional FPS counter in Settings distinguishes render
+submissions, emulated frames and applied scene snapshots. It starts hidden;
+your display choice is remembered on this device and applies to VR too.
+Resuming play or using game controls returns keyboard focus to the game;
+toolbar hover styling is limited to devices with a hovering pointer.
+
+Hold L1 (left grip in VR) or R to rewind. Minus is Select and plus is Start.
+The VR stage stays anchored while you look around; right stick up/down resizes
+it, and clicking both sticks recenters it. Graphics diagnostics require an
+explicit `?diagnostics=1`; ordinary play and developer replay downloads send
+no capture data. VR requires HTTPS or a trusted localhost origin.
+
+#### Other static hosting
+
+The browser frontend can be served by a static host after building `web/pkg/`.
+Keep the vendored Three.js files and module worker alongside the app, and serve
+JavaScript and WebAssembly with their appropriate content types. Headset use
+requires HTTPS or a trusted localhost origin.
 
 #### Cloudflare Workers Builds
 

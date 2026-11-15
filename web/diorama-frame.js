@@ -1,7 +1,7 @@
 import { calculateRimProjection } from "./rim-projection.js";
 import { RIM_CORNER_FRACTION, traceRoundedRectangle } from "./rim-outline.js";
 import { MAX_DEPTH } from "./depth-mesh.js";
-import { getSceneLightRevision } from "./scene-lighting.js";
+import { getSceneLightRevision, sceneShadowOpacity } from "./scene-lighting.js";
 import { getSceneViewRevision } from "./scene-view.js";
 
 const MAX_DPR = 2;
@@ -96,7 +96,7 @@ export class DioramaFrame {
     if (depth > 0) {
       // Shadow alpha was blurred in a padded cache, then limited to the visible viewport.
       context.imageSmoothingEnabled = false;
-      context.globalAlpha = FAR_SHADOW_OPACITY * (this.shadowLayers.far?.opacity ?? 1);
+      context.globalAlpha = sceneShadowOpacity(FAR_SHADOW_OPACITY) * (this.shadowLayers.far?.opacity ?? 1);
       context.drawImage(this.shadowCanvas, 0, 0, this.canvas.width, this.canvas.height, 0, 0, this.width, this.height);
       context.globalAlpha = 1;
     }
@@ -126,7 +126,7 @@ export class DioramaFrame {
     if (gap > 0) {
       context.save();
       context.globalCompositeOperation = "source-over";
-      context.globalAlpha = NEAR_SHADOW_OPACITY * (layer.opacity ?? 1);
+      context.globalAlpha = sceneShadowOpacity(NEAR_SHADOW_OPACITY) * (layer.opacity ?? 1);
       context.imageSmoothingEnabled = false;
       context.drawImage(layer.shadowCanvas, 0, 0, this.canvas.width, this.canvas.height,
         0, 0, targetCanvas.width, targetCanvas.height);

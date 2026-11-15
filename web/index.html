@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111217">
     <title>nes-rs — cardboard viewbox</title>
-    <link rel="stylesheet" href="style.css?v=91">
+    <link rel="icon" href="console.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=103">
   </head>
   <body>
     <main class="app-shell">
@@ -18,8 +19,13 @@
         </label>
         <div class="toolbar-actions" aria-label="Playback and display">
           <button id="audio-button" type="button" aria-label="Enable audio" title="Enable audio" data-muted="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m11 5-6 4H2v6h3l6 4z"/><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg></button>
-          <button id="effects-button" type="button" aria-label="Toggle 3D depth" title="Toggle 3D depth" aria-pressed="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 10 5-10 5L2 8z"/><path d="m2 12 10 5 10-5M2 16l10 5 10-5"/></svg></button>
+          <div class="view-controls" role="group" aria-label="3D views">
+          <button id="effects-button" type="button" aria-label="Toggle layered view" title="Toggle layered view" aria-pressed="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 10 5-10 5L2 8z"/><path d="m2 12 10 5 10-5M2 16l10 5 10-5"/></svg></button>
+
           <button id="motion-button" type="button" aria-label="Enable phone tilt" title="Enable phone tilt" aria-pressed="false" aria-describedby="motion-status"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="3" width="10" height="18" rx="2" transform="rotate(15 12 12)"/><path d="m2 9 2-3 1 4m17 5-2 3-1-4"/></svg></button>
+          <button id="orbit-button" type="button" aria-label="Orbit diorama" title="Orbit diorama" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5M12 12v10"/></svg></button>
+          <button id="enter-vr" type="button" disabled aria-label="Preparing VR" title="Preparing VR"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-5l-2-3h-2l-2 3H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/><circle cx="7.5" cy="11.5" r="2.5"/><circle cx="16.5" cy="11.5" r="2.5"/></svg></button>
+          </div>
           <button id="fullscreen-button" type="button" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
           <button id="effects-settings-button" type="button" aria-label="Open settings" title="Open settings" aria-expanded="false" aria-controls="effects-settings"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
           <button id="more-button" type="button" aria-label="More controls" title="More controls" aria-controls="more-menu" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
@@ -28,6 +34,10 @@
       <div id="more-menu" class="more-menu" hidden aria-label="More controls">
         <span class="menu-heading">Play session</span>
         <div class="session-actions">
+          <button id="fullscreen-more-button" type="button" aria-label="Enter fullscreen" title="Enter fullscreen" aria-pressed="false"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
+          <button id="play" type="button" disabled aria-label="Pause game" title="Pause game" aria-pressed="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg></button>
+          <button id="recenter" type="button" aria-label="Recenter stage" title="Recenter stage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="6"/><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/></svg></button>
+
           <button id="motion-recenter-button" type="button" aria-label="Recenter view" title="Recenter view" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6"/><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/></svg></button>
           <button id="snapshot-button" type="button" aria-label="Save state" title="Save state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h12l4 4v14H3V3z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/></svg></button>
           <button id="restore-button" type="button" aria-label="Restore state" title="Restore state" disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/></svg></button>
@@ -36,7 +46,9 @@
           <button id="stop-record-button" type="button" aria-label="Save replay capture locally" title="Save replay capture locally" hidden disabled><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none"/></svg></button>
         </div>
         <p id="recording-status" role="status" hidden>Developer replay capture is off</p>
-        <p class="menu-hint">WASD / arrows · J K or Z X<br>Shift + Enter · R rewind · M mute · F fullscreen<br>Connect a controller to play on your TV.</p>
+        <p class="menu-hint">WASD / arrows · J K or Z X<br>− Select / + Start · L1 / R rewind · M mute · F fullscreen<br>Connect a controller to play on your TV.</p>
+        <p id="diorama-status" class="menu-hint" role="status">One game · three views</p>
+
       </div>
 
       <p id="motion-status" class="motion-status" role="status" aria-live="polite" hidden></p>
@@ -49,17 +61,14 @@
           <button id="welcome-load-button" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10l-2 11H3z"/><path d="M3 7V4h6l2 3h9v2"/></svg><span>Open a game</span></button>
           <small>Choose a .nes ROM · Stays on your device</small>
         </div>
+        <p id="fps" hidden class="menu-hint" title="Render submissions; one stereo pair counts as one frame. Game is emulated frames; Scene is geometry updates.">Render — fps · Game — fps · Scene — fps</p>
+        <canvas id="stage" aria-label="Interactive 3D diorama" tabindex="0"></canvas>
+        <p id="fatal" role="alert" hidden></p>
         <div class="screen-wrap" data-rim="true">
           <div id="screen-stage" data-depth="false">
             <div id="screen-scene">
-              <canvas id="screen" width="256" height="240" aria-label="Game screen"></canvas>
-              <div id="depth-stack" aria-hidden="true">
-                <canvas width="256" height="240"></canvas>
-                <canvas width="256" height="240"></canvas>
-                <canvas width="256" height="240"></canvas>
-                <canvas width="256" height="240"></canvas>
-              </div>
-              <canvas id="depth-ghosts" width="256" height="240" aria-hidden="true"></canvas>
+              <canvas id="screen" tabindex="0" width="256" height="240" aria-label="Game screen"></canvas>
+
             </div>
           </div>
         </div>
@@ -87,133 +96,38 @@
       <dialog id="effects-settings" class="presentation-panel" aria-label="Settings" hidden>
         <header class="settings-header"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Picture &amp; play</h2></div><button id="close-settings-button" type="button" aria-label="Close settings" title="Close settings" ><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M6 18 18 6"/></svg></button></header>
         <div class="play-settings">
-          <label for="render-quality-input">Rendering<select id="render-quality-input"><option value="auto" selected>Auto · adapts to your device</option><option value="high">High · finest edges</option><option value="balanced">Balanced</option><option value="performance">Performance</option></select></label>
+          <label for="view-mode">View<select id="view-mode"><option value="flat">Original 2D</option><option value="depth" selected>Layered · fixed camera</option><option value="orbit">Diorama · orbit camera</option></select></label>
           <label for="touch-layout-input">Touch controls<select id="touch-layout-input"><option value="auto" selected>Auto</option><option value="show">Show</option><option value="hide">Hide</option></select></label>
-          <p id="render-quality-status" role="status">Depth stays on at every quality level.</p>
+          <label class="play-toggle" for="show-fps-input"><input id="show-fps-input" type="checkbox">Show FPS counter</label>
         </div>
+        <section class="look-picker" aria-labelledby="look-picker-title">
+          <div class="look-heading"><h3 id="look-picker-title">Choose a starting point</h3><span id="settings-change-summary" role="status" aria-live="polite"></span></div>
+          <p id="look-picker-hint">The same frozen scene, rendered with the same 3D model in every view.</p>
+          <div id="look-presets" class="look-grid"></div>
+        </section>
         <div class="presentation-controls">
-          <fieldset class="settings-group scene-group">
-            <legend>Scene geometry</legend>
-            <div class="group-controls">
-              <label for="depth-input">
-                <span>Background separation <output id="depth-value" for="depth-input">85 game px</output></span>
-                <input id="depth-input" type="range" min="0" max="115" step="1" value="85" aria-describedby="depth-hint">
-                <small id="depth-hint">Native NES pixels (256 × 240) · Zero restores a flat scene</small>
-              </label>
-              <label for="thickness-input">
-                <span>Card thickness <output id="thickness-value" for="thickness-input">4 game px</output></span>
-                <input id="thickness-input" type="range" min="0" max="8" step="1" value="4" aria-describedby="thickness-hint">
-                <small id="thickness-hint">Native NES pixels · Independent of backdrop distance</small>
-              </label>
-              <label for="rim-width-input">
-                <span>Rim width <output id="rim-width-value" for="rim-width-input">1%</output></span>
-                <input id="rim-width-input" type="range" min="0" max="100" step="1" value="1" aria-describedby="rim-width-hint">
-                <small id="rim-width-hint">Fraction of maximum frame width · Actual size shown in game pixels</small>
-              </label>
-              <label for="rim-thickness-input">
-                <span>Rim thickness <output id="rim-thickness-value" for="rim-thickness-input">25% of foreground</output></span>
-                <input id="rim-thickness-input" type="range" min="0" max="100" step="1" value="25" aria-describedby="rim-thickness-hint">
-                <small id="rim-thickness-hint">Percentage of foreground thickness · Limited by available gap</small>
-              </label>
-              <label for="rim-recess-input">
-                <span>Rim recess <output id="rim-recess-value" for="rim-recess-input">1% of gap</output></span>
-                <input id="rim-recess-input" type="range" min="0" max="100" step="1" value="1" aria-describedby="rim-recess-hint">
-                <small id="rim-recess-hint">Percentage of card gap · Zero is flush · Gameplay stays fixed</small>
-              </label>
-              <div class="surface-options">
-                <label for="solid-sides-input"><input id="solid-sides-input" type="checkbox" checked>Solid sides</label>
-                <label for="sprite-relief-input"><input id="sprite-relief-input" type="checkbox" checked aria-describedby="sprite-relief-hint">Layer relief</label>
-                <label class="sprite-relief-style" for="sprite-relief-style">
-                  <span>Relief style</span>
-                  <select id="sprite-relief-style" aria-describedby="sprite-relief-hint">
-                    <option value="shadows">Shadows only</option>
-                    <option value="contact" selected>Thickness + shadows</option>
-                    <option value="cutout">Forced cutouts + shadows</option>
-                  </select>
-                  <small id="sprite-relief-hint">Sprites and tiles · Faces stay aligned · Uses card thickness and shadow softness</small>
-                </label>
-                <label for="thin-overlaps-input"><input id="thin-overlaps-input" type="checkbox" checked aria-describedby="thin-overlaps-hint">Thin overlaps (⅓ thickness)</label>
-                <small id="thin-overlaps-hint">Full thickness against the backdrop · Thin edges over other artwork</small>
-                <label for="rim-input"><input id="rim-input" type="checkbox" checked>Rim</label>
-                <label for="recessed-opening-input"><input id="recessed-opening-input" type="checkbox" aria-describedby="recessed-opening-hint">Recessed opening</label>
-                <small id="recessed-opening-hint">Keep the inset opening when Rim is off</small>
-                <label for="console-edge-input"><input id="console-edge-input" type="checkbox">Shell-colored edge</label>
-              </div>
-            </div>
-          </fieldset>
-          <fieldset class="settings-group viewing-group">
-            <legend>Viewing setup</legend>
-            <div class="group-controls">
-              <label class="viewing-profile" for="motion-tracking-input">
-                <span>View tracking</span>
-                <select id="motion-tracking-input" aria-describedby="motion-tracking-hint">
-                  <option value="look" selected>Look around — sideways peeking</option>
-                  <option value="gravity">Ground stable — ignores room turns</option>
-                </select>
-                <small id="motion-tracking-hint">Look around follows gyro rotation · Recenter after turning your body · Changing modes recenters</small>
-              </label>
-              <label for="motion-strength-input">
-                <span>Motion strength <output id="motion-strength-value" for="motion-strength-input">100%</output></span>
-                <input id="motion-strength-input" type="range" min="0" max="100" step="1" value="100" disabled aria-describedby="motion-strength-hint">
-                <small id="motion-strength-hint">50% follows measured tilt · 100% doubles the viewing response</small>
-              </label>
-              <label for="viewing-distance-input">
-                <span>Viewing distance <output id="viewing-distance-value" for="viewing-distance-input">~35 cm</output></span>
-                <input id="viewing-distance-input" type="range" min="20" max="100" step="1" value="35" aria-describedby="viewing-distance-hint">
-                <small id="viewing-distance-hint">Estimated eyes-to-screen distance · Changes perspective and tilt together</small>
-              </label>
-              <label class="viewing-profile" for="screen-profile-input">
-                <span>Screen size</span>
-                <select id="screen-profile-input" aria-describedby="screen-profile-hint">
-                  <option value="auto">Auto estimate</option>
-                  <option value="phone">Phone</option>
-                  <option value="large-phone">Large phone</option>
-                  <option value="tablet-11">11-inch tablet</option>
-                  <option value="tablet-13">13-inch tablet</option>
-                </select>
-                <small id="screen-profile-hint">Approximate physical size · Choose manually if Auto feels wrong</small>
-              </label>
-            </div>
-          </fieldset>
-          <fieldset class="settings-group lighting-group">
-            <legend>Lighting</legend>
-            <div class="group-controls">
-              <label for="light-distance-input">
-                <span>Light distance <output id="light-distance-value" for="light-distance-input">25 cm</output></span>
-                <input id="light-distance-input" type="range" min="5" max="300" step="1" value="25" aria-describedby="light-distance-hint">
-                <small id="light-distance-hint">Fixed out from the initial phone position · Recenter places it again</small>
-              </label>
-              <label for="light-elevation-input">
-                <span>Light elevation <output id="light-elevation-value" for="light-elevation-input">7°</output></span>
-                <input id="light-elevation-input" type="range" min="0" max="80" step="1" value="7" aria-describedby="light-elevation-hint">
-                <small id="light-elevation-hint">Angle above the initial screen normal · Defaults: 3° Tilt, 7° stationary</small>
-              </label>
-              <label for="light-azimuth-input">
-                <span>Light horizontal angle <output id="light-azimuth-value" for="light-azimuth-input">Centered</output></span>
-                <input id="light-azimuth-input" type="range" min="-60" max="60" step="1" value="0" aria-describedby="light-azimuth-hint">
-                <small id="light-azimuth-hint">Lamp left or right of the initial screen normal · Stays fixed as the phone turns</small>
-              </label>
-              <label for="softness-input">
-                <span>Shadow softness <output id="softness-value" for="softness-input">18%</output></span>
-                <input id="softness-input" type="range" min="0" max="100" step="1" value="18" aria-describedby="softness-hint">
-                <small id="softness-hint">Crisp edges to diffuse shadows</small>
-              </label>
-              <label for="rim-softness-input">
-                <span>Rim shadow softness <output id="rim-softness-value" for="rim-softness-input">100%</output></span>
-                <input id="rim-softness-input" type="range" min="0" max="100" step="1" value="100" aria-describedby="rim-softness-hint">
-                <small id="rim-softness-hint">Rim shadow only · Independent of gameplay shadows</small>
-              </label>
-              <label class="lighting-toggle" for="diorama-input"><input id="diorama-input" type="checkbox" checked>Rim shadow</label>
-            </div>
-          </fieldset>
+          <fieldset class="settings-group"><legend>World &amp; material</legend><div class="group-controls">
+            <label><span>Stage size <output id="size-value">70 cm</output></span><input id="size" type="range" min="50" max="500" value="70" step="5"><small>In VR, right stick up/down resizes the anchored world</small></label>
+            <label><span>Backdrop depth <output id="gap-value">4 cm</output></span><input id="gap" type="range" min="0" max="40" value="4" step="1"></label>
+            <label><span>Card thickness <output id="thickness-value">30 mm</output></span><input id="thickness" type="range" min="0" max="30" value="30" step="1"></label>
+            <label for="material-finish-input">Material finish<select id="material-finish-input"><option value="matte" selected>Matte · dry paper</option><option value="eggshell">Eggshell · soft sheen</option><option value="satin">Satin · smooth reflection</option></select></label>
+            <label for="vr-resolution">VR resolution<select id="vr-resolution"><option value="0.65" selected>Balanced</option><option value="0.5">Performance</option><option value="1">High</option></select></label>
+            <label class="lighting-toggle"><input id="shadows" type="checkbox" checked>Cast shadows</label>
+          </div></fieldset>
         </div>
-        <footer class="settings-footer" aria-label="2.5D settings actions">
-          <button id="reset-effects-settings-button" type="button" aria-label="Reset 2.5D settings to defaults" title="Restore every 2.5D setting to its default">Reset defaults</button>
+        <p id="diagnostics-note" class="menu-hint" hidden></p>
+        <details class="menu-hint"><summary>Headset &amp; controls</summary><p>Drag to orbit · Pinch or scroll to zoom. Tilt is beside Layered, Orbit and VR in the toolbar. All views share the same game and saved state.</p><p>VR: lean to look around; the stage stays anchored. Left stick moves. Right trigger / lower face button is A; right grip / upper face button is B. Left lower / upper face buttons are Select / Start. Hold left grip (L1) to rewind. Click both sticks to recenter. Right stick up/down changes world size.</p><p>PSVR2 uses a Windows PC, PC adapter and SteamVR. Connect the headset before opening VR. ROMs and replay captures stay on this device.</p></details>
+        <footer class="settings-footer" aria-label="Settings actions">
+          <button id="save-defaults-button" type="button">Make this my default</button>
+          <button id="factory-defaults-button" type="button" hidden>Factory defaults</button>
+          <button id="reset-effects-settings-button" type="button">Reset</button>
+          <p id="settings-action-status" role="status" aria-live="polite"></p>
         </footer>
       </dialog>
 
-      <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · Shift + Enter · R rewind · M mute · V layers</footer>
+      <footer class="play-hint"><span>Controls</span> WASD / arrows · J K or Z X · − Select / + Start · L1 / R rewind · M mute · V layers</footer>
     </main>
-    <script type="module" src="app.js?v=95"></script>
+    <script src="vr-diagnostics.js?v=4"></script>
+    <script type="module" src="app.js?v=103"></script>
   </body>
 </html>

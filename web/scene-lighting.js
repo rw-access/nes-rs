@@ -1,3 +1,4 @@
+import { getMaterialRevision } from "./material-finish.js";
 import { SCENE_DEPTH_TO_NATIVE_PIXELS } from "./viewing-model.js";
 
 // A light above the scene, centered horizontally on the viewer's side.
@@ -15,13 +16,32 @@ let sceneLightPlacementPosition = null;
 const IDENTITY_ROTATION = Object.freeze([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 let sceneLightRotation = IDENTITY_ROTATION;
 let sceneLightRevision = 0;
+// Library callers retain the original lighting model; the frontend selects its
+// gentler 35% default. One shared value keeps every receiving surface coherent.
+let sceneShadingStrength = 1;
+
+export function getSceneShadingStrength() { return sceneShadingStrength; }
+
+export function setSceneShadingStrength(strength) {
+  if (!Number.isFinite(strength) || strength < 0 || strength > 1) {
+    throw new RangeError("Shading strength must be from 0 to 1");
+  }
+  if (strength === sceneShadingStrength) return false;
+  sceneShadingStrength = strength;
+  sceneLightRevision += 1;
+  return true;
+}
+
+export function sceneShadowOpacity(opacity) { return opacity * sceneShadingStrength; }
+
+function softenShade(shade) { return 1 - sceneShadingStrength + sceneShadingStrength * shade; }
 
 export function getSceneLightDistance() {
   return sceneLightDistance;
 }
 
 export function getSceneLightRevision() {
-  return sceneLightRevision;
+  return sceneLightRevision + getMaterialRevision();
 }
 
 /** Return the immutable phone-plane light placement, or null for the legacy fixture. */
@@ -255,7 +275,7 @@ export function backdropIrradianceFromLight(point, light, width = 256, height = 
   if (length === 0) return 1;
   const cosine = Math.max(0, Math.min(1, -dz / length));
   const attenuation = inverseSquareAttenuation(sceneLightReferenceRadius(), length);
-  return 0.35 + 0.65 * cosine * attenuation;
+  return softenShade(0.35 + 0.65 * cosine * attenuation);
 }
 
 /** Build a low-allocation irradiance sampler for many x/y points on one receiver plane. */
@@ -285,7 +305,7 @@ export function createBackdropIrradianceSampler(light, depth, width = 256, heigh
     if (length === 0) return 1;
     const cosine = Math.max(0, Math.min(1, -dz / length));
     const attenuation = inverseSquareAttenuation(referenceRadius, length);
-    return 0.35 + 0.65 * cosine * attenuation;
+    return softenShade(0.35 + 0.65 * cosine * attenuation);
   };
 }
 
@@ -361,10 +381,10 @@ export function surfaceShade(orientation, inward = false, point = null, width = 
   const dy = (light.y - position.y) * 240 / height;
   const dz = (light.z - depth) * SCENE_DEPTH_TO_NATIVE_PIXELS;
   const length = Math.hypot(dx, dy, dz);
-  if (!(length > 0) || !Number.isFinite(length)) return AMBIENT;
+  if (!(length > 0) || !Number.isFinite(length)) return softenShade(AMBIENT);
 
   const direction = inward ? -1 : 1;
   const diffuse = Math.max(0, direction * (normal.x * dx + normal.y * dy) / length);
   const attenuation = inverseSquareAttenuation(sceneLightReferenceRadius(), length);
-  return AMBIENT + DIFFUSE * diffuse * attenuation;
+  return softenShade(AMBIENT + DIFFUSE * diffuse * attenuation);
 }

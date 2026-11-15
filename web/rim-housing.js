@@ -1,6 +1,6 @@
 import { projectRimBackPoint } from "./rim-projection.js";
 import { cameraDepthScale, projectDepthPoint } from "./depth-mesh.js";
-import { getSceneLightRevision, surfaceShade } from "./scene-lighting.js";
+import { getSceneLightRevision, surfaceShade, getSceneShadingStrength } from "./scene-lighting.js";
 import { getSceneViewRevision } from "./scene-view.js";
 import { RIM_CORNER_FRACTION, traceRoundedRectangle } from "./rim-outline.js";
 
@@ -59,10 +59,12 @@ function wallMaterial(context, front, back, orientation, material, shade) {
   const gradient = context.createLinearGradient(front.x, front.y, end.x, end.y);
   // The small chamfer faces partly toward the light/viewer. Keep its highlight
   // narrow; most of the side remains a flat, directionally lit charcoal face.
-  gradient.addColorStop(0, edgeColor(material, 0.4 + shade * 0.65));
+  const strength = getSceneShadingStrength();
+  const bevelShade = shade * (1 - strength) + (0.4 + shade * 0.65) * strength;
+  gradient.addColorStop(0, edgeColor(material, bevelShade));
   gradient.addColorStop(bevel, edgeColor(material, shade));
   gradient.addColorStop(1 - rear, edgeColor(material, shade));
-  gradient.addColorStop(1, edgeColor(material, shade * 0.82));
+  gradient.addColorStop(1, edgeColor(material, shade * (1 - 0.18 * strength)));
   return gradient;
 }
 

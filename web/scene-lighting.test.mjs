@@ -675,3 +675,36 @@ test("backdrop irradiance validates coordinates, depth, dimensions, and coincide
     setSceneLightRotation(originalRotation);
   }
 });
+
+test("shading strength softens contrast and all shadow opacity without moving the lamp or geometry", async () => {
+  const { getSceneShadingStrength, setSceneShadingStrength, sceneShadowOpacity } = await import("./scene-lighting.js");
+  const original = getSceneShadingStrength();
+  const point = { x: 38, y: 190, z: 3 };
+  try {
+    setSceneShadingStrength(1);
+    const side = surfaceShade("left", false, point);
+    const backdrop = backdropIrradiance(point);
+    const lamp = getSceneLightPosition();
+    const projection = shadowLightProjection(0, 4);
+    const revision = getSceneLightRevision();
+    assert.equal(setSceneShadingStrength(0.45), true);
+    assert.equal(getSceneLightRevision(), revision + 1);
+    assert.equal(setSceneShadingStrength(0.45), false);
+    assert.equal(getSceneLightRevision(), revision + 1);
+    assert.ok(Math.abs(surfaceShade("left", false, point) - (0.55 + 0.45 * side)) < 1e-12);
+    assert.ok(Math.abs(backdropIrradiance(point) - (0.55 + 0.45 * backdrop)) < 1e-12);
+    const sample = createBackdropIrradianceSampler(lamp, point.z);
+    assert.ok(Math.abs(sample(point.x, point.y) - backdropIrradiance(point)) < 1e-12);
+    for (const opacity of [0.32, 0.22, 0.18, 0.12]) assert.equal(sceneShadowOpacity(opacity), opacity * 0.45);
+    assert.deepEqual(getSceneLightPosition(), lamp);
+    assert.deepEqual(shadowLightProjection(0, 4), projection);
+    setSceneShadingStrength(0);
+    assert.equal(backdropIrradiance(point), 1);
+    for (const orientation of orientations) assert.equal(surfaceShade(orientation, false, point), 1);
+    assert.equal(sceneShadowOpacity(0.32), 0);
+    setSceneShadingStrength(1);
+    assert.equal(surfaceShade("left", false, point), side);
+    assert.equal(backdropIrradiance(point), backdrop);
+    for (const invalid of [-0.01, 1.01, NaN, Infinity]) assert.throws(() => setSceneShadingStrength(invalid), RangeError);
+  } finally { setSceneShadingStrength(original); }
+});
