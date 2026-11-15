@@ -20,7 +20,9 @@ try {
     assert.deepEqual(await pixels(), before, "flat pixels cannot be modified by 3D settings");
     if (debug) {
       await page.locator("#more-button").click(); await page.locator("#record-button").click();
-      await page.locator("#play").click(); await page.waitForTimeout(150); await page.locator("#play").click();
+      await page.locator("#play").click(); await page.waitForTimeout(150);
+      assert.equal(await page.locator("#more-menu").isVisible(), false, "resuming play closes More");
+      await page.locator("#more-button").click(); await page.locator("#play").click();
       const download = page.waitForEvent("download"); await page.locator("#stop-record-button").click(); await download;
       assert.ok(await page.evaluate(() => window.lastRecordingPayload.frames.length > 0));
     } else assert.equal(await page.locator("#record-button").isVisible(), false);
