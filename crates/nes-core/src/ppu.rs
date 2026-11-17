@@ -532,7 +532,7 @@ impl PPU {
                 if !self.rendering_enabled() {
                     self.cycle_in_scanline >= 2
                 } else {
-                    matches!(self.cycle_in_scanline, 258..=277 | 305..=325 | 337)
+                    matches!(self.cycle_in_scanline, 258..=277 | 305..=317 | 337)
                 }
             }
             _ => false,
@@ -1620,18 +1620,32 @@ impl PPU {
 
             let tile_address_lo = pattern_table_address | (tile_index as u16) << 4 | tile_y as u16;
             let tile_address_hi = tile_address_lo | (1 << 3);
+            // Sprite fetch slots include dummy nametable addresses with
+            // PPU A8/A9 clear; boards such as Oeka Kids observe the address
+            // edge even though no tile value is consumed here.
+            mapper.notify_ppu_address(0x2000);
+            mapper.notify_ppu_address(tile_address_lo);
             let pattern_low = mapper
-                .read_chr_page((tile_address_lo >> 8) as u8)
-                .map_or_else(
-                    || mapper.read_sprite_chr(tile_address_lo),
-                    |page| page[(tile_address_lo & 0xff) as usize],
-                );
+                .read_ppu_override(tile_address_lo, &self.nametables)
+                .unwrap_or_else(|| {
+                    mapper
+                        .read_chr_page((tile_address_lo >> 8) as u8)
+                        .map_or_else(
+                            || mapper.read_sprite_chr(tile_address_lo),
+                            |page| page[(tile_address_lo & 0xff) as usize],
+                        )
+                });
+            mapper.notify_ppu_address(tile_address_hi);
             let pattern_high = mapper
-                .read_chr_page((tile_address_hi >> 8) as u8)
-                .map_or_else(
-                    || mapper.read_sprite_chr(tile_address_hi),
-                    |page| page[(tile_address_hi & 0xff) as usize],
-                );
+                .read_ppu_override(tile_address_hi, &self.nametables)
+                .unwrap_or_else(|| {
+                    mapper
+                        .read_chr_page((tile_address_hi >> 8) as u8)
+                        .map_or_else(
+                            || mapper.read_sprite_chr(tile_address_hi),
+                            |page| page[(tile_address_hi & 0xff) as usize],
+                        )
+                });
 
             processed_sprite.tile = TileData {
                 nametable_index: 0,
@@ -1751,7 +1765,7 @@ impl PPU {
         let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
         let fine_y = self.v >> 12 & 0x7;
         let pattern_low_address = pattern_table | nametable_index | fine_y;
-        self.pending_tile.pattern_low = Self::read_chr_byte(mapper, pattern_low_address);
+        self.pending_tile.pattern_low = self.read_chr_byte(mapper, pattern_low_address);
     }
 
     #[inline]
@@ -1765,7 +1779,7 @@ impl PPU {
         let nametable_index = (self.pending_tile.nametable_index as u16) << 4;
         let fine_y = self.v >> 12 & 0x7;
         let pattern_high_address = pattern_table | nametable_index | (1 << 3) | fine_y;
-        self.pending_tile.pattern_high = Self::read_chr_byte(mapper, pattern_high_address);
+        self.pending_tile.pattern_high = self.read_chr_byte(mapper, pattern_high_address);
     }
 
     #[inline]
@@ -1899,7 +1913,11 @@ impl PPU {
     }
 
     #[inline]
-    fn read_chr_byte<M: Mapper + ?Sized>(mapper: &M, addr: u16) -> u8 {
+    fn read_chr_byte<M: Mapper + ?Sized>(&self, mapper: &M, addr: u16) -> u8 {
+        mapper.notify_ppu_address(addr);
+        if let Some(value) = mapper.read_ppu_override(addr, &self.nametables) {
+            return value;
+        }
         match mapper.read_chr_page((addr >> 8) as u8) {
             Some(page) => page[(addr & 0xff) as usize],
             None => mapper.read_background_chr(addr),
@@ -1907,6 +1925,11 @@ impl PPU {
     }
 
     pub(crate) fn read_byte<M: Mapper + ?Sized>(&self, mapper: &M, addr: u16) -> u8 {
+        let addr = addr & 0x3fff;
+        mapper.notify_ppu_address(addr);
+        if let Some(value) = mapper.read_ppu_override(addr, &self.nametables) {
+            return value;
+        }
         match addr {
             0x0000..=0x1fff => mapper
                 .read_chr_page((addr >> 8) as u8)
@@ -1936,6 +1959,11 @@ impl PPU {
     }
 
     pub(crate) fn write_byte<M: Mapper + ?Sized>(&mut self, mapper: &mut M, addr: u16, data: u8) {
+        let addr = addr & 0x3fff;
+        mapper.notify_ppu_address(addr);
+        if mapper.write_ppu_override(addr, data, &mut self.nametables) {
+            return;
+        }
         match addr {
             0x0000..=0x1fff => {
                 mapper.write(addr, data);
@@ -1992,6 +2020,11 @@ impl PPU {
                     _ => {}
                 };
 
+                mapper.notify_ppu_address(
+                    self.v
+                        .wrapping_add(if self.control_reg & 4 != 0 { 32 } else { 1 })
+                        & 0x3fff,
+                );
                 contents
             }
             _ => 0,
@@ -2080,6 +2113,7 @@ impl PPU {
                     // v: <...all bits...> <- t: <...all bits...>
                     self.t = (self.t & 0xff00) | (data as u16);
                     self.v = self.t;
+                    mapper.notify_ppu_address(self.v & 0x3fff);
                     self.w = false;
                 }
             }
@@ -2093,6 +2127,7 @@ impl PPU {
                         1
                     }
                 });
+                mapper.notify_ppu_address(self.v & 0x3fff);
             }
             _ => unreachable!(),
         };
@@ -3230,6 +3265,7 @@ mod nmi_gate_tests {
     fn mapper() -> Box<dyn Mapper> {
         crate::cartridge::new(
             Cartridge {
+                submapper: None,
                 prg: Rc::new(PRG {
                     banks: vec![[0; 0x4000]],
                 }),
@@ -3319,5 +3355,46 @@ mod nmi_gate_tests {
         ppu.write_register(mapper.as_mut(), 0x2000, 0);
         ppu.write_register(mapper.as_mut(), 0x2000, 0x80);
         assert!(ppu.read_nmi_line());
+    }
+}
+
+#[cfg(test)]
+mod prerender_prefetch_tests {
+    use super::{Screen, PPU};
+    use crate::cartridge::{self, Cartridge, MirroringMode, CHR, PRG};
+    use std::rc::Rc;
+
+    #[test]
+    fn cpu_cycle_batching_preserves_first_prerender_tile_fetches() {
+        let mut chr = vec![[0; 0x2000]];
+        chr[0][5 * 16..5 * 16 + 8].fill(0xff);
+        let cart = Cartridge {
+            submapper: None,
+            prg: Rc::new(PRG {
+                banks: vec![[0; 0x4000]; 2],
+            }),
+            chr: CHR::ROM(Rc::new(chr)),
+            sram: Vec::new(),
+            mirror: MirroringMode::Vertical,
+        };
+        let mut mapper = cartridge::new(cart, 0).unwrap();
+        let mut exact = PPU::default();
+        exact.scanline = 261;
+        exact.cycle_in_scanline = 305;
+        exact.mask_reg = 0x0a;
+        exact.nametables.fill(5);
+        let mut batched = exact.clone();
+        let mut exact_screen = Screen::default();
+        let mut batched_screen = Screen::default();
+        for _ in 0..12 {
+            for _ in 0..3 {
+                exact.step_with_mode::<true, false, _>(mapper.as_mut(), &mut exact_screen);
+            }
+            batched.step_cpu_cycle(mapper.as_mut(), &mut batched_screen);
+        }
+        assert_eq!(exact.processed_tile[0].nametable_index, 5);
+        assert_eq!(exact.processed_tile[0].pattern_low, 0xff);
+        assert_eq!(batched.processed_tile, exact.processed_tile);
+        assert_eq!(batched.pending_tile, exact.pending_tile);
     }
 }

@@ -29,6 +29,9 @@ struct INESHeader {
     tv_system_prg_ram_presence: u8, // 10
     // ignored // 11-15
     mapper: u8, // mapper_hi << 4 | mapper_lo
+    submapper: Option<u8>,
+    prg_ram_bytes: usize,
+    chr_ram_bytes: usize,
 }
 
 impl INESHeader {
@@ -55,6 +58,17 @@ impl INESHeader {
         ines_header.nes2 = buffer[7] & 0b1100 == 0b1000;
         ines_header.mapper = (buffer[6] >> 4) | (buffer[7] & 0xf0);
         ines_header.ram_size = buffer[8];
+        if ines_header.nes2 {
+            // The public mapper API is still 8-bit. Reject wider IDs rather
+            // than silently selecting a different supported mapper.
+            if buffer[8] & 0x0f != 0 || buffer[9] != 0 {
+                return None;
+            }
+            ines_header.submapper = Some(buffer[8] >> 4);
+            let ram_size = |shift: u8| if shift == 0 { 0 } else { 64usize << shift };
+            ines_header.prg_ram_bytes = ram_size(buffer[10] & 0x0f) + ram_size(buffer[10] >> 4);
+            ines_header.chr_ram_bytes = ram_size(buffer[11] & 0x0f) + ram_size(buffer[11] >> 4);
+        }
         ines_header.pal = buffer[9] & 0b1 != 0;
         ines_header.tv_system_prg_ram_presence = buffer[10];
 
@@ -69,8 +83,8 @@ impl INESHeader {
         // 4. CHR ROM data, if present (8192 * y bytes)
         // 5. PlayChoice INST-ROM, if present (0 or 8192 bytes)
         // 6. PlayChoice PROM, if present (16 bytes Data, 16 bytes CounterOut) (this is often missing, see PC10 ROM-Images for details)
+        let mut trainer = [0u8; 512];
         if self.has_trainer {
-            let mut trainer = [0u8; 512];
             reader.read_exact(&mut trainer).ok()?;
         }
 
@@ -86,7 +100,19 @@ impl INESHeader {
 
         // load CHR ROM / CHR RAM
         let chr = if self.chr_banks == 0 {
-            CHR::RAM(vec![[0u8; 8192]])
+            let bytes = if self.nes2 {
+                self.chr_ram_bytes
+            } else if self.mapper == 96 {
+                32768
+            } else {
+                8192
+            };
+            // CHR-less boards and sub-8K RAM need a different storage model.
+            // Do not invent an undeclared 8K RAM bank for NES 2.0.
+            if bytes == 0 {
+                return None;
+            }
+            CHR::RAM(vec![[0u8; 8192]; bytes.div_ceil(8192)])
         } else {
             let mut chr_banks: Vec<ChrBank> = vec![[0u8; 0x2000]; self.chr_banks as usize];
 
@@ -99,12 +125,21 @@ impl INESHeader {
 
         // iNES byte 8 is the number of 8 KiB PRG-RAM banks. A zero value
         // historically means one bank for boards that expose PRG-RAM.
-        let sram_banks = usize::from(self.ram_size.max(1));
+        let sram_banks = if self.nes2 {
+            self.prg_ram_bytes.div_ceil(8192)
+        } else {
+            usize::from(self.ram_size.max(1))
+        };
+        let mut sram = vec![[0u8; 0x2000]; sram_banks.max(usize::from(self.has_trainer))];
+        if self.has_trainer {
+            sram[0][0x1000..0x1200].copy_from_slice(&trainer);
+        }
 
         Some(Cartridge {
+            submapper: self.submapper,
             prg: Rc::new(PRG { banks: prg_banks }),
             chr,
-            sram: vec![[0u8; 0x2000]; sram_banks],
+            sram,
             mirror: match (self.four_screen_mirror, self.mirror) {
                 (true, _) => cartridge::MirroringMode::FourScreen,
                 (false, false) => cartridge::MirroringMode::Horizontal,
@@ -138,7 +173,8 @@ fn load_ines(bytes: &[u8]) -> Option<(cartridge::Cartridge, u8)> {
     // A few ROMs in the collection set the trainer bit but omit the trainer
     // bytes. Accept that common bad-dump variant when the untrained payload
     // exactly matches the file size.
-    if header.has_trainer
+    if !header.nes2
+        && header.has_trainer
         && declared_payload_len >= 512
         && payload_len + 512 == declared_payload_len
     {
@@ -148,9 +184,10 @@ fn load_ines(bytes: &[u8]) -> Option<(cartridge::Cartridge, u8)> {
     // Some old dumps have a zeroed size field, or use mapper 20 as an iNES
     // wrapper around a 64 KiB FDS side. Infer the available 16 KiB PRG size
     // when there is no ambiguity in the payload.
-    let payload_without_trainer = payload_len - usize::from(header.has_trainer) * 512;
-    if (header.prg_banks == 0 && header.chr_banks == 0)
-        || (header.mapper == 20 && declared_payload_len > payload_len)
+    let payload_without_trainer = payload_len.checked_sub(usize::from(header.has_trainer) * 512)?;
+    if !header.nes2
+        && ((header.prg_banks == 0 && header.chr_banks == 0)
+            || (header.mapper == 20 && declared_payload_len > payload_len))
     {
         if payload_without_trainer % 0x4000 == 0 {
             header.prg_banks = (payload_without_trainer / 0x4000) as u8;
@@ -224,6 +261,7 @@ fn load_unif(bytes: &[u8]) -> Option<(cartridge::Cartridge, u8)> {
 
     Some((
         Cartridge {
+            submapper: None,
             prg: Rc::new(crate::cartridge::PRG { banks: prg_banks }),
             chr,
             sram: vec![[0; 0x2000]],

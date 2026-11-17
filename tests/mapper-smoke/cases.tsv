@@ -23,6 +23,6 @@
 64	Klax.nes	600	601	900	Use a real banked image; reject NROM fallback dumps
 66	Dragon Power.nes	450	451	720	
 69	Batman - Return of the Joker.nes	1800	1801	3000	Allow startup/fade before title capture
-96		450	451	720	No matching ROM in the collection; implementation aliases CNROM
+96		450	451	720	No matching ROM in the collection; Oeka Kids has original synthetic bank/latch tests
 99	VS Super Mario Bros. (VS).nes	600	601	900	Arcade coin/DIP controls are not supplied; Start may not enter gameplay
 224		450	451	720	No matching ROM in the collection; implementation aliases MMC3

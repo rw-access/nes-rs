@@ -207,6 +207,22 @@ impl TimestampedLocalCpu {
         }
     }
 
+    fn write_rmw(
+        ram: &mut [u8; 0x800],
+        bus: &mut MemoryBus,
+        addr: u16,
+        original: u8,
+        modified: u8,
+    ) {
+        if addr >= 0x4020 {
+            bus.mapper.write_rmw(addr, original, modified);
+            bus.ppu.refresh_nametable_mirroring(&bus.mapper);
+        } else {
+            Self::write_byte(ram, bus, addr, original);
+            Self::write_byte(ram, bus, addr, modified);
+        }
+    }
+
     #[inline(always)]
     fn push_byte(&mut self, ram: &mut [u8; 0x800], bus: &mut MemoryBus, data: u8) {
         Self::write_byte(ram, bus, 0x0100 | self.sp as u16, data);
@@ -261,8 +277,9 @@ impl TimestampedLocalCpu {
                 self.set_cnz(wide);
             }
             (Opcode::ASL, Some(addr)) => {
-                let wide = (Self::read_byte(ram, bus, addr) as u16) << 1;
-                Self::write_byte(ram, bus, addr, wide as u8);
+                let original = Self::read_byte(ram, bus, addr);
+                let wide = (original as u16) << 1;
+                Self::write_rmw(ram, bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::BCC, Some(addr)) => self.branch_on_flag(StatusFlags::C, false, addr),
@@ -299,8 +316,9 @@ impl TimestampedLocalCpu {
                 self.write_status_bit(StatusFlags::C, self.y >= value);
             }
             (Opcode::DEC, Some(addr)) => {
-                let value = Self::read_byte(ram, bus, addr).wrapping_sub(1);
-                Self::write_byte(ram, bus, addr, value);
+                let original = Self::read_byte(ram, bus, addr);
+                let value = original.wrapping_sub(1);
+                Self::write_rmw(ram, bus, addr, original, value);
                 self.set_nz(value);
             }
             (Opcode::DEX, None) => {
@@ -316,8 +334,9 @@ impl TimestampedLocalCpu {
                 self.set_nz(self.a);
             }
             (Opcode::INC, Some(addr)) => {
-                let value = Self::read_byte(ram, bus, addr).wrapping_add(1);
-                Self::write_byte(ram, bus, addr, value);
+                let original = Self::read_byte(ram, bus, addr);
+                let value = original.wrapping_add(1);
+                Self::write_rmw(ram, bus, addr, original, value);
                 self.set_nz(value);
             }
             (Opcode::INX, None) => {
@@ -352,9 +371,10 @@ impl TimestampedLocalCpu {
                 self.set_cnz(wide);
             }
             (Opcode::LSR, Some(addr)) => {
-                let mut wide = Self::read_byte(ram, bus, addr) as u16;
+                let original = Self::read_byte(ram, bus, addr);
+                let mut wide = original as u16;
                 wide = wide >> 1 | ((wide & 1) << 8);
-                Self::write_byte(ram, bus, addr, wide as u8);
+                Self::write_rmw(ram, bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::NOP, _) => {}
@@ -381,9 +401,9 @@ impl TimestampedLocalCpu {
                 self.set_cnz(wide);
             }
             (Opcode::ROL, Some(addr)) => {
-                let wide = (Self::read_byte(ram, bus, addr) as u16) << 1
-                    | self.check_status_bit(StatusFlags::C) as u16;
-                Self::write_byte(ram, bus, addr, wide as u8);
+                let original = Self::read_byte(ram, bus, addr);
+                let wide = (original as u16) << 1 | self.check_status_bit(StatusFlags::C) as u16;
+                Self::write_rmw(ram, bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::ROR, None) => {
@@ -395,11 +415,12 @@ impl TimestampedLocalCpu {
                 self.set_cnz(wide);
             }
             (Opcode::ROR, Some(addr)) => {
-                let mut wide = Self::read_byte(ram, bus, addr) as u16;
+                let original = Self::read_byte(ram, bus, addr);
+                let mut wide = original as u16;
                 wide |= (self.check_status_bit(StatusFlags::C) as u16) << 8;
                 wide |= (wide & 1) << 9;
                 wide >>= 1;
-                Self::write_byte(ram, bus, addr, wide as u8);
+                Self::write_rmw(ram, bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::SBC, Some(addr)) => {
@@ -1354,9 +1375,10 @@ impl CPU {
                 self.set_cnz(wide);
             }
             (Opcode::ASL, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#ASL
-                let wide = (self.read_byte(bus, addr) as u16) << 1;
-                self.write_byte(bus, addr, wide as u8);
+                let wide = (original as u16) << 1;
+                self.write_rmw(bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::AXS, Some(addr)) => {
@@ -1461,9 +1483,10 @@ impl CPU {
                 self.dispatch(bus, Opcode::CMP, Some(addr));
             }
             (Opcode::DEC, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#DEC
-                let m = self.read_byte(bus, addr).wrapping_sub(1);
-                self.write_byte(bus, addr, m);
+                let m = original.wrapping_sub(1);
+                self.write_rmw(bus, addr, original, m);
                 self.set_nz(m);
             }
             (Opcode::DEX, None) => {
@@ -1482,9 +1505,10 @@ impl CPU {
                 self.set_nz(self.a);
             }
             (Opcode::INC, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#INC
-                let data = self.read_byte(bus, addr).wrapping_add(1);
-                self.write_byte(bus, addr, data);
+                let data = original.wrapping_add(1);
+                self.write_rmw(bus, addr, original, data);
                 self.set_nz(data);
             }
             (Opcode::INX, None) => {
@@ -1546,10 +1570,11 @@ impl CPU {
                 self.set_cnz(wide);
             }
             (Opcode::LSR, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#LSR
-                let mut wide = self.read_byte(bus, addr) as u16;
+                let mut wide = original as u16;
                 wide = wide >> 1 | ((wide & 0b1) << 8);
-                self.write_byte(bus, addr, wide as u8);
+                self.write_rmw(bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::NOP, _) => {
@@ -1594,19 +1619,21 @@ impl CPU {
                 self.set_cnz(wide);
             }
             (Opcode::ROL, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#ROL
-                let mut wide = self.read_byte(bus, addr) as u16;
+                let mut wide = original as u16;
                 wide = (wide << 1) | (self.check_status_bit(StatusFlags::C) as u16);
-                self.write_byte(bus, addr, wide as u8);
+                self.write_rmw(bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::ROR, Some(addr)) => {
+                let original = self.read_byte(bus, addr);
                 // https://www.nesdev.org/obelisk-6502-guide/reference.html#ROR
-                let mut wide = self.read_byte(bus, addr) as u16;
+                let mut wide = original as u16;
                 wide |= (self.check_status_bit(StatusFlags::C) as u16) << 8;
                 wide |= (wide & 0b1) << 9;
                 wide >>= 1;
-                self.write_byte(bus, addr, wide as u8);
+                self.write_rmw(bus, addr, original, wide as u8);
                 self.set_cnz(wide);
             }
             (Opcode::ROR, None) => {
@@ -1821,6 +1848,16 @@ impl CPU {
                 bus.ppu.refresh_nametable_mirroring(&bus.mapper);
             }
         };
+    }
+
+    fn write_rmw(&mut self, bus: &mut MemoryBus, addr: u16, original: u8, modified: u8) {
+        if addr >= 0x4020 {
+            bus.mapper.write_rmw(addr, original, modified);
+            bus.ppu.refresh_nametable_mirroring(&bus.mapper);
+        } else {
+            self.write_byte(bus, addr, original);
+            self.write_byte(bus, addr, modified);
+        }
     }
 
     fn push_byte(&mut self, bus: &mut MemoryBus, data: u8) {
@@ -2318,6 +2355,7 @@ mod tests {
         let mut prg = vec![[0; 0x4000]];
         prg[0][..program.len()].copy_from_slice(program);
         crate::bus::MemoryBus::new(MapperInstance::new_nrom(Cartridge {
+            submapper: None,
             prg: Rc::new(PRG { banks: prg }),
             chr: CHR::ROM(Rc::new(vec![[0; 0x2000]])),
             sram: vec![[0; 0x2000]],

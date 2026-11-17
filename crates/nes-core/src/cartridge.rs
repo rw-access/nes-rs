@@ -44,6 +44,8 @@ pub struct PRG {
 
 #[derive(Clone)]
 pub struct Cartridge {
+    /// NES 2.0 board variant; None denotes an ambiguous legacy iNES header.
+    pub submapper: Option<u8>,
     pub prg: Rc<PRG>,           // 0x4000 aligned
     pub chr: CHR,               // 0x2000 aligned
     pub sram: Vec<SaveRamBank>, // 0x2000 aligned
@@ -55,6 +57,26 @@ pub trait Mapper: DynClone {
     fn read(&self, address: u16) -> u8;
     fn write(&mut self, address: u16, data: u8);
     fn read_page(&self, page: u8) -> Option<&[u8; 256]>;
+
+    /// The adjacent write cycles of a 6502 read-modify-write instruction.
+    /// MMC1 accepts the first write and ignores the second serial bit (but
+    /// never ignores a reset). The CPU currently executes instructions atomically.
+    fn write_rmw(&mut self, address: u16, original: u8, modified: u8) {
+        self.write(address, original);
+        self.write(address, modified);
+    }
+
+    /// Optional board-specific PPU memory routing. CIRAM remains owned by the
+    /// PPU, so clones/snapshots retain a single authoritative copy.
+    fn read_ppu_override(&self, _address: u16, _ciram: &[u8; 4096]) -> Option<u8> {
+        None
+    }
+    fn write_ppu_override(&mut self, _address: u16, _data: u8, _ciram: &mut [u8; 4096]) -> bool {
+        false
+    }
+    /// Address-only transitions also occur through PPUADDR/PPUDATA, without
+    /// a memory strobe. Used by discrete CHR latches such as Oeka Kids.
+    fn notify_ppu_address(&self, _address: u16) {}
 
     /// Return a context-independent CHR page when the mapper can expose one.
     /// The PPU otherwise uses the background/sprite fetch callbacks for banked
@@ -279,11 +301,37 @@ impl Mapper for MapperInstance {
         }
     }
 
+    fn write_rmw(&mut self, address: u16, original: u8, modified: u8) {
+        match self {
+            Self::Nrom(mapper) => mapper.write_rmw(address, original, modified),
+            Self::Dynamic(mapper) => mapper.write_rmw(address, original, modified),
+        }
+    }
+
     #[inline]
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
         match self {
             Self::Nrom(mapper) => mapper.read_page(page),
             Self::Dynamic(mapper) => mapper.read_page(page),
+        }
+    }
+
+    fn read_ppu_override(&self, address: u16, ciram: &[u8; 4096]) -> Option<u8> {
+        match self {
+            Self::Nrom(mapper) => mapper.read_ppu_override(address, ciram),
+            Self::Dynamic(mapper) => mapper.read_ppu_override(address, ciram),
+        }
+    }
+    fn write_ppu_override(&mut self, address: u16, data: u8, ciram: &mut [u8; 4096]) -> bool {
+        match self {
+            Self::Nrom(mapper) => mapper.write_ppu_override(address, data, ciram),
+            Self::Dynamic(mapper) => mapper.write_ppu_override(address, data, ciram),
+        }
+    }
+    fn notify_ppu_address(&self, address: u16) {
+        match self {
+            Self::Nrom(mapper) => mapper.notify_ppu_address(address),
+            Self::Dynamic(mapper) => mapper.notify_ppu_address(address),
         }
     }
 
@@ -477,29 +525,23 @@ impl Mapper for Mapper15 {
                 let mode = (address & 3) as usize;
                 let bank = (data & 0x3f) as usize * 2;
                 let swap = usize::from(data & 0x80 != 0);
-                match mode {
+                self.banks = match mode {
+                    // NROM-256: CPU A14 replaces the register's low 16K bit.
                     0 => {
-                        self.banks = [
-                            bank + swap,
-                            bank + (swap ^ 1),
-                            bank + 2 + swap,
-                            bank + 2 + (swap ^ 1),
-                        ];
+                        let base = bank & !2;
+                        [base, base + 1, base + 2, base + 3]
                     }
-                    1 | 3 => {
-                        self.banks[2] = bank + swap;
-                        self.banks[3] = bank + (swap ^ 1);
-                    }
-                    2 => self.banks = [bank + swap; 4],
+                    // UNROM: fix A14..A16 high in the selected 128K region.
+                    1 => [bank, bank + 1, bank | 0x0e, bank | 0x0f],
+                    2 => [bank + swap; 4],
+                    3 => [bank, bank + 1, bank, bank + 1],
                     _ => unreachable!(),
-                }
-                if mode == 0 || mode == 3 {
-                    self.mirror = if data & 0x40 != 0 {
-                        MirroringMode::Horizontal
-                    } else {
-                        MirroringMode::Vertical
-                    };
-                }
+                };
+                self.mirror = if data & 0x40 != 0 {
+                    MirroringMode::Horizontal
+                } else {
+                    MirroringMode::Vertical
+                };
             }
             _ => {}
         }
@@ -809,24 +851,33 @@ impl MMC1 {
     }
 
     fn prg_bank_for(&self, address: u16) -> usize {
-        let last = self.cartridge.prg.banks.len() - 1;
-        match (self.control >> 2) & 3 {
-            0 | 1 => ((self.prg_bank as usize & !1) + (address >= 0xc000) as usize) * 1,
-            2 => {
-                if address < 0xc000 {
-                    0
-                } else {
-                    self.prg_bank as usize
+        // CHR A16 is repurposed as PRG A18 on SUROM/SXROM CHR-RAM boards.
+        let outer =
+            if matches!(self.cartridge.chr, CHR::RAM(_)) && self.cartridge.prg.banks.len() > 16 {
+                self.chr_bank0 as usize & 0x10 // in 16 KiB units
+            } else {
+                0
+            };
+        let bank = self.prg_bank as usize & 0x0f;
+        let last = (self.cartridge.prg.banks.len() - 1).min(15);
+        outer
+            | match (self.control >> 2) & 3 {
+                0 | 1 => (bank & !1) + usize::from(address >= 0xc000),
+                2 => {
+                    if address < 0xc000 {
+                        0
+                    } else {
+                        bank
+                    }
+                }
+                _ => {
+                    if address < 0xc000 {
+                        bank
+                    } else {
+                        last
+                    }
                 }
             }
-            _ => {
-                if address < 0xc000 {
-                    self.prg_bank as usize
-                } else {
-                    last
-                }
-            }
-        }
     }
 
     fn chr_bank_for(&self, address: u16) -> usize {
@@ -900,6 +951,13 @@ impl Mapper for MMC1 {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn write_rmw(&mut self, address: u16, original: u8, modified: u8) {
+        self.write(address, original);
+        if address < 0x8000 || modified & 0x80 != 0 {
+            self.write(address, modified);
         }
     }
 
@@ -1035,6 +1093,118 @@ impl Mapper for BNROM {
             0x80..=0xff => prg_page(
                 &self.cartridge,
                 self.selected_bank * 2 + (page >= 0xc0) as usize,
+                page,
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct OekaKids {
+    cartridge: Cartridge,
+    control: u8,
+    inner: Cell<usize>,
+    in_nametable: Cell<bool>,
+}
+impl OekaKids {
+    fn chr_bank(&self, address: u16) -> usize {
+        let bank = (self.control as usize & 4)
+            | if address < 0x1000 {
+                self.inner.get()
+            } else {
+                3
+            };
+        bank * 4 + (address as usize & 0xfff) / 0x400
+    }
+}
+impl Mapper for OekaKids {
+    fn mirror(&self) -> MirroringMode {
+        MirroringMode::Vertical
+    }
+    fn notify_ppu_address(&self, address: u16) {
+        let in_nametable = address & 0x3000 == 0x2000;
+        if in_nametable && !self.in_nametable.get() {
+            self.inner.set((address as usize >> 8) & 3);
+        }
+        self.in_nametable.set(in_nametable);
+    }
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0..=0x1fff => read_chr_1k(&self.cartridge, self.chr_bank(address), address as usize),
+            0x8000..=0xffff => prg_16k(
+                &self.cartridge,
+                (self.control as usize & 3) * 2 + usize::from(address >= 0xc000),
+                address as usize,
+            ),
+            _ => 0,
+        }
+    }
+    fn write(&mut self, address: u16, data: u8) {
+        match address {
+            0..=0x1fff => {
+                let bank = self.chr_bank(address);
+                write_chr_1k(&mut self.cartridge, bank, address as usize, data);
+            }
+            0x8000..=0xffff => self.control = data & self.read(address) & 7,
+            _ => {}
+        }
+    }
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match page {
+            0x80..=0xff => prg_page(
+                &self.cartridge,
+                (self.control as usize & 3) * 2 + usize::from(page >= 0xc0),
+                page,
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Nina001 {
+    cartridge: Cartridge,
+    prg_bank: usize,
+    chr: [usize; 2],
+}
+
+impl Mapper for Nina001 {
+    fn mirror(&self) -> MirroringMode {
+        self.cartridge.mirror
+    }
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.chr[address as usize / 0x1000] * 4 + (address as usize % 0x1000) / 0x400,
+                address as usize,
+            ),
+            0x6000..=0x7fff => read_sram(&self.cartridge, address),
+            0x8000..=0xffff => prg_16k(
+                &self.cartridge,
+                self.prg_bank * 2 + usize::from(address >= 0xc000),
+                address as usize,
+            ),
+            _ => 0,
+        }
+    }
+    fn write(&mut self, address: u16, data: u8) {
+        if (0x6000..=0x7fff).contains(&address) {
+            write_sram(&mut self.cartridge, address, data);
+            match address {
+                0x7ffd => self.prg_bank = (data & 1) as usize,
+                0x7ffe => self.chr[0] = (data & 0x0f) as usize,
+                0x7fff => self.chr[1] = (data & 0x0f) as usize,
+                _ => {}
+            }
+        }
+    }
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        match page {
+            0x80..=0xff => prg_page(
+                &self.cartridge,
+                self.prg_bank * 2 + usize::from(page >= 0xc0),
                 page,
             ),
             _ => None,
@@ -1179,6 +1349,7 @@ struct MMC3 {
     irq_reload: bool,
     irq_enabled: bool,
     irq_pending: bool,
+    ram_control: u8,
 }
 
 impl MMC3 {
@@ -1196,6 +1367,7 @@ impl MMC3 {
             irq_reload: false,
             irq_enabled: false,
             irq_pending: false,
+            ram_control: 0x80,
         }
     }
 
@@ -1252,7 +1424,7 @@ impl Mapper for MMC3 {
                 let slot = address as usize / 0x400;
                 read_chr_1k(&self.cartridge, self.chr_bank(slot), address as usize)
             }
-            0x6000..=0x7fff => read_sram(&self.cartridge, address),
+            0x6000..=0x7fff if self.ram_control & 0x80 != 0 => read_sram(&self.cartridge, address),
             0x8000..=0xffff => {
                 let slot = (address as usize - 0x8000) / 0x2000;
                 let bank = self.prg_bank(slot);
@@ -1273,7 +1445,9 @@ impl Mapper for MMC3 {
                 let bank = self.chr_bank(address as usize / 0x400);
                 write_chr_1k(&mut self.cartridge, bank, address as usize, data)
             }
-            0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
+            0x6000..=0x7fff if self.ram_control & 0xc0 == 0x80 => {
+                write_sram(&mut self.cartridge, address, data)
+            }
             0x8000..=0x9fff if address & 1 == 0 => {
                 self.bank_select = data & 7;
                 self.prg_mode = data & 0x40 != 0;
@@ -1289,6 +1463,7 @@ impl Mapper for MMC3 {
                     MirroringMode::Horizontal
                 }
             }
+            0xa000..=0xbfff if address & 1 != 0 => self.ram_control = data,
             0xc000..=0xdfff if address & 1 == 0 => self.irq_latch = data,
             0xc000..=0xdfff => self.irq_reload = true,
             0xe000..=0xffff if address & 1 == 0 => {
@@ -1539,8 +1714,8 @@ impl MMC2 {
 
     fn latch_chr(&self, address: u16) {
         match address {
-            0x0fd8..=0x0fdf => self.left_latch.set(false),
-            0x0fe8..=0x0fef => self.left_latch.set(true),
+            0x0fd8..=0x0fdf if self.mmc4 || address == 0x0fd8 => self.left_latch.set(false),
+            0x0fe8..=0x0fef if self.mmc4 || address == 0x0fe8 => self.left_latch.set(true),
             0x1fd8..=0x1fdf => self.right_latch.set(false),
             0x1fe8..=0x1fef => self.right_latch.set(true),
             _ => {}
@@ -1570,22 +1745,23 @@ impl Mapper for MMC2 {
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x1fff => {
-                self.latch_chr(address);
-                read_chr_1k(
+                let value = read_chr_1k(
                     &self.cartridge,
                     self.chr_bank(address) * 4 + (address as usize & 0x0fff) / 0x400,
                     address as usize,
-                )
+                );
+                self.latch_chr(address);
+                value
             }
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
-            0x8000..=0x9fff if self.mmc4 => {
+            0x8000..=0xbfff if self.mmc4 => {
                 prg_16k(&self.cartridge, self.prg_bank, address as usize - 0x8000)
             }
             0x8000..=0x9fff => prg_8k(&self.cartridge, self.prg_bank, address as usize - 0x8000),
-            0xa000..=0xbfff if self.mmc4 => prg_16k(
+            0xc000..=0xffff if self.mmc4 => prg_16k(
                 &self.cartridge,
                 self.cartridge.prg.banks.len() - 1,
-                address as usize - 0x8000,
+                address as usize - 0xc000,
             ),
             0xa000..=0xffff => prg_8k(
                 &self.cartridge,
@@ -1608,13 +1784,13 @@ impl Mapper for MMC2 {
                 )
             }
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
-            0xa000..=0xafff => self.prg_bank = data as usize,
-            0xb000..=0xbfff => self.left_fd = data as usize,
-            0xc000..=0xcfff => self.left_fe = data as usize,
-            0xd000..=0xdfff => self.right_fd = data as usize,
-            0xe000..=0xefff => self.right_fe = data as usize,
+            0xa000..=0xafff => self.prg_bank = (data & 0x0f) as usize,
+            0xb000..=0xbfff => self.left_fd = (data & 0x1f) as usize,
+            0xc000..=0xcfff => self.left_fe = (data & 0x1f) as usize,
+            0xd000..=0xdfff => self.right_fd = (data & 0x1f) as usize,
+            0xe000..=0xefff => self.right_fe = (data & 0x1f) as usize,
             0xf000..=0xffff => {
-                self.mirror = match data & 3 {
+                self.mirror = match data & 1 {
                     0 => MirroringMode::Vertical,
                     _ => MirroringMode::Horizontal,
                 }
@@ -1625,9 +1801,9 @@ impl Mapper for MMC2 {
 
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
         match page {
-            0x80..=0x9f if self.mmc4 => prg_page(&self.cartridge, self.prg_bank, page),
+            0x80..=0xbf if self.mmc4 => prg_page(&self.cartridge, self.prg_bank, page),
             0x80..=0x9f => prg_page_8k(&self.cartridge, self.prg_bank, page),
-            0xa0..=0xff if self.mmc4 => {
+            0xc0..=0xff if self.mmc4 => {
                 prg_page(&self.cartridge, self.cartridge.prg.banks.len() - 1, page)
             }
             0xa0..=0xff => prg_page_8k(
@@ -1651,22 +1827,34 @@ struct VRC {
     chr_shift: bool,
     vrc6: bool,
     address_mode: u8,
+    address_pins: Option<(u8, u8)>,
     irq_latch: u8,
     irq_counter: u8,
     irq_enabled: bool,
     irq_mode_cpu: bool,
     irq_pending: bool,
+    irq_after_ack: bool,
+    irq_prescaler: i16,
 }
 
 impl VRC {
     fn new(cartridge: Cartridge, mapper: u8) -> Self {
         Self {
             mirror: cartridge.mirror,
+            address_pins: match (mapper, cartridge.submapper) {
+                (21, Some(1)) => Some((1, 2)),
+                (21, Some(2)) => Some((6, 7)),
+                (23, Some(1 | 3)) => Some((0, 1)),
+                (23, Some(2)) => Some((2, 3)),
+                (25, Some(1 | 3)) => Some((1, 0)),
+                (25, Some(2)) => Some((3, 2)),
+                _ => None,
+            },
+            vrc2: mapper == 22 || (matches!(mapper, 23 | 25) && cartridge.submapper == Some(3)),
             cartridge,
             prg: [0, 0],
             chr: [0; 8],
             swap: false,
-            vrc2: mapper == 22,
             chr_shift: mapper == 22,
             vrc6: mapper == 24 || mapper == 26,
             address_mode: match mapper {
@@ -1674,7 +1862,7 @@ impl VRC {
                 22 => 1,
                 23 => 2,
                 24 => 3,
-                25 => 0,
+                25 => 4,
                 26 => 1,
                 _ => 3,
             },
@@ -1683,13 +1871,19 @@ impl VRC {
             irq_enabled: false,
             irq_mode_cpu: false,
             irq_pending: false,
+            irq_after_ack: false,
+            irq_prescaler: 341,
         }
     }
 
     fn port(&self, address: u16) -> u8 {
+        if let Some((a0, a1)) = self.address_pins {
+            return (((address >> a0) & 1) | (((address >> a1) & 1) << 1)) as u8;
+        }
         let low = (address & 0x0f) as u8;
         match self.address_mode {
-            0 => (low >> 1) & 3,
+            0 => (((address >> 1) | (address >> 6)) & 3) as u8,
+            4 => ((low >> 1 | low >> 3) & 1) | ((low << 1 | low >> 1) & 2),
             1 => ((low & 1) << 1) | ((low >> 1) & 1),
             2 => {
                 if low & 0x0c != 0 {
@@ -1699,6 +1893,31 @@ impl VRC {
                 }
             }
             _ => low & 3,
+        }
+    }
+
+    fn irq_control(&mut self, data: u8) {
+        self.irq_pending = false;
+        self.irq_after_ack = data & 1 != 0;
+        self.irq_enabled = data & 2 != 0;
+        self.irq_mode_cpu = data & 4 != 0;
+        self.irq_prescaler = 341;
+        if self.irq_enabled {
+            self.irq_counter = self.irq_latch;
+        }
+    }
+
+    fn irq_acknowledge(&mut self) {
+        self.irq_pending = false;
+        self.irq_enabled = self.irq_after_ack;
+    }
+
+    fn clock_irq_counter(&mut self) {
+        if self.irq_counter == 0xff {
+            self.irq_counter = self.irq_latch;
+            self.irq_pending = true;
+        } else {
+            self.irq_counter += 1;
         }
     }
 
@@ -1725,7 +1944,7 @@ impl Mapper for VRC {
         match address {
             0x0000..=0x1fff => read_chr_1k(
                 &self.cartridge,
-                self.chr[address as usize / 0x400],
+                self.chr[address as usize / 0x400] >> usize::from(self.chr_shift),
                 address as usize,
             ),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
@@ -1752,13 +1971,20 @@ impl Mapper for VRC {
     fn write(&mut self, address: u16, data: u8) {
         match address {
             0x0000..=0x1fff => {
-                let bank = self.chr[address as usize / 0x400];
+                let bank = self.chr[address as usize / 0x400] >> usize::from(self.chr_shift);
                 write_chr_1k(&mut self.cartridge, bank, address as usize, data)
             }
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0x8fff => self.prg[0] = data as usize,
             0x9000..=0x9fff if self.vrc6 => {}
             0x9000..=0x9fff => match self.port(address) {
+                _ if self.vrc2 => {
+                    self.mirror = if data & 1 == 0 {
+                        MirroringMode::Vertical
+                    } else {
+                        MirroringMode::Horizontal
+                    };
+                }
                 0 => {
                     self.mirror = match data & 3 {
                         0 => MirroringMode::Vertical,
@@ -1789,35 +2015,37 @@ impl Mapper for VRC {
                     self.chr[index] = data as usize;
                 }
             }
-            0xb000..=0xefff => {
+            0xb000..=0xefff if !self.vrc6 => {
                 let block = ((address as usize - 0xb000) / 0x1000) * 2;
-                let port = self.port(address) as usize & 1;
-                let index = block + port;
+                let port = self.port(address) as usize;
+                let index = block + port / 2;
                 if index < 8 {
-                    if port == 0 {
-                        self.chr[index] = (self.chr[index] & 0xf0) | (data as usize & 0x0f);
+                    if port & 1 == 0 {
+                        self.chr[index] = (self.chr[index] & 0x1f0) | (data as usize & 0x0f);
                     } else {
-                        self.chr[index] = (self.chr[index] & 0x0f) | ((data as usize & 0x1f) << 4);
-                    }
-                    if self.chr_shift {
-                        self.chr[index] >>= 1;
+                        self.chr[index] = (self.chr[index] & 0x0f)
+                            | ((data as usize & if self.vrc2 { 0x0f } else { 0x1f }) << 4);
                     }
                 }
             }
-            0xf000..=0xffff => match self.port(address) {
-                0 => self.irq_latch = (self.irq_latch & 0xf0) | (data & 0x0f),
-                1 => self.irq_latch = (self.irq_latch & 0x0f) | ((data & 0x0f) << 4),
-                2 => {
-                    self.irq_mode_cpu = data & 4 != 0;
-                    self.irq_enabled = data & 2 != 0;
-                    self.irq_counter = self.irq_latch;
-                    self.irq_pending = false;
+            0xf000..=0xffff if !self.vrc2 => {
+                let port = self.port(address);
+                if self.vrc6 {
+                    match port {
+                        0 => self.irq_latch = data,
+                        1 => self.irq_control(data),
+                        2 => self.irq_acknowledge(),
+                        _ => {}
+                    }
+                } else {
+                    match port {
+                        0 => self.irq_latch = (self.irq_latch & 0xf0) | (data & 0x0f),
+                        1 => self.irq_latch = (self.irq_latch & 0x0f) | ((data & 0x0f) << 4),
+                        2 => self.irq_control(data),
+                        _ => self.irq_acknowledge(),
+                    }
                 }
-                _ => {
-                    self.irq_enabled = data & 1 != 0;
-                    self.irq_pending = false;
-                }
-            },
+            }
             _ => {}
         }
     }
@@ -1841,23 +2069,16 @@ impl Mapper for VRC {
     }
 
     fn clock_cpu(&mut self) {
-        if self.irq_enabled && self.irq_mode_cpu {
-            if self.irq_counter == 0 {
-                self.irq_counter = self.irq_latch;
-                self.irq_pending = true;
-            } else {
-                self.irq_counter -= 1;
-            }
+        if !self.irq_enabled || self.vrc2 {
+            return;
         }
-    }
-
-    fn clock_scanline(&mut self) {
-        if self.irq_enabled && !self.irq_mode_cpu {
-            if self.irq_counter == 0 {
-                self.irq_counter = self.irq_latch;
-                self.irq_pending = true;
-            } else {
-                self.irq_counter -= 1;
+        if self.irq_mode_cpu {
+            self.clock_irq_counter();
+        } else {
+            self.irq_prescaler -= 3;
+            if self.irq_prescaler <= 0 {
+                self.irq_prescaler += 341;
+                self.clock_irq_counter();
             }
         }
     }
@@ -2004,6 +2225,11 @@ impl Mapper for FME7 {
 struct MMC5 {
     cartridge: Cartridge,
     prg_mode: u8,
+    nametable_select: u8,
+    exram: [u8; 1024],
+    exram_mode: u8,
+    fill_tile: u8,
+    fill_attribute: u8,
     chr_mode: u8,
     prg: [u8; 5],
     chr: [u16; 12],
@@ -2028,6 +2254,16 @@ impl MMC5 {
         Self {
             cartridge,
             prg_mode: 3,
+            nametable_select: match mirror {
+                MirroringMode::Vertical => 0x44,
+                MirroringMode::Horizontal => 0x50,
+                MirroringMode::SingleScreenUpperBank => 0x55,
+                _ => 0,
+            },
+            exram: [0; 1024],
+            exram_mode: 3,
+            fill_tile: 0,
+            fill_attribute: 0,
             chr_mode: 0,
             prg: [0, 0, 0, 0, 0xff],
             chr: [0; 12],
@@ -2071,6 +2307,42 @@ impl MMC5 {
         }
     }
 
+    fn prg_is_rom(&self, address: u16) -> bool {
+        let slot = (address as usize - 0x8000) / 0x2000;
+        let reg = match self.prg_mode {
+            0 => 4,
+            1 => {
+                if slot < 2 {
+                    2
+                } else {
+                    4
+                }
+            }
+            2 => {
+                if slot < 2 {
+                    2
+                } else {
+                    slot + 1
+                }
+            }
+            _ => slot + 1,
+        };
+        reg == 4 || self.prg[reg] & 0x80 != 0
+    }
+
+    fn read_ram(&self, bank: usize, address: u16) -> u8 {
+        if self.cartridge.sram.is_empty() {
+            return 0;
+        }
+        self.cartridge.sram[bank % self.cartridge.sram.len()][address as usize & 0x1fff]
+    }
+    fn write_ram(&mut self, bank: usize, address: u16, data: u8) {
+        if !self.cartridge.sram.is_empty() && self.ram_protect1 == 2 && self.ram_protect2 == 1 {
+            let bank = bank % self.cartridge.sram.len();
+            self.cartridge.sram[bank][address as usize & 0x1fff] = data;
+        }
+    }
+
     fn chr_bank(&self, address: u16) -> usize {
         self.chr_bank_for_set(address, self.tall_sprites && self.chr_background_selected)
     }
@@ -2100,6 +2372,44 @@ impl Mapper for MMC5 {
         self.mirror
     }
 
+    fn read_ppu_override(&self, address: u16, ciram: &[u8; 4096]) -> Option<u8> {
+        if !(0x2000..=0x3eff).contains(&address) {
+            return None;
+        }
+        let offset = address as usize & 0x3ff;
+        Some(
+            match (self.nametable_select >> (((address >> 10) & 3) * 2)) & 3 {
+                page @ 0..=1 => ciram[page as usize * 0x400 + offset],
+                2 => {
+                    if self.exram_mode < 2 {
+                        self.exram[offset]
+                    } else {
+                        0
+                    }
+                }
+                _ => {
+                    if offset < 0x3c0 {
+                        self.fill_tile
+                    } else {
+                        self.fill_attribute
+                    }
+                }
+            },
+        )
+    }
+    fn write_ppu_override(&mut self, address: u16, data: u8, ciram: &mut [u8; 4096]) -> bool {
+        if !(0x2000..=0x3eff).contains(&address) {
+            return false;
+        }
+        let offset = address as usize & 0x3ff;
+        match (self.nametable_select >> (((address >> 10) & 3) * 2)) & 3 {
+            page @ 0..=1 => ciram[page as usize * 0x400 + offset] = data,
+            2 if self.exram_mode < 2 => self.exram[offset] = data,
+            _ => {}
+        }
+        true
+    }
+
     fn read(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x1fff => {
@@ -2108,10 +2418,14 @@ impl Mapper for MMC5 {
             0x5205 => (self.multiplier_a as u16 * self.multiplier_b as u16) as u8,
             0x5206 => ((self.multiplier_a as u16 * self.multiplier_b as u16) >> 8) as u8,
             0x5204 => ((self.irq_pending.replace(false) as u8) << 7) | ((self.in_frame as u8) << 6),
-            0x6000..=0x7fff => read_sram(&self.cartridge, address),
+            0x5c00..=0x5fff if self.exram_mode >= 2 => self.exram[address as usize & 0x3ff],
+            0x6000..=0x7fff => self.read_ram((self.prg[0] & 0x0f) as usize, address),
+            0x8000..=0xffff if !self.prg_is_rom(address) => {
+                self.read_ram(self.prg_bank(address) & 0x0f, address)
+            }
             0x8000..=0xffff => prg_8k(
                 &self.cartridge,
-                self.prg_bank(address),
+                self.prg_bank(address) & 0x7f,
                 address as usize - 0x8000,
             ),
             _ => 0,
@@ -2146,14 +2460,10 @@ impl Mapper for MMC5 {
             0x5101 => self.chr_mode = data & 3,
             0x5102 => self.ram_protect1 = data & 3,
             0x5103 => self.ram_protect2 = data & 3,
-            0x5105 => {
-                self.mirror = match data & 3 {
-                    0 => MirroringMode::Vertical,
-                    1 => MirroringMode::Horizontal,
-                    2 => MirroringMode::SingleScreenLowerBank,
-                    _ => MirroringMode::SingleScreenUpperBank,
-                }
-            }
+            0x5104 => self.exram_mode = data & 3,
+            0x5105 => self.nametable_select = data,
+            0x5106 => self.fill_tile = data,
+            0x5107 => self.fill_attribute = (data & 3) * 0x55,
             0x5113..=0x5117 => self.prg[(address - 0x5113) as usize] = data,
             0x5120..=0x512b => {
                 self.chr[(address - 0x5120) as usize] =
@@ -2167,8 +2477,16 @@ impl Mapper for MMC5 {
             }
             0x5205 => self.multiplier_a = data,
             0x5206 => self.multiplier_b = data,
-            0x6000..=0x7fff if self.ram_protect1 == 2 && self.ram_protect2 == 1 => {
-                write_sram(&mut self.cartridge, address, data)
+            0x5c00..=0x5fff => match self.exram_mode {
+                0 | 1 => {
+                    self.exram[address as usize & 0x3ff] = if self.in_frame { data } else { 0 }
+                }
+                2 => self.exram[address as usize & 0x3ff] = data,
+                _ => {}
+            },
+            0x6000..=0x7fff => self.write_ram((self.prg[0] & 0x0f) as usize, address, data),
+            0x8000..=0xdfff if !self.prg_is_rom(address) => {
+                self.write_ram(self.prg_bank(address) & 0x0f, address, data)
             }
             _ => {}
         }
@@ -2176,7 +2494,21 @@ impl Mapper for MMC5 {
 
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
         match page {
-            0x80..=0xff => prg_page_8k(&self.cartridge, self.prg_bank((page as u16) << 8), page),
+            0x80..=0xff if !self.prg_is_rom(u16::from(page) << 8) => {
+                if self.cartridge.sram.is_empty() {
+                    return None;
+                }
+                let bank = (self.prg_bank(u16::from(page) << 8) & 0x0f) % self.cartridge.sram.len();
+                let offset = (page as usize & 0x1f) << 8;
+                self.cartridge.sram[bank][offset..offset + 256]
+                    .try_into()
+                    .ok()
+            }
+            0x80..=0xff => prg_page_8k(
+                &self.cartridge,
+                self.prg_bank((page as u16) << 8) & 0x7f,
+                page,
+            ),
             _ => None,
         }
     }
@@ -2213,7 +2545,7 @@ struct Namco163 {
     chr: [usize; 12],
     prg: [usize; 3],
     internal_ram: [u8; 128],
-    ram_address: u8,
+    ram_address: Cell<u8>,
     ram_auto_increment: bool,
     chr_ram_enable: u8,
     ram_protect: u8,
@@ -2229,7 +2561,7 @@ impl Namco163 {
             chr: [0; 12],
             prg: [0; 3],
             internal_ram: [0; 128],
-            ram_address: 0,
+            ram_address: Cell::new(0),
             ram_auto_increment: false,
             chr_ram_enable: 0,
             ram_protect: 0,
@@ -2243,26 +2575,69 @@ impl Namco163 {
         self.chr[address as usize / 0x400]
     }
 
+    fn ppu_bank(&self, address: u16) -> Option<(usize, bool)> {
+        match address {
+            0..=0x1fff => {
+                let enabled = self.chr_ram_enable & (0x40 << (address / 0x1000)) == 0;
+                Some((self.chr_bank(address), enabled))
+            }
+            0x2000..=0x3eff => Some((self.chr[8 + (address as usize & 0xfff) / 0x400], true)),
+            _ => None,
+        }
+    }
+
     fn ram_window_writable(&self, address: u16) -> bool {
         let bit = ((address as usize - 0x6000) / 0x800) as u8;
         (self.ram_protect & (1 << bit)) == 0 && (self.ram_protect & 0xf0) == 0x40
     }
 
     fn ram_data_read(&self) -> u8 {
-        self.internal_ram[(self.ram_address & 0x7f) as usize]
+        let value = self.internal_ram[self.ram_address.get() as usize];
+        self.advance_ram_address();
+        value
+    }
+
+    fn advance_ram_address(&self) {
+        if self.ram_auto_increment {
+            self.ram_address
+                .set(self.ram_address.get().saturating_add(1).min(0x7f));
+        }
     }
 
     fn ram_data_write(&mut self, data: u8) {
-        self.internal_ram[(self.ram_address & 0x7f) as usize] = data;
-        if self.ram_auto_increment {
-            self.ram_address = self.ram_address.wrapping_add(1);
-        }
+        self.internal_ram[(self.ram_address.get() & 0x7f) as usize] = data;
+        self.advance_ram_address();
     }
 }
 
 impl Mapper for Namco163 {
     fn mirror(&self) -> MirroringMode {
         self.cartridge.mirror
+    }
+
+    fn read_ppu_override(&self, address: u16, ciram: &[u8; 4096]) -> Option<u8> {
+        let (bank, ciram_enabled) = self.ppu_bank(address)?;
+        if ciram_enabled && bank >= 0xe0 {
+            Some(ciram[(bank & 1) * 0x400 + (address as usize & 0x3ff)])
+        } else if address >= 0x2000 {
+            Some(read_chr_1k(&self.cartridge, bank, address as usize))
+        } else {
+            None
+        }
+    }
+    fn write_ppu_override(&mut self, address: u16, data: u8, ciram: &mut [u8; 4096]) -> bool {
+        let Some((bank, enabled)) = self.ppu_bank(address) else {
+            return false;
+        };
+        if enabled && bank >= 0xe0 {
+            ciram[(bank & 1) * 0x400 + (address as usize & 0x3ff)] = data;
+            true
+        } else if address >= 0x2000 {
+            write_chr_1k(&mut self.cartridge, bank, address as usize, data);
+            true
+        } else {
+            false
+        }
     }
 
     fn read(&self, address: u16) -> u8 {
@@ -2318,7 +2693,7 @@ impl Mapper for Namco163 {
             }
             0xf000..=0xf7ff => self.prg[2] = data as usize & 0x3f,
             0xf800..=0xffff => {
-                self.ram_address = data & 0x7f;
+                self.ram_address.set(data & 0x7f);
                 self.ram_auto_increment = data & 0x80 != 0;
                 self.ram_protect = data;
             }
@@ -2391,11 +2766,27 @@ pub fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
         21 | 22 | 23 | 25 => Box::new(VRC::new(cartridge, mapper)),
         24 | 26 => Box::new(VRC::new(cartridge, mapper)),
         64 => Box::new(RAMBO1::new(cartridge)),
+        34 if cartridge.submapper == Some(1)
+            || (cartridge.submapper.unwrap_or(0) == 0
+                && matches!(cartridge.chr, CHR::ROM(_))
+                && cartridge.chr.get_banks().len() > 1) =>
+        {
+            Box::new(Nina001 {
+                cartridge,
+                prg_bank: 0,
+                chr: [0; 2],
+            })
+        }
         34 => Box::new(BNROM::new(cartridge)),
         66 => Box::new(GxROM::new(cartridge)),
         69 => Box::new(FME7::new(cartridge)),
         19 => Box::new(Namco163::new(cartridge)),
-        96 => Box::new(CNROM::new(cartridge)),
+        96 => Box::new(OekaKids {
+            cartridge,
+            control: 0,
+            inner: Cell::new(0),
+            in_nametable: Cell::new(false),
+        }),
         99 => Box::new(VsSystem::new(cartridge)),
         224 => Box::new(MMC3::new(cartridge)),
         _ => return None,
@@ -2418,6 +2809,7 @@ mod tests {
         }
 
         Cartridge {
+            submapper: None,
             prg: Rc::new(PRG { banks: prg }),
             chr: CHR::ROM(Rc::new(chr)),
             sram: vec![[0; 0x2000]],
@@ -2452,7 +2844,7 @@ mod tests {
 
     #[test]
     fn fixed_chr_windows_preserve_all_ppu_address_bits() {
-        for id in [0, 2, 7, 15, 20, 34, 50] {
+        for id in [0, 2, 7, 15, 20, 50] {
             let mapper = new(chr_page_cartridge(), id).unwrap();
             assert_chr_window(mapper.as_ref(), 0, 0x2000, 0);
         }
@@ -2464,7 +2856,6 @@ mod tests {
             (3, 0x8000, 2),
             (11, 0x8000, 0x20),
             (66, 0x8000, 0x02),
-            (96, 0x8000, 2),
             (99, 0x4016, 4),
         ] {
             let mut mapper = new(chr_page_cartridge(), id).unwrap();
@@ -2541,15 +2932,17 @@ mod tests {
     }
 
     #[test]
-    fn mapper15_preserves_lower_windows_in_modes_one_and_three() {
+    fn mapper15_modes_select_complete_windows_and_ignore_bit7_except_in_8k_mode() {
         let mut mapper = new(cartridge(8, 1), 15).unwrap();
-        mapper.write(0x8000, 1);
-        assert_eq!(mapper.read(0x8000), 1);
-        assert_eq!(mapper.read(0xc000), 2);
-
-        mapper.write(0x8001, 2);
-        assert_eq!(mapper.read(0x8000), 1);
-        assert_eq!(mapper.read(0xc000), 2);
+        mapper.write(0x8000, 0x81);
+        assert_eq!(mapper.read(0x8000), 0);
+        assert_eq!(mapper.read(0xc000), 1);
+        mapper.write(0x8001, 0x82);
+        assert_eq!(mapper.read(0x8000), 2);
+        assert_eq!(mapper.read(0xc000), 7);
+        mapper.write(0x8003, 0x83);
+        assert_eq!(mapper.read(0x8000), 3);
+        assert_eq!(mapper.read(0xc000), 3);
     }
 
     #[test]
@@ -2838,7 +3231,7 @@ mod tests {
 
         let mut mmc5 = new(cartridge(8, 4), 5).unwrap();
         mmc5.write(0x5100, 3);
-        mmc5.write(0x5114, 4);
+        mmc5.write(0x5114, 0x84); // Bit 7 selects ROM; clear selects RAM.
         mmc5.write(0x5205, 13);
         mmc5.write(0x5206, 17);
         assert_eq!(mmc5.read(0x8000), 2);
@@ -2849,3 +3242,7 @@ mod tests {
         assert_eq!(namco.read(0x8000), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "cartridge_audit_tests.rs"]
+mod audit;

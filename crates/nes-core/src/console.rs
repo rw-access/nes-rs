@@ -805,6 +805,7 @@ mod tests {
         chr[0x10..0x18].fill(0xff);
 
         Cartridge {
+            submapper: None,
             prg: Rc::new(PRG { banks: prg }),
             chr: CHR::ROM(Rc::new(vec![chr])),
             sram: vec![[0; 0x2000]],
@@ -887,6 +888,7 @@ mod tests {
         chr[0x10..0x18].fill(0xff);
 
         Cartridge {
+            submapper: None,
             prg: Rc::new(PRG { banks: prg }),
             chr: CHR::ROM(Rc::new(vec![chr])),
             sram: vec![[0; 0x2000]],

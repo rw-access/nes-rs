@@ -47,6 +47,11 @@ contact sheet, ROM identities, explicit coverage gaps, and optional comparison
 against a reviewed previous run. It requires owner-supplied ROMs and does not
 accept current output as a correctness baseline automatically.
 
+The [NESdev mapper audit](docs/mapper-audit.md) covers all 27 accepted mapper
+IDs, with source links and opt-in synthetic contracts for known hardware gaps.
+The [repair report](docs/mapper-repairs.md) tracks the fixes, remaining gaps,
+and original test ROMs compared against a reference emulator.
+
 ## FM2 movie to MP4 exporter
 
 The native `fm2_to_mp4` tool replays a plain-text FCEUX version-3 movie against

@@ -69,3 +69,6 @@ cargo test -p nes-render --bin mapper_smoke_capture
 See [the initial visual review](initial-review.md) for the first run and follow-up candidates.
 
 See [the repair review](repair-review.md) for diagnosed faults, fixes, reference comparisons, and remaining limits.
+
+See [the NESdev audit repairs](../../docs/mapper-repairs.md) for synthetic MMC4/VRC
+probes, additional mapper repairs and reference comparisons.
