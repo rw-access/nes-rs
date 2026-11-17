@@ -126,6 +126,8 @@ fn write_sram(cartridge: &mut Cartridge, address: u16, data: u8) {
     cartridge.sram[bank][offset & 0x1fff] = data;
 }
 
+// `bank` selects a physical 1 KiB page; only the low ten offset bits
+// address bytes inside it. Larger windows must include their subpage in bank.
 fn read_chr_1k(cartridge: &Cartridge, bank: usize, offset: usize) -> u8 {
     let bank_count = cartridge.chr.get_banks().len() * 8;
     let bank = bank_index(bank, bank_count);
@@ -318,7 +320,9 @@ impl Mapper for UxROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x0000..=0x1fff => {
+                read_chr_1k(&self.cartridge, address as usize / 0x400, address as usize)
+            }
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xbfff => prg_16k(
                 &self.cartridge,
@@ -336,7 +340,12 @@ impl Mapper for UxROM {
 
     fn write(&mut self, address: u16, data: u8) {
         match address {
-            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0xffff => self.selected_bank = data as usize,
             _ => {}
@@ -383,7 +392,9 @@ impl Mapper for Mapper15 {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x0000..=0x1fff => {
+                read_chr_1k(&self.cartridge, address as usize / 0x400, address as usize)
+            }
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_8k(
                 &self.cartridge,
@@ -396,7 +407,12 @@ impl Mapper for Mapper15 {
 
     fn write(&mut self, address: u16, data: u8) {
         match address {
-            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0xffff => {
                 let mode = (address & 3) as usize;
@@ -480,7 +496,9 @@ impl Mapper for Mapper50 {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x0000..=0x1fff => {
+                read_chr_1k(&self.cartridge, address as usize / 0x400, address as usize)
+            }
             0x6000..=0x7fff => prg_8k(
                 &self.cartridge,
                 self.fixed_bank(0),
@@ -515,7 +533,12 @@ impl Mapper for Mapper50 {
                     );
                 }
             }
-            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             _ => {}
         }
     }
@@ -565,7 +588,11 @@ impl Mapper for VsSystem {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, self.bank * 8, address as usize),
+            0x0000..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.bank * 8 + address as usize / 0x400,
+                address as usize,
+            ),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => {
                 let slot = (address as usize - 0x8000) / 0x2000;
@@ -579,9 +606,12 @@ impl Mapper for VsSystem {
     fn write(&mut self, address: u16, data: u8) {
         match address {
             0x4016 => self.bank = usize::from(data & 4 != 0),
-            0x0000..=0x1fff => {
-                write_chr_1k(&mut self.cartridge, self.bank * 8, address as usize, data)
-            }
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                self.bank * 8 + address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             _ => {}
         }
@@ -615,9 +645,11 @@ impl Mapper for CNROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => {
-                read_chr_1k(&self.cartridge, self.selected_bank * 8, address as usize)
-            }
+            0x0000..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.selected_bank * 8 + address as usize / 0x400,
+                address as usize,
+            ),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_16k(
                 &self.cartridge,
@@ -697,13 +729,14 @@ impl MMC1 {
     }
 
     fn chr_bank_for(&self, address: u16) -> usize {
-        if self.control & 0x10 == 0 {
-            ((self.chr_bank0 as usize & !1) * 4) + (address as usize / 0x1000) * 4
+        let bank_4k = if self.control & 0x10 == 0 {
+            (self.chr_bank0 as usize & !1) + address as usize / 0x1000
         } else if address < 0x1000 {
-            self.chr_bank0 as usize * 4
+            self.chr_bank0 as usize
         } else {
-            self.chr_bank1 as usize * 4
-        }
+            self.chr_bank1 as usize
+        };
+        bank_4k * 4 + (address as usize & 0x0fff) / 0x400
     }
 
     fn write_register(&mut self, address: u16, value: u8) {
@@ -805,7 +838,9 @@ impl Mapper for AxROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x0000..=0x1fff => {
+                read_chr_1k(&self.cartridge, address as usize / 0x400, address as usize)
+            }
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_16k(
                 &self.cartridge,
@@ -818,7 +853,12 @@ impl Mapper for AxROM {
 
     fn write(&mut self, address: u16, data: u8) {
         match address {
-            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0xffff => {
                 self.selected_bank = (data & 7) as usize;
@@ -862,7 +902,9 @@ impl Mapper for BNROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, 0, address as usize),
+            0x0000..=0x1fff => {
+                read_chr_1k(&self.cartridge, address as usize / 0x400, address as usize)
+            }
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_16k(
                 &self.cartridge,
@@ -875,7 +917,12 @@ impl Mapper for BNROM {
 
     fn write(&mut self, address: u16, data: u8) {
         match address {
-            0x0000..=0x1fff => write_chr_1k(&mut self.cartridge, 0, address as usize, data),
+            0x0000..=0x1fff => write_chr_1k(
+                &mut self.cartridge,
+                address as usize / 0x400,
+                address as usize,
+                data,
+            ),
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0xffff => self.selected_bank = data as usize,
             _ => {}
@@ -918,7 +965,11 @@ impl Mapper for ColorDreams {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, self.chr_bank * 8, address as usize),
+            0x0000..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.chr_bank * 8 + address as usize / 0x400,
+                address as usize,
+            ),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_16k(
                 &self.cartridge,
@@ -976,7 +1027,11 @@ impl Mapper for GxROM {
 
     fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x1fff => read_chr_1k(&self.cartridge, self.chr_bank * 8, address as usize),
+            0x0000..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.chr_bank * 8 + address as usize / 0x400,
+                address as usize,
+            ),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_16k(
                 &self.cartridge,
@@ -1241,7 +1296,7 @@ impl Mapper for MMC2 {
                 self.latch_chr(address);
                 read_chr_1k(
                     &self.cartridge,
-                    self.chr_bank(address) * 4,
+                    self.chr_bank(address) * 4 + (address as usize & 0x0fff) / 0x400,
                     address as usize,
                 )
             }
@@ -1268,7 +1323,12 @@ impl Mapper for MMC2 {
         match address {
             0x0000..=0x1fff => {
                 let bank = self.chr_bank(address);
-                write_chr_1k(&mut self.cartridge, bank * 4, address as usize, data)
+                write_chr_1k(
+                    &mut self.cartridge,
+                    bank * 4 + (address as usize & 0x0fff) / 0x400,
+                    address as usize,
+                    data,
+                )
             }
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0xa000..=0xafff => self.prg_bank = data as usize,
@@ -2029,6 +2089,111 @@ mod tests {
             chr: CHR::ROM(Rc::new(chr)),
             sram: vec![[0; 0x2000]],
             mirror: MirroringMode::Horizontal,
+        }
+    }
+
+    // Tag every 1 KiB physical page, rather than filling whole 8 KiB banks
+    // with one value: otherwise lost PPU address bits are invisible.
+    fn chr_page_cartridge() -> Cartridge {
+        let mut cart = cartridge(8, 4);
+        let mut banks = vec![[0u8; 0x2000]; 4];
+        for (bank, bytes) in banks.iter_mut().enumerate() {
+            for (page, bytes) in bytes.chunks_mut(0x400).enumerate() {
+                bytes.fill((bank * 8 + page) as u8);
+            }
+        }
+        cart.chr = CHR::ROM(Rc::new(banks));
+        cart
+    }
+
+    fn assert_chr_window(mapper: &dyn Mapper, start: u16, size: u16, first_page: u8) {
+        for offset in 0..size {
+            assert_eq!(
+                mapper.read(start + offset),
+                first_page + (offset / 0x400) as u8,
+                "CHR address {:04x}",
+                start + offset
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_chr_windows_preserve_all_ppu_address_bits() {
+        for id in [0, 2, 7, 15, 20, 34, 50] {
+            let mapper = new(chr_page_cartridge(), id).unwrap();
+            assert_chr_window(mapper.as_ref(), 0, 0x2000, 0);
+        }
+    }
+
+    #[test]
+    fn switched_8k_chr_windows_preserve_all_ppu_address_bits() {
+        for (id, register, value) in [
+            (3, 0x8000, 2),
+            (11, 0x8000, 0x20),
+            (66, 0x8000, 0x20),
+            (96, 0x8000, 2),
+            (99, 0x4016, 4),
+        ] {
+            let mut mapper = new(chr_page_cartridge(), id).unwrap();
+            assert_chr_window(mapper.as_ref(), 0, 0x2000, 0);
+            mapper.write(register, value);
+            assert_chr_window(mapper.as_ref(), 0, 0x2000, if id == 99 { 8 } else { 16 });
+        }
+    }
+
+    #[test]
+    fn mmc1_chr_windows_preserve_offsets_in_both_bank_modes() {
+        let mut mapper = new(chr_page_cartridge(), 1).unwrap();
+        assert_chr_window(mapper.as_ref(), 0, 0x2000, 0);
+        // In 8 KiB mode the low bank bit is ignored.
+        write_mmc1(mapper.as_mut(), 0xa000, 3);
+        assert_chr_window(mapper.as_ref(), 0, 0x2000, 8);
+        write_mmc1(mapper.as_mut(), 0x8000, 0x1c);
+        write_mmc1(mapper.as_mut(), 0xa000, 5);
+        write_mmc1(mapper.as_mut(), 0xc000, 2);
+        assert_chr_window(mapper.as_ref(), 0, 0x1000, 20);
+        assert_chr_window(mapper.as_ref(), 0x1000, 0x1000, 8);
+    }
+
+    #[test]
+    fn chr_ram_uploads_do_not_alias_between_1k_pages() {
+        for id in [0, 1, 2, 7, 9, 10, 15, 34, 50, 99] {
+            let mut cart = cartridge(8, 1);
+            cart.chr = CHR::RAM(vec![[0; 0x2000]]);
+            let mut mapper = new(cart, id).unwrap();
+            if id == 9 || id == 10 {
+                mapper.write(0xb000, 0);
+                mapper.write(0xc000, 0);
+                mapper.write(0xd000, 1);
+                mapper.write(0xe000, 1);
+            }
+            for address in 0..0x2000u16 {
+                mapper.write(address, ((address / 0x400) as u8) ^ (address as u8));
+            }
+            for address in 0..0x2000u16 {
+                assert_eq!(
+                    mapper.read(address),
+                    ((address / 0x400) as u8) ^ (address as u8),
+                    "mapper {id}, CHR address {address:04x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mmc2_and_mmc4_chr_windows_preserve_offsets_across_latches() {
+        for id in [9, 10] {
+            let mut mapper = new(chr_page_cartridge(), id).unwrap();
+            mapper.write(0xb000, 1);
+            mapper.write(0xc000, 3);
+            mapper.write(0xd000, 4);
+            mapper.write(0xe000, 6);
+            assert_chr_window(mapper.as_ref(), 0, 0x0fd8, 4);
+            mapper.read(0x0fe8);
+            assert_chr_window(mapper.as_ref(), 0, 0x0fd8, 12);
+            assert_chr_window(mapper.as_ref(), 0x1000, 0x0fd8, 16);
+            mapper.read(0x1fe8);
+            assert_chr_window(mapper.as_ref(), 0x1000, 0x0fd8, 24);
         }
     }
 
