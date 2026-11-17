@@ -56,15 +56,37 @@ pub trait Mapper: DynClone {
     fn write(&mut self, address: u16, data: u8);
     fn read_page(&self, page: u8) -> Option<&[u8; 256]>;
 
-    /// Return a directly addressable CHR page when the mapper can expose one.
-    /// The generic PPU path falls back to `read` for mappers with banked or
-    /// otherwise dynamic CHR mappings.
+    /// Return a context-independent CHR page when the mapper can expose one.
+    /// The PPU otherwise uses the background/sprite fetch callbacks for banked
+    /// or context-dependent CHR mappings.
     fn read_chr_page(&self, _page: u8) -> Option<&[u8; 256]> {
         None
     }
 
+    /// Pattern fetches carry rendering context for boards such as MMC5.
+    /// CPU PPUDATA accesses continue to use `read` and the board's last bank set.
+    fn read_background_chr(&self, address: u16) -> u8 {
+        self.read(address)
+    }
+
+    fn read_sprite_chr(&self, address: u16) -> u8 {
+        self.read(address)
+    }
+
+    /// Optional RGB-PPU color permutation, normalized to the shared NES palette.
+    fn palette_map(&self) -> Option<&'static [u8; 64]> {
+        None
+    }
+
+    /// Fully decoded PPUCTRL writes, for mapper hardware that monitors sprite size.
+    fn notify_ppu_control(&mut self, _data: u8) {}
+
+    /// End of the visible frame, before VBlank NMI delivery.
+    fn end_frame(&mut self) {}
+
     /// Clock mapper hardware at the end of a rendered scanline.
-    /// Most mappers do nothing here; MMC3 uses it for its scanline IRQ counter.
+    /// Most mappers do nothing here; scanline IRQ mappers use it as an
+    /// approximation of their PPU-bus clock source.
     fn clock_scanline(&mut self) {}
 
     /// Clock mapper hardware once per CPU cycle.
@@ -270,6 +292,43 @@ impl Mapper for MapperInstance {
         match self {
             Self::Nrom(mapper) => mapper.read_chr_page(page),
             Self::Dynamic(mapper) => mapper.read_chr_page(page),
+        }
+    }
+
+    #[inline]
+    fn read_background_chr(&self, address: u16) -> u8 {
+        match self {
+            Self::Nrom(mapper) => mapper.read_background_chr(address),
+            Self::Dynamic(mapper) => mapper.read_background_chr(address),
+        }
+    }
+
+    #[inline]
+    fn read_sprite_chr(&self, address: u16) -> u8 {
+        match self {
+            Self::Nrom(mapper) => mapper.read_sprite_chr(address),
+            Self::Dynamic(mapper) => mapper.read_sprite_chr(address),
+        }
+    }
+
+    fn palette_map(&self) -> Option<&'static [u8; 64]> {
+        match self {
+            Self::Nrom(mapper) => mapper.palette_map(),
+            Self::Dynamic(mapper) => mapper.palette_map(),
+        }
+    }
+
+    fn notify_ppu_control(&mut self, data: u8) {
+        match self {
+            Self::Nrom(mapper) => mapper.notify_ppu_control(data),
+            Self::Dynamic(mapper) => mapper.notify_ppu_control(data),
+        }
+    }
+
+    fn end_frame(&mut self) {
+        match self {
+            Self::Nrom(mapper) => mapper.end_frame(),
+            Self::Dynamic(mapper) => mapper.end_frame(),
         }
     }
 
@@ -569,19 +628,61 @@ impl Mapper for Mapper50 {
     }
 }
 
+// RP2C04-0004 hardware color permutation, mapped to the closest RP2C03
+// color index. RGB PPUs have a few additional colors; these retain the shared
+// indexed output's approximate hues rather than claiming exact RGB DAC output.
+// https://www.nesdev.org/wiki/PPU_palettes#RP2C04-0004
+const VS_2C04_0004_TO_NES: [u8; 64] = [
+    0x18, 0x03, 0x1c, 0x28, 0x0d, 0x35, 0x01, 0x17, 0x10, 0x08, 0x2a, 0x01, 0x36, 0x28, 0x0b, 0x39,
+    0x25, 0x0d, 0x12, 0x34, 0x0d, 0x00, 0x06, 0x26, 0x36, 0x1b, 0x22, 0x19, 0x04, 0x0d, 0x3a, 0x21,
+    0x05, 0x0a, 0x07, 0x02, 0x13, 0x14, 0x00, 0x15, 0x0c, 0x31, 0x11, 0x09, 0x09, 0x38, 0x00, 0x24,
+    0x33, 0x20, 0x08, 0x16, 0x27, 0x2b, 0x20, 0x3c, 0x0d, 0x27, 0x23, 0x31, 0x29, 0x32, 0x2c, 0x09,
+];
+
+fn vs_palette_for_prg_crc(crc: u32) -> Option<&'static [u8; 64]> {
+    match crc {
+        0x8192_c804 => Some(&VS_2C04_0004_TO_NES),
+        _ => None,
+    }
+}
+
+fn crc32(bytes: impl IntoIterator<Item = u8>) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
 #[derive(Clone)]
 struct VsSystem {
     cartridge: Cartridge,
     bank: usize,
+    palette_map: Option<&'static [u8; 64]>,
 }
 
 impl VsSystem {
     fn new(cartridge: Cartridge) -> Self {
-        Self { cartridge, bank: 0 }
+        // Legacy iNES has no RGB PPU subtype. Identify the known unmodified
+        // VS SMB PRG by checksum; do not apply its permutation to other VS games.
+        let palette_map =
+            vs_palette_for_prg_crc(crc32(cartridge.prg.banks.iter().flatten().copied()));
+        Self {
+            cartridge,
+            bank: 0,
+            palette_map,
+        }
     }
 }
 
 impl Mapper for VsSystem {
+    fn palette_map(&self) -> Option<&'static [u8; 64]> {
+        self.palette_map
+    }
+
     fn mirror(&self) -> MirroringMode {
         MirroringMode::FourScreen
     }
@@ -596,7 +697,7 @@ impl Mapper for VsSystem {
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => {
                 let slot = (address as usize - 0x8000) / 0x2000;
-                let bank = if slot == 0 { self.bank } else { slot };
+                let bank = if slot == 0 { self.bank * 4 } else { slot };
                 prg_8k(&self.cartridge, bank, address as usize - 0x8000)
             }
             _ => 0,
@@ -621,7 +722,7 @@ impl Mapper for VsSystem {
         match page {
             0x80..=0xff => {
                 let slot = (page as usize - 0x80) / 0x20;
-                let bank = if slot == 0 { self.bank } else { slot };
+                let bank = if slot == 0 { self.bank * 4 } else { slot };
                 prg_page_8k(&self.cartridge, bank, page)
             }
             _ => None,
@@ -1046,8 +1147,8 @@ impl Mapper for GxROM {
         match address {
             0x6000..=0x7fff => write_sram(&mut self.cartridge, address, data),
             0x8000..=0xffff => {
-                self.prg_bank = (data & 3) as usize;
-                self.chr_bank = ((data >> 4) & 3) as usize;
+                self.prg_bank = ((data >> 4) & 3) as usize;
+                self.chr_bank = (data & 3) as usize;
             }
             _ => {}
         }
@@ -1221,6 +1322,182 @@ impl Mapper for MMC3 {
         }
         if self.irq_counter == 0 && self.irq_enabled {
             self.irq_pending = true;
+        }
+    }
+
+    fn irq_pending(&self) -> bool {
+        self.irq_pending
+    }
+}
+
+// RAMBO-1 resembles MMC3, but has a third switchable PRG window and
+// independent 1 KiB CHR registers. Keep those differences out of MMC3.
+#[derive(Clone)]
+struct RAMBO1 {
+    cartridge: Cartridge,
+    registers: [u8; 16],
+    control: u8,
+    mirror: MirroringMode,
+    irq_latch: u8,
+    irq_counter: u8,
+    irq_reload: bool,
+    irq_enabled: bool,
+    irq_pending: bool,
+    cpu_irq_mode: bool,
+    cpu_divider: u8,
+    irq_delay: u8,
+    final_cpu_clock: bool,
+}
+
+impl RAMBO1 {
+    fn new(cartridge: Cartridge) -> Self {
+        Self {
+            mirror: cartridge.mirror,
+            cartridge,
+            registers: [0; 16],
+            control: 0,
+            irq_latch: 0,
+            irq_counter: 0,
+            irq_reload: false,
+            irq_enabled: false,
+            irq_pending: false,
+            cpu_irq_mode: false,
+            cpu_divider: 0,
+            irq_delay: 0,
+            final_cpu_clock: false,
+        }
+    }
+
+    fn prg_bank(&self, slot: usize) -> usize {
+        let register = if self.control & 0x40 == 0 {
+            [6, 7, 15]
+        } else {
+            [15, 6, 7]
+        };
+        if slot == 3 {
+            self.cartridge.prg.banks.len() * 2 - 1
+        } else {
+            self.registers[register[slot]] as usize
+        }
+    }
+
+    fn chr_bank(&self, slot: usize) -> usize {
+        let slot = slot ^ if self.control & 0x80 != 0 { 4 } else { 0 };
+        match slot {
+            0 => self.registers[0] as usize,
+            1 if self.control & 0x20 != 0 => self.registers[8] as usize,
+            1 => self.registers[0].wrapping_add(1) as usize,
+            2 => self.registers[1] as usize,
+            3 if self.control & 0x20 != 0 => self.registers[9] as usize,
+            3 => self.registers[1].wrapping_add(1) as usize,
+            _ => self.registers[slot - 2] as usize,
+        }
+    }
+
+    fn clock_irq(&mut self, delay: u8) {
+        if self.irq_reload {
+            self.irq_counter = self
+                .irq_latch
+                .wrapping_add(if self.irq_latch <= 1 { 1 } else { 2 });
+            self.irq_reload = false;
+        } else if self.irq_counter == 0 {
+            self.irq_counter = self.irq_latch.wrapping_add(1);
+        }
+        self.irq_counter = self.irq_counter.wrapping_sub(1);
+        if self.irq_counter == 0 && self.irq_enabled {
+            self.irq_delay = delay;
+        }
+    }
+}
+
+impl Mapper for RAMBO1 {
+    fn mirror(&self) -> MirroringMode {
+        self.mirror
+    }
+
+    fn read(&self, address: u16) -> u8 {
+        match address {
+            0..=0x1fff => read_chr_1k(
+                &self.cartridge,
+                self.chr_bank(address as usize / 0x400),
+                address as usize,
+            ),
+            0x8000..=0xffff => prg_8k(
+                &self.cartridge,
+                self.prg_bank((address as usize - 0x8000) / 0x2000),
+                address as usize,
+            ),
+            _ => 0,
+        }
+    }
+
+    fn write(&mut self, address: u16, data: u8) {
+        if address < 0x2000 {
+            let bank = self.chr_bank(address as usize / 0x400);
+            write_chr_1k(&mut self.cartridge, bank, address as usize, data);
+            return;
+        }
+        match address & 0xe001 {
+            0x8000 => self.control = data,
+            0x8001 => self.registers[(self.control & 0x0f) as usize] = data,
+            0xa000 => {
+                self.mirror = if data & 1 == 0 {
+                    MirroringMode::Vertical
+                } else {
+                    MirroringMode::Horizontal
+                }
+            }
+            0xc000 => self.irq_latch = data,
+            0xc001 => {
+                self.final_cpu_clock |= self.cpu_irq_mode && data & 1 == 0;
+                self.cpu_irq_mode = data & 1 != 0;
+                if self.cpu_irq_mode {
+                    self.cpu_divider = 0;
+                }
+                self.irq_reload = true;
+            }
+            0xe000 => {
+                self.irq_enabled = false;
+                self.irq_pending = false;
+                self.irq_delay = 0;
+            }
+            0xe001 => self.irq_enabled = true,
+            _ => {}
+        }
+    }
+
+    fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
+        if page < 0x80 {
+            return None;
+        }
+        prg_page_8k(
+            &self.cartridge,
+            self.prg_bank((page as usize - 0x80) / 0x20),
+            page,
+        )
+    }
+
+    fn clock_cpu(&mut self) {
+        if self.irq_delay != 0 {
+            self.irq_delay -= 1;
+            if self.irq_delay == 0 && self.irq_enabled {
+                self.irq_pending = true;
+            }
+        }
+        if self.cpu_irq_mode || self.final_cpu_clock {
+            self.cpu_divider = (self.cpu_divider + 1) & 3;
+            if self.cpu_divider == 0 {
+                self.clock_irq(1);
+                self.final_cpu_clock = false;
+            }
+        }
+    }
+
+    fn clock_scanline(&mut self) {
+        // The PPU currently provides scanline clocks rather than filtered A12
+        // edges, the same approximation used for MMC3.
+        if !self.cpu_irq_mode {
+            self.clock_irq(2);
         }
     }
 
@@ -1632,7 +1909,12 @@ impl Mapper for FME7 {
                 self.chr[address as usize / 0x400],
                 address as usize,
             ),
-            0x6000..=0x7fff => prg_8k(&self.cartridge, self.prg[0], address as usize - 0x6000),
+            0x6000..=0x7fff if self.prg[0] & 0x40 == 0 => prg_8k(
+                &self.cartridge,
+                self.prg[0] & 0x3f,
+                address as usize - 0x6000,
+            ),
+            0x6000..=0x7fff if self.prg[0] & 0x80 != 0 => read_sram(&self.cartridge, address),
             0x8000..=0xdfff => prg_8k(
                 &self.cartridge,
                 self.prg[(address as usize - 0x8000) / 0x2000 + 1],
@@ -1652,6 +1934,9 @@ impl Mapper for FME7 {
             0x0000..=0x1fff => {
                 let bank = self.chr[address as usize / 0x400];
                 write_chr_1k(&mut self.cartridge, bank, address as usize, data);
+            }
+            0x6000..=0x7fff if self.prg[0] & 0xc0 == 0xc0 => {
+                write_sram(&mut self.cartridge, address, data)
             }
             0x8000..=0x9fff => self.command = data & 0x0f,
             0xa000..=0xbfff => match self.command {
@@ -1680,7 +1965,9 @@ impl Mapper for FME7 {
 
     fn read_page(&self, page: u8) -> Option<&[u8; 256]> {
         match page {
-            0x60..=0x7f => prg_page_8k(&self.cartridge, self.prg[0], page - 0x40),
+            0x60..=0x7f if self.prg[0] & 0x40 == 0 => {
+                prg_page_8k(&self.cartridge, self.prg[0] & 0x3f, page)
+            }
             0x80..=0xdf => prg_page_8k(
                 &self.cartridge,
                 self.prg[(page as usize - 0x80) / 0x20 + 1],
@@ -1720,12 +2007,16 @@ struct MMC5 {
     chr_mode: u8,
     prg: [u8; 5],
     chr: [u16; 12],
+    chr_upper: u8,
+    chr_background_selected: bool,
     mirror: MirroringMode,
     ram_protect1: u8,
     ram_protect2: u8,
     irq_line: u8,
     irq_enabled: bool,
-    irq_pending: bool,
+    irq_pending: Cell<bool>,
+    in_frame: bool,
+    tall_sprites: bool,
     scanline: u8,
     multiplier_a: u8,
     multiplier_b: u8,
@@ -1740,12 +2031,16 @@ impl MMC5 {
             chr_mode: 0,
             prg: [0, 0, 0, 0, 0xff],
             chr: [0; 12],
+            chr_upper: 0,
+            chr_background_selected: false,
             mirror,
             ram_protect1: 0,
             ram_protect2: 0,
             irq_line: 0,
             irq_enabled: false,
-            irq_pending: false,
+            irq_pending: Cell::new(false),
+            in_frame: false,
+            tall_sprites: false,
             scanline: 0,
             multiplier_a: 0,
             multiplier_b: 0,
@@ -1777,18 +2072,25 @@ impl MMC5 {
     }
 
     fn chr_bank(&self, address: u16) -> usize {
+        self.chr_bank_for_set(address, self.tall_sprites && self.chr_background_selected)
+    }
+
+    fn chr_bank_for_set(&self, address: u16, background: bool) -> usize {
         let slot = address as usize / 0x400;
-        match self.chr_mode & 3 {
-            0 => self.chr[7] as usize * 8 + slot,
-            1 => {
-                if slot < 4 {
-                    self.chr[3] as usize * 4 + slot
-                } else {
-                    self.chr[7] as usize * 4 + slot - 4
-                }
+        if background {
+            match self.chr_mode & 3 {
+                0 => self.chr[11] as usize * 8 + slot,
+                1 => self.chr[11] as usize * 4 + slot % 4,
+                2 => self.chr[9 + (slot / 2 % 2) * 2] as usize * 2 + slot % 2,
+                _ => self.chr[8 + slot % 4] as usize,
             }
-            2 => self.chr[slot / 2] as usize * 2 + slot % 2,
-            _ => self.chr[slot] as usize,
+        } else {
+            match self.chr_mode & 3 {
+                0 => self.chr[7] as usize * 8 + slot,
+                1 => self.chr[if slot < 4 { 3 } else { 7 }] as usize * 4 + slot % 4,
+                2 => self.chr[slot / 2 * 2 + 1] as usize * 2 + slot % 2,
+                _ => self.chr[slot] as usize,
+            }
         }
     }
 }
@@ -1805,7 +2107,7 @@ impl Mapper for MMC5 {
             }
             0x5205 => (self.multiplier_a as u16 * self.multiplier_b as u16) as u8,
             0x5206 => ((self.multiplier_a as u16 * self.multiplier_b as u16) >> 8) as u8,
-            0x5204 => (self.irq_pending as u8) << 7,
+            0x5204 => ((self.irq_pending.replace(false) as u8) << 7) | ((self.in_frame as u8) << 6),
             0x6000..=0x7fff => read_sram(&self.cartridge, address),
             0x8000..=0xffff => prg_8k(
                 &self.cartridge,
@@ -1814,6 +2116,24 @@ impl Mapper for MMC5 {
             ),
             _ => 0,
         }
+    }
+
+    fn read_background_chr(&self, address: u16) -> u8 {
+        let background = self.tall_sprites;
+        read_chr_1k(
+            &self.cartridge,
+            self.chr_bank_for_set(address, background),
+            address as usize,
+        )
+    }
+
+    fn read_sprite_chr(&self, address: u16) -> u8 {
+        let background = false;
+        read_chr_1k(
+            &self.cartridge,
+            self.chr_bank_for_set(address, background),
+            address as usize,
+        )
     }
 
     fn write(&mut self, address: u16, data: u8) {
@@ -1835,13 +2155,15 @@ impl Mapper for MMC5 {
                 }
             }
             0x5113..=0x5117 => self.prg[(address - 0x5113) as usize] = data,
-            0x5120..=0x512b => self.chr[(address - 0x5120) as usize] = data as u16,
+            0x5120..=0x512b => {
+                self.chr[(address - 0x5120) as usize] =
+                    u16::from(data) | (u16::from(self.chr_upper) << 8);
+                self.chr_background_selected = address >= 0x5128;
+            }
+            0x5130 => self.chr_upper = data & 3,
             0x5203 => self.irq_line = data,
             0x5204 => {
                 self.irq_enabled = data & 0x80 != 0;
-                if !self.irq_enabled {
-                    self.irq_pending = false;
-                }
             }
             0x5205 => self.multiplier_a = data,
             0x5206 => self.multiplier_b = data,
@@ -1859,18 +2181,29 @@ impl Mapper for MMC5 {
         }
     }
 
+    fn notify_ppu_control(&mut self, data: u8) {
+        self.tall_sprites = data & 0x20 != 0;
+    }
+
+    fn end_frame(&mut self) {
+        self.in_frame = false;
+        self.scanline = 0;
+    }
+
     fn clock_scanline(&mut self) {
-        self.scanline = self.scanline.wrapping_add(1);
-        if self.irq_enabled && self.scanline == self.irq_line {
-            self.irq_pending = true;
-        }
-        if self.scanline >= 241 {
+        if self.in_frame {
+            self.scanline = self.scanline.wrapping_add(1);
+        } else {
+            self.in_frame = true;
             self.scanline = 0;
+        }
+        if self.scanline != 0 && self.scanline == self.irq_line {
+            self.irq_pending.set(true);
         }
     }
 
     fn irq_pending(&self) -> bool {
-        self.irq_pending
+        self.irq_enabled && self.irq_pending.get()
     }
 }
 
@@ -2057,7 +2390,7 @@ pub fn new(cartridge: Cartridge, mapper: u8) -> Option<Box<dyn Mapper>> {
         50 => Box::new(Mapper50::new(cartridge)),
         21 | 22 | 23 | 25 => Box::new(VRC::new(cartridge, mapper)),
         24 | 26 => Box::new(VRC::new(cartridge, mapper)),
-        64 => Box::new(MMC3::new(cartridge)),
+        64 => Box::new(RAMBO1::new(cartridge)),
         34 => Box::new(BNROM::new(cartridge)),
         66 => Box::new(GxROM::new(cartridge)),
         69 => Box::new(FME7::new(cartridge)),
@@ -2130,7 +2463,7 @@ mod tests {
         for (id, register, value) in [
             (3, 0x8000, 2),
             (11, 0x8000, 0x20),
-            (66, 0x8000, 0x20),
+            (66, 0x8000, 0x02),
             (96, 0x8000, 2),
             (99, 0x4016, 4),
         ] {
@@ -2228,6 +2561,30 @@ mod tests {
         assert_eq!(mapper.read(0x0000), 1);
     }
 
+    #[test]
+    fn vs_chr_switch_does_not_replace_the_first_prg_page_in_32k_games() {
+        let mut mapper = new(cartridge(2, 2), 99).unwrap();
+        for bit in [0, 4, 0, 4] {
+            mapper.write(0x4016, bit);
+            assert_eq!(mapper.read(0x8000), 0);
+            assert_eq!(mapper.read_page(0x80).unwrap()[0], 0);
+        }
+        let mut gumshoe = new(cartridge(4, 2), 99).unwrap();
+        gumshoe.write(0x4016, 4);
+        assert_eq!(gumshoe.read(0x8000), 2);
+        assert_eq!(gumshoe.read_page(0x80).unwrap()[0], 2);
+    }
+
+    #[test]
+    fn vs_palette_detection_is_checksum_scoped_and_preserves_unknown_boards() {
+        assert_eq!(crc32(b"123456789".iter().copied()), 0xcbf4_3926);
+        let palette = vs_palette_for_prg_crc(0x8192_c804).unwrap();
+        assert_eq!(palette[0x1a], 0x22); // VS SMB's sky, not ordinary NES green.
+        assert!(palette.iter().all(|&color| color < 64));
+        assert!(vs_palette_for_prg_crc(0).is_none());
+        assert!(new(cartridge(2, 2), 99).unwrap().palette_map().is_none());
+    }
+
     fn write_mmc1(mapper: &mut dyn Mapper, address: u16, value: u8) {
         for bit in 0..5 {
             mapper.write(address, (value >> bit) & 1);
@@ -2316,6 +2673,160 @@ mod tests {
         vrc6.write(0xc000, 3);
         assert_eq!(vrc6.read(0x8000), 2);
         assert_eq!(vrc6.read(0xc000), 1);
+    }
+
+    #[test]
+    fn gxrom_uses_high_bits_for_prg_and_low_bits_for_chr() {
+        let mut mapper = new(chr_page_cartridge(), 66).unwrap();
+        mapper.write(0x8000, 0x12);
+        assert_eq!(mapper.read(0x8000), 2);
+        assert_eq!(mapper.read(0xc000), 3);
+        assert_eq!(mapper.read_page(0x80).unwrap()[0], 2);
+        assert_eq!(mapper.read_page(0xc0).unwrap()[0], 3);
+        assert_chr_window(mapper.as_ref(), 0, 0x2000, 16);
+    }
+
+    #[test]
+    fn fme7_switches_6000_window_between_rom_enabled_ram_and_disabled_ram() {
+        let mut mapper = new(cartridge(8, 4), 69).unwrap();
+        mapper.write(0x8000, 8);
+        mapper.write(0xa000, 0xc0);
+        mapper.write(0x6000, 0x5a);
+        mapper.write(0x7fff, 0xa5);
+        assert_eq!(mapper.read(0x6000), 0x5a);
+        assert_eq!(mapper.read(0x7fff), 0xa5);
+        assert!(mapper.read_page(0x60).is_none());
+        mapper.write(0xa000, 0x40);
+        mapper.write(0x6000, 0xff);
+        mapper.write(0xa000, 0xc0);
+        assert_eq!(mapper.read(0x6000), 0x5a);
+        mapper.write(0xa000, 3);
+        assert_eq!(mapper.read(0x6000), 1);
+        assert_eq!(mapper.read_page(0x60).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn rambo1_has_three_prg_registers_and_a_four_bit_selector() {
+        let mut mapper = new(cartridge(8, 4), 64).unwrap();
+        for (register, bank) in [(6, 2), (7, 4), (15, 6)] {
+            mapper.write(0x8000, register);
+            mapper.write(0x8001, bank);
+        }
+        for (page, value) in [(0x80, 1), (0xa0, 2), (0xc0, 3), (0xe0, 7)] {
+            assert_eq!(mapper.read((page as u16) << 8), value);
+            assert_eq!(mapper.read_page(page).unwrap()[0], value);
+        }
+        mapper.write(0x8000, 0x40);
+        for (page, value) in [(0x80, 3), (0xa0, 1), (0xc0, 2), (0xe0, 7)] {
+            assert_eq!(mapper.read((page as u16) << 8), value);
+            assert_eq!(mapper.read_page(page).unwrap()[0], value);
+        }
+    }
+
+    #[test]
+    fn rambo1_supports_independent_chr_subpages_and_inversion() {
+        let mut mapper = new(chr_page_cartridge(), 64).unwrap();
+        for (register, bank) in [
+            (0, 2),
+            (1, 6),
+            (2, 12),
+            (3, 13),
+            (4, 14),
+            (5, 15),
+            (8, 20),
+            (9, 24),
+        ] {
+            mapper.write(0x8000, register | 0x20);
+            mapper.write(0x8001, bank);
+        }
+        for (slot, bank) in [2, 20, 6, 24, 12, 13, 14, 15].into_iter().enumerate() {
+            assert_chr_window(mapper.as_ref(), slot as u16 * 0x400, 0x400, bank);
+        }
+        mapper.write(0x8000, 0xa0);
+        for (slot, bank) in [12, 13, 14, 15, 2, 20, 6, 24].into_iter().enumerate() {
+            assert_chr_window(mapper.as_ref(), slot as u16 * 0x400, 0x400, bank);
+        }
+    }
+
+    #[test]
+    fn rambo1_cpu_irq_clocks_every_four_cycles_and_acknowledges() {
+        let mut mapper = new(cartridge(8, 4), 64).unwrap();
+        mapper.write(0xc000, 1);
+        mapper.write(0xc001, 1);
+        mapper.write(0xe001, 0);
+        for _ in 0..8 {
+            mapper.clock_scanline();
+            mapper.clock_cpu();
+            assert!(!mapper.irq_pending());
+        }
+        mapper.clock_cpu();
+        assert!(mapper.irq_pending());
+        mapper.write(0xe000, 0);
+        assert!(!mapper.irq_pending());
+    }
+
+    #[test]
+    fn mmc5_separates_background_and_sprite_chr_with_8x16_sprites() {
+        let mut mapper = new(chr_page_cartridge(), 5).unwrap();
+        mapper.notify_ppu_control(0x20);
+        mapper.write(0x5101, 1);
+        mapper.write(0x5123, 1);
+        mapper.write(0x5127, 2);
+        mapper.write(0x512b, 3);
+        assert_eq!(mapper.read_background_chr(0x0400), 13);
+        assert_eq!(mapper.read_background_chr(0x1400), 13);
+        assert_eq!(mapper.read_sprite_chr(0x0400), 5);
+        assert_eq!(mapper.read_sprite_chr(0x1400), 9);
+        // PPUDATA uses the last set in 8x16 mode; 8x8 fetches always use A.
+        mapper.notify_ppu_control(0x20);
+        assert_eq!(mapper.read(0x0400), 13);
+        mapper.notify_ppu_control(0);
+        assert_eq!(mapper.read_sprite_chr(0x0400), 5);
+        assert_eq!(mapper.read_background_chr(0x0400), 5);
+        assert_eq!(mapper.read(0x0400), 5);
+        mapper.write(0x5123, 1);
+        assert_eq!(mapper.read_background_chr(0x0400), 5);
+        assert_eq!(mapper.read(0x0400), 5);
+        mapper.notify_ppu_control(0x20);
+        let wrapper = MapperInstance::Dynamic(mapper);
+        assert_eq!(wrapper.read_background_chr(0x0400), 13);
+        assert_eq!(wrapper.read_sprite_chr(0x0400), 5);
+    }
+
+    #[test]
+    fn mmc5_irq_status_read_acknowledges_and_each_frame_restarts_the_counter() {
+        let mut mapper = new(cartridge(8, 4), 5).unwrap();
+        mapper.write(0x5203, 1);
+        mapper.write(0x5204, 0x80);
+        mapper.clock_scanline();
+        assert_eq!(mapper.read(0x5204), 0x40);
+        mapper.clock_scanline();
+        assert!(mapper.irq_pending());
+        assert_eq!(mapper.read(0x5204), 0xc0);
+        assert!(!mapper.irq_pending());
+        assert_eq!(mapper.read(0x5204), 0x40);
+        mapper.end_frame();
+        assert_eq!(mapper.read(0x5204), 0);
+        mapper.clock_scanline();
+        assert!(!mapper.irq_pending());
+        mapper.clock_scanline();
+        assert!(mapper.irq_pending());
+    }
+
+    #[test]
+    fn mmc5_2k_chr_mode_uses_the_odd_numbered_registers() {
+        let mut mapper = new(chr_page_cartridge(), 5).unwrap();
+        mapper.write(0x5101, 2);
+        for (register, bank) in [(0x5121, 2), (0x5123, 4), (0x5125, 6), (0x5127, 8)] {
+            mapper.write(register, bank);
+        }
+        for (slot, first) in [4, 8, 12, 16].into_iter().enumerate() {
+            assert_eq!(mapper.read_sprite_chr(slot as u16 * 0x800), first);
+            assert_eq!(
+                mapper.read_sprite_chr(slot as u16 * 0x800 + 0x400),
+                first + 1
+            );
+        }
     }
 
     #[test]

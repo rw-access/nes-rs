@@ -2443,7 +2443,12 @@ mod tests {
 
         let mut cpu = super::CPU::default();
         let mut bus = preflight_bus(&[0xa9, 0x42]);
-        bus.ppu.in_vblank = true;
+        // Reach a real vblank edge so PPUSTATUS.7 is set as well as the
+        // timing-period flag. Enabling NMI after a status read must not fire.
+        let mut screen = crate::ppu::Screen::default();
+        while !bus.ppu.in_vblank {
+            bus.ppu.step(&mut bus.mapper, &mut screen);
+        }
         bus.ppu.write_register(&mut bus.mapper, 0x2000, 0x80);
         cpu.pc = 0x8000;
         cpu.prepare_timestamped(&bus);

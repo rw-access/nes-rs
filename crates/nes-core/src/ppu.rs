@@ -453,6 +453,7 @@ pub(crate) struct PPU {
     oam: [u8; 256],
     secondary_oam: [u8; 32],
     palette_ram: [u8; 32],
+    palette_map: Option<&'static [u8; 64]>,
     nametables: [u8; 4096],
     nametable_mirroring: MirroringMode,
     nametable_map: [u16; 4096],
@@ -482,6 +483,7 @@ impl Default for PPU {
             oam: [0; 256],
             secondary_oam: Default::default(),
             palette_ram: [0; 32],
+            palette_map: None,
             nametables: [0; 4096],
             nametable_mirroring: MirroringMode::Horizontal,
             nametable_map: Self::build_nametable_map(MirroringMode::Horizontal),
@@ -601,6 +603,7 @@ impl PPU {
 
     #[inline]
     pub(crate) fn refresh_nametable_mirroring<M: Mapper + ?Sized>(&mut self, mapper: &M) {
+        self.palette_map = mapper.palette_map();
         self.nametable_mirroring = mapper.mirror();
         self.nametable_map = Self::build_nametable_map(self.nametable_mirroring);
     }
@@ -641,6 +644,25 @@ impl PPU {
         ];
 
         (multiplexer_decision, colors[multiplexer_decision as usize])
+    }
+
+    #[inline(always)]
+    fn sprite_zero_hit(
+        mask: u8,
+        x: usize,
+        zero_in_line: bool,
+        background: u8,
+        sprite: SpritePixel,
+    ) -> bool {
+        // Collision depends on opaque pattern pixels, not on which layer wins
+        // the priority mux. Both rendering enables and left-edge masks apply.
+        zero_in_line
+            && sprite.position == 0
+            && background != 0
+            && sprite.palette != 0
+            && mask & 0x18 == 0x18
+            && x < 255
+            && (x >= 8 || mask & 0x06 == 0x06)
     }
 
     fn rendering_enabled(&self) -> bool {
@@ -1009,9 +1031,9 @@ impl PPU {
                 SpritePixel::default()
             };
 
-            let sprite_drawn = if WRITE_OUTPUT {
+            if WRITE_OUTPUT {
                 let tile_palette_offset = (tile.palette & 0x3) << 2;
-                let (decision, color) = PPU::multiplex_colors(
+                let (_decision, color) = PPU::multiplex_colors(
                     tile_palette,
                     tile_palette_offset,
                     sprite.palette,
@@ -1027,18 +1049,11 @@ impl PPU {
                     tile_palette,
                     tile_palette_offset,
                     sprite,
-                    decision == MultiplexerDecision::DrawSprite,
+                    _decision == MultiplexerDecision::DrawSprite,
                 );
-                decision == MultiplexerDecision::DrawSprite
-            } else {
-                // The headless path only needs the pixel occupancy and the
-                // sprite priority to reproduce sprite-zero-hit. Avoid
-                // constructing palette indices or looking up the palette RAM.
-                let background_nonzero = tile_palette != 0;
-                let sprite_nonzero = sprite.palette != 0;
-                sprite_nonzero && (!background_nonzero || !sprite.behind_background)
-            };
-            let zero_hit = sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
+            }
+            let zero_hit =
+                Self::sprite_zero_hit(self.mask_reg, x, sprite_zero_in_line, tile_palette, sprite);
             status_reg |= (zero_hit as u8) << 6;
 
             self.cycle_in_scanline = tile_start + dot;
@@ -1180,9 +1195,9 @@ impl PPU {
                     SpritePixel::default()
                 };
 
-                let sprite_drawn = if WRITE_OUTPUT {
+                if WRITE_OUTPUT {
                     let tile_palette_offset = (tile.palette & 0x3) << 2;
-                    let (decision, color) = PPU::multiplex_colors(
+                    let (_decision, color) = PPU::multiplex_colors(
                         tile_palette,
                         tile_palette_offset,
                         sprite.palette,
@@ -1198,15 +1213,16 @@ impl PPU {
                         tile_palette,
                         tile_palette_offset,
                         sprite,
-                        decision == MultiplexerDecision::DrawSprite,
+                        _decision == MultiplexerDecision::DrawSprite,
                     );
-                    decision == MultiplexerDecision::DrawSprite
-                } else {
-                    let background_nonzero = tile_palette != 0;
-                    let sprite_nonzero = sprite.palette != 0;
-                    sprite_nonzero && (!background_nonzero || !sprite.behind_background)
-                };
-                let zero_hit = sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
+                }
+                let zero_hit = Self::sprite_zero_hit(
+                    self.mask_reg,
+                    x,
+                    sprite_zero_in_line,
+                    tile_palette,
+                    sprite,
+                );
                 status_reg |= (zero_hit as u8) << 6;
             }
 
@@ -1390,7 +1406,6 @@ impl PPU {
             }
         }
 
-        self.status_reg &= 1 << 5;
         self.status_reg |= (overflow as u8) << 5;
     }
 
@@ -1421,9 +1436,9 @@ impl PPU {
             SpritePixel::default()
         };
 
-        let sprite_drawn = if WRITE_OUTPUT {
+        if WRITE_OUTPUT {
             let tile_palette_offset = (tile.palette & 0x3) << 2;
-            let (decision, color) = PPU::multiplex_colors(
+            let (_decision, color) = PPU::multiplex_colors(
                 tile_palette,
                 tile_palette_offset,
                 sprite.palette,
@@ -1439,18 +1454,25 @@ impl PPU {
                 tile_palette,
                 tile_palette_offset,
                 sprite,
-                decision == MultiplexerDecision::DrawSprite,
+                _decision == MultiplexerDecision::DrawSprite,
             );
-            decision == MultiplexerDecision::DrawSprite
-        } else {
-            let background_nonzero = tile_palette != 0;
-            let sprite_nonzero = sprite.palette != 0;
-            sprite_nonzero && (!background_nonzero || !sprite.behind_background)
-        };
-        let zero_hit = self.sprite_zero_in_line && sprite.position == 0 && sprite_drawn;
+        }
+        let zero_hit = Self::sprite_zero_hit(
+            self.mask_reg,
+            x as usize,
+            self.sprite_zero_in_line,
+            tile_palette,
+            sprite,
+        );
 
         // set the sprite zero hit bit
         self.status_reg |= (zero_hit as u8) << 6;
+    }
+
+    #[inline(always)]
+    fn display_color(&self, color: u8) -> u8 {
+        self.palette_map
+            .map_or(color, |map| map[(color & 0x3f) as usize])
     }
 
     #[inline(always)]
@@ -1462,7 +1484,8 @@ impl PPU {
         color: u8,
     ) {
         if WRITE_OUTPUT {
-            screen.pixels[y][x] = self.palette_ram[PPU::mirror_palette(color) as usize];
+            screen.pixels[y][x] =
+                self.display_color(self.palette_ram[PPU::mirror_palette(color) as usize]);
         }
     }
 
@@ -1482,11 +1505,12 @@ impl PPU {
         let background_color = tile_palette_offset | tile_palette;
         let sprite_color = 0x10 | sprite.palette_offset | sprite.palette;
 
-        screen.layers.backdrop[y][x] = palette[0];
+        screen.layers.backdrop[y][x] = self.display_color(palette[0]);
         screen.layers.background.pixels[y][x] =
-            palette[PPU::mirror_palette(background_color) as usize];
+            self.display_color(palette[PPU::mirror_palette(background_color) as usize]);
         screen.layers.background.coverage[y][x] = (tile_palette != 0) as u8;
-        screen.layers.sprites.pixels[y][x] = palette[PPU::mirror_palette(sprite_color) as usize];
+        screen.layers.sprites.pixels[y][x] =
+            self.display_color(palette[PPU::mirror_palette(sprite_color) as usize]);
         screen.layers.sprites.coverage[y][x] = (sprite.palette != 0) as u8;
         screen.layers.behind_background[y][x] =
             (sprite.palette != 0 && sprite.behind_background) as u8;
@@ -1599,13 +1623,13 @@ impl PPU {
             let pattern_low = mapper
                 .read_chr_page((tile_address_lo >> 8) as u8)
                 .map_or_else(
-                    || mapper.read(tile_address_lo),
+                    || mapper.read_sprite_chr(tile_address_lo),
                     |page| page[(tile_address_lo & 0xff) as usize],
                 );
             let pattern_high = mapper
                 .read_chr_page((tile_address_hi >> 8) as u8)
                 .map_or_else(
-                    || mapper.read(tile_address_hi),
+                    || mapper.read_sprite_chr(tile_address_hi),
                     |page| page[(tile_address_hi & 0xff) as usize],
                 );
 
@@ -1649,8 +1673,9 @@ impl PPU {
 
     fn step_post_render<M: Mapper + ?Sized>(&mut self, _mapper: &M) {}
 
-    fn step_vblank<M: Mapper + ?Sized>(&mut self, _mapper: &M) {
+    fn step_vblank<M: Mapper + ?Sized>(&mut self, mapper: &mut M) {
         if self.scanline == 241 && self.cycle_in_scanline == 1 {
+            mapper.end_frame();
             self.in_vblank = true;
             self.status_reg |= 0b1000_0000; // nmi occurred bit
 
@@ -1661,8 +1686,8 @@ impl PPU {
     fn step_pre_render<M: Mapper + ?Sized>(&mut self, mapper: &M) {
         // Pre-render scanline (-1 or 261)
         if self.cycle_in_scanline == 1 {
-            // disable sprite zero hit + nmi occurred
-            self.status_reg &= !0b1100_0000;
+            // Clear vblank, sprite-zero-hit, and sprite-overflow flags.
+            self.status_reg &= !0b1110_0000;
             self.in_vblank = false;
             self.pending_nmi = false;
         }
@@ -1877,7 +1902,7 @@ impl PPU {
     fn read_chr_byte<M: Mapper + ?Sized>(mapper: &M, addr: u16) -> u8 {
         match mapper.read_chr_page((addr >> 8) as u8) {
             Some(page) => page[(addr & 0xff) as usize],
-            None => mapper.read(addr),
+            None => mapper.read_background_chr(addr),
         }
     }
 
@@ -1985,12 +2010,19 @@ impl PPU {
                 let parsed_prev_ctrl = PPUControl::from(self.control_reg);
                 let parsed_next_ctrl = PPUControl::from(data);
 
-                // detect if in vblank and a positive edge on enable_nmi, then send interrupt
+                // NMI is gated by the PPUSTATUS vblank flag, which a status
+                // read clears even while the PPU remains in the vblank period.
                 // https://www.nesdev.org/wiki/NMI
-                if self.in_vblank && !parsed_prev_ctrl.enable_nmi && parsed_next_ctrl.enable_nmi {
+                if self.status_reg & 0x80 != 0
+                    && !parsed_prev_ctrl.enable_nmi
+                    && parsed_next_ctrl.enable_nmi
+                {
                     self.pending_nmi = true;
                 }
 
+                if addr == 0x2000 {
+                    mapper.notify_ppu_control(data);
+                }
                 self.control_reg = data;
                 self.t = {
                     let mut t = VRAMAddress::from(self.t);
@@ -2746,7 +2778,7 @@ mod timestamped_tests {
 
     #[test]
     fn headless_pixel_fast_path_matches_sprite_zero_hit_selection() {
-        for mask in [0x08, 0x10, 0x18] {
+        for mask in [0x08, 0x10, 0x18, 0x1e] {
             for background_palette in 0..=3 {
                 for sprite_palette in 0..=3 {
                     for behind_background in [false, true] {
@@ -2787,8 +2819,10 @@ mod timestamped_tests {
                         let sprite_enabled = mask & 0x10 != 0;
                         let sprite_nonzero = sprite_enabled && sprite_palette != 0;
                         let background_nonzero = background_palette != 0;
-                        let expected_zero_hit =
-                            sprite_nonzero && (!background_nonzero || !behind_background);
+                        let expected_zero_hit = sprite_nonzero
+                            && background_nonzero
+                            && mask & 0x18 == 0x18
+                            && mask & 0x06 == 0x06;
                         assert_eq!(rendered.status_reg & 0x40 != 0, expected_zero_hit);
                     }
                 }
@@ -3150,7 +3184,7 @@ mod timestamped_tests {
     fn timestamped_headless_skips_sprite_preparation_only_without_sprite_zero() {
         let mut base = PPU::default();
         base.control_reg = 0x00;
-        base.mask_reg = 0x18;
+        base.mask_reg = 0x1e; // Sprite zero is at x=0: enable both left-edge layers.
         base.oam.fill(0xff);
 
         // Sprite 1 is visible on the first line, while sprite 0 appears on
@@ -3177,12 +3211,113 @@ mod timestamped_tests {
         }
 
         // The second line's sprites are now in the one-line-ahead pipeline.
-        // Consume one visible tile before sprite evaluation for the next line
-        // clears the status bit again.
+        // Consume one visible tile to check the collision rule when sprite
+        // zero is present, including left-edge visibility.
         exact.catch_up_visible_tile::<true, _>(1, &mut exact_mapper, &mut exact_screen);
         headless.catch_up_visible_tile::<false, _>(1, &mut headless_mapper, &mut headless_screen);
         assert_same_observable_state(&exact, &headless);
         assert_ne!(exact.status_reg & 0x40, 0);
         assert_eq!(headless_screen.pixels, Screen::default().pixels);
+    }
+}
+
+#[cfg(test)]
+mod nmi_gate_tests {
+    use super::*;
+    use crate::cartridge::{Cartridge, MirroringMode, CHR, PRG};
+    use std::rc::Rc;
+
+    fn mapper() -> Box<dyn Mapper> {
+        crate::cartridge::new(
+            Cartridge {
+                prg: Rc::new(PRG {
+                    banks: vec![[0; 0x4000]],
+                }),
+                chr: CHR::RAM(vec![[0; 0x2000]]),
+                sram: vec![[0; 0x2000]],
+                mirror: MirroringMode::Horizontal,
+            },
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sprite_evaluation_preserves_collision_and_vblank_flags() {
+        let mut ppu = PPU::default();
+        ppu.status_reg = 0xe0;
+        ppu.find_sprites_in_line();
+        assert_eq!(ppu.status_reg & 0xe0, 0xe0);
+        let mut mapper = mapper();
+        ppu.scanline = 261;
+        ppu.cycle_in_scanline = 1;
+        ppu.step_pre_render(mapper.as_mut());
+        assert_eq!(ppu.status_reg & 0xe0, 0);
+    }
+
+    #[test]
+    fn sprite_zero_collision_ignores_priority_but_requires_overlap_and_visibility() {
+        for behind_background in [false, true] {
+            let sprite = SpritePixel {
+                palette: 1,
+                position: 0,
+                behind_background,
+                ..SpritePixel::default()
+            };
+            assert!(PPU::sprite_zero_hit(0x1e, 16, true, 1, sprite));
+            assert!(!PPU::sprite_zero_hit(0x1e, 16, true, 0, sprite));
+            assert!(!PPU::sprite_zero_hit(0x1e, 255, true, 1, sprite));
+            assert!(!PPU::sprite_zero_hit(0x18, 0, true, 1, sprite));
+            assert!(PPU::sprite_zero_hit(0x1e, 0, true, 1, sprite));
+            assert!(!PPU::sprite_zero_hit(0x10, 16, true, 1, sprite));
+            assert!(!PPU::sprite_zero_hit(0x08, 16, true, 1, sprite));
+        }
+    }
+
+    #[test]
+    fn rgb_palette_permutation_changes_output_without_changing_palette_ram() {
+        static MAP: [u8; 64] = [0x22; 64];
+        let mut ppu = PPU::default();
+        let mapper = mapper();
+        ppu.palette_map = Some(&MAP);
+        ppu.palette_ram[0] = 0x1a;
+        let mut screen = Screen::default();
+        ppu.write_pixel::<true>(&mut screen, 0, 0, 0);
+        assert_eq!(screen.pixels[0][0], 0x22);
+        assert_eq!(ppu.read_byte(mapper.as_ref(), 0x3f00), 0x1a);
+        #[cfg(feature = "layered-render")]
+        {
+            ppu.write_layer_pixels(&mut screen, 0, 0, 0, 0, SpritePixel::default(), false);
+            assert_eq!(screen.layers.backdrop[0][0], 0x22);
+            assert_eq!(screen.layers.background.pixels[0][0], 0x22);
+        }
+    }
+
+    #[test]
+    fn status_read_prevents_nmi_when_enabled_later_in_same_vblank() {
+        let mut mapper = mapper();
+        let mut ppu = PPU::default();
+        ppu.in_vblank = true;
+        ppu.status_reg = 0x80;
+        assert_eq!(ppu.read_register(mapper.as_ref(), 0x2002) & 0x80, 0x80);
+        ppu.apply_deferred_read();
+        assert!(ppu.in_vblank);
+        ppu.write_register(mapper.as_mut(), 0x2000, 0x80);
+        assert!(!ppu.read_nmi_line());
+    }
+
+    #[test]
+    fn enabling_nmi_with_vblank_flag_set_generates_an_edge() {
+        let mut mapper = mapper();
+        let mut ppu = PPU::default();
+        ppu.in_vblank = true;
+        ppu.status_reg = 0x80;
+        ppu.write_register(mapper.as_mut(), 0x2000, 0x80);
+        assert!(ppu.read_nmi_line());
+        ppu.write_register(mapper.as_mut(), 0x2000, 0x80);
+        assert!(!ppu.read_nmi_line());
+        ppu.write_register(mapper.as_mut(), 0x2000, 0);
+        ppu.write_register(mapper.as_mut(), 0x2000, 0x80);
+        assert!(ppu.read_nmi_line());
     }
 }
