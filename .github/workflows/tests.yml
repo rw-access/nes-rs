@@ -19,6 +19,9 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+      - name: Run mapper smoke harness checks
+        run: python3 -m unittest discover -s tests/mapper-smoke
+
   python:
     name: Python Gym tests
     runs-on: ubuntu-latest

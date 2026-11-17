@@ -39,6 +39,14 @@ Set `NES_TEST_ROM_ROOT` to use a different checkout of the ROM repository. The
 test is skipped when `NES_RUN_APU_ROM_TESTS` is not set to `1`, so ordinary
 `cargo test` does not require the submodule or execute ROMs.
 
+## Mapper game smoke suite
+
+The opt-in [mapper smoke suite](tests/mapper-smoke/README.md) captures a game
+before and after Start for each available mapper, with isolated timeouts, a
+contact sheet, ROM identities, explicit coverage gaps, and optional comparison
+against a reviewed previous run. It requires owner-supplied ROMs and does not
+accept current output as a correctness baseline automatically.
+
 ## FM2 movie to MP4 exporter
 
 The native `fm2_to_mp4` tool replays a plain-text FCEUX version-3 movie against

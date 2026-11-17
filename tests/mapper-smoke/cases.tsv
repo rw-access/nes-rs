@@ -1,0 +1,28 @@
+# mapper<TAB>ROM path relative to --rom-root (empty = unavailable)<TAB>boot frame<TAB>Start frame<TAB>post-Start frame<TAB>notes
+0	Balloon Fight.nes	450	451	720	
+1	Legend of Zelda, The.nes	450	451	720	CHR RAM; post-Start is file selection
+2	Castlevania.nes	450	451	720	
+3	Adventure Island.nes	450	451	720	
+4	Adventure Island II.nes	450	451	720	
+5	Castlevania III - Dracula's Curse.nes	600	601	3000	Castle intro then story; one Start pulse does not guarantee gameplay
+7	Battletoads.nes	900	901	1200	Boot capture targets the animated intro after the initial fade
+9	Punch-Out!!.nes	600	601	900	
+10		450	451	720	No MMC4 ROM in the collection
+11	Spiritual Warfare.nes	600	601	900	
+15		450	451	720	No matching ROM in the collection
+19		450	451	720	No Namco 163 ROM in the collection
+20		450	451	720	FDS wrapper only; disk I/O is not implemented
+21		450	451	720	No matching VRC ROM in the collection
+22		450	451	720	No matching VRC ROM in the collection
+23		450	451	720	No matching VRC ROM in the collection
+24		450	451	720	No matching VRC6 ROM in the collection
+25		450	451	720	No matching VRC ROM in the collection
+26		450	451	720	No matching VRC6 ROM in the collection
+34	Deadly Towers.nes	450	451	720	
+50		450	451	720	No matching ROM in the collection
+64	Klax.nes	600	601	900	Use a real banked image; reject NROM fallback dumps
+66	Dragon Power.nes	450	451	720	
+69	Batman - Return of the Joker.nes	1800	1801	3000	Allow startup/fade before title capture
+96		450	451	720	No matching ROM in the collection; implementation aliases CNROM
+99	VS Super Mario Bros. (VS).nes	600	601	900	Arcade coin/DIP controls are not supplied; Start may not enter gameplay
+224		450	451	720	No matching ROM in the collection; implementation aliases MMC3
