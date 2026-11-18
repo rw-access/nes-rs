@@ -1,5 +1,5 @@
 // Original synthetic NROM scene; no commercial ROM or user data is needed.
-export function fixtureRom({ backgroundIndex = 0x21 } = {}) {
+export function fixtureRom({ backgroundIndex = 0x21, animateSprite = false } = {}) {
   const prg = Buffer.alloc(16384, 0xea), chr = Buffer.alloc(8192);
   const code = [], labels = {}, fixups = [];
   const emit = (...bytes) => code.push(...bytes);
@@ -15,8 +15,15 @@ export function fixtureRom({ backgroundIndex = 0x21 } = {}) {
   for (const name of ["tiles0","tiles1","tiles2","tiles3"]) { address(0xbd,name); emit(0x8d,7,0x20); }
   // Four interleaved pages are fine for a synthetic scene; all bytes are valid tiles.
   emit(0xe8); branch(0xd0,"tilesLoop");
-  emit(0xa9,0,0x8d,5,0x20,0x8d,5,0x20,0xa9,0x0a,0x8d,1,0x20);
-  label("forever"); address(0x4c,"forever");
+  emit(0xa9,0,0x8d,5,0x20,0x8d,5,0x20,0xa9,animateSprite ? 0x1e : 0x0a,0x8d,1,0x20);
+  label("forever");
+  if (animateSprite) {
+    emit(0x2c,2,0x20); branch(0x10,"forever"); // write sprite 0 during vblank
+    emit(0xa9,0,0x8d,3,0x20);                   // set OAM address
+    for (const v of [95,2,0]) emit(0xa9,v,0x8d,4,0x20); // Y, tile, attributes
+    emit(0xa5,0,0x29,0x7f,0x18,0x69,48,0x8d,4,0x20,0xe6,0); // X = 48 + (frame % 128)
+  }
+  address(0x4c,"forever");
   label("palette"); emit(...Array.from({length:32},(_,i)=>[backgroundIndex,0x19,0x29,0x30][i%4]));
   for (let n=0;n<4;n++) { label(`tiles${n}`); emit(...Array.from({length:256},(_,i)=> (i+n*256)>832 ? 2 : (i%32<4 || i%32>27) ? 1 : 0)); }
   for (const [offset,name,relative] of fixups) {

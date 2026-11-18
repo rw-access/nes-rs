@@ -120,7 +120,7 @@ export function createDioramaView(host) {
     let pendingPlacement = false, sessionBusy = false;
     let geometryDirty = true, xrRecenterHeld = false, orbit = { yaw: -0.28, pitch: 0.12, distance: 1.65, lookZ: -0.08 };
     let renderRequested = true, shadowsDirty = true, shadersReady = false, framesRendered = 0;
-    let meshBusy = false, meshEpoch = 0, forceMesh = true, lastMeshMs = 0, lastRenderMs = 0;
+    let meshBusy = false, meshEpoch = 0, forceMesh = true, meshSpare = null, lastMeshMs = 0, lastRenderMs = 0;
     let layoutKey = "", framesEmulated = 0, sceneFrames = 0;
     let statsStarted = performance.now(), statsRendered = 0, statsEmulated = 0, statsScene = 0, lastStatsReport = 0;
     let xrRevealStarted = null, xrRevealing = false;
@@ -151,18 +151,24 @@ export function createDioramaView(host) {
         backend: renderer.xr.useProjectionLayers ? "projection-layers" : "classic-base-layer", framesRendered };
     }
     if (window.nesVRReport) window.nesVRRuntimeState = runtimeState;
-    const mesher = new Worker(new URL("./vr-mesh-worker.js?v=2", import.meta.url), { type: "module" });
+    const mesher = new Worker(new URL("./vr-mesh-worker.js?v=3", import.meta.url), { type: "module" });
     mesher.onmessage = ({ data }) => {
       meshBusy = false;
+      if (data.pixels?.length === source.length && data.pixels.byteOffset === 0
+          && data.pixels.byteLength === data.pixels.buffer.byteLength) meshSpare = data.pixels;
       if (data.epoch !== meshEpoch) { geometryDirty = true; return; }
       if (data.error) { status.textContent = data.error; report("mesh-failed", { message: data.error }, true); return; }
       lastMeshMs = data.buildMs;
       const firstScene = !layers[0].initialized;
+      // Cached older workers may not have the mask. Keep the old exact
+      // byte compare as a correctness fallback across mixed asset versions.
+      const textureMask = Number.isInteger(data.textureMask) ? data.textureMask : null;
+      let textureChanged = false;
       for (let index = 0; index < 4; index++) {
         const layer = layers[index], pixels = data.pixels.subarray(index * BYTES, (index + 1) * BYTES);
-        let changed = !layer.initialized;
-        if (!changed) for (let i = 0; i < BYTES; i++) if (pixels[i] !== layer.pixels[i]) { changed = true; break; }
-        if (changed) { layer.pixels.set(pixels); layer.texture.needsUpdate = true; layer.initialized = true; }
+        let changed = !layer.initialized || (textureMask !== null && (textureMask & (1 << index)) !== 0);
+        if (textureMask === null && !changed) for (let i = 0; i < BYTES; i++) if (pixels[i] !== layer.pixels[i]) { changed = true; break; }
+        if (changed) { layer.pixels.set(pixels); layer.texture.needsUpdate = true; layer.initialized = textureChanged = true; }
       }
       for (const mesh of data.meshes) {
         const geometry = new THREE.BufferGeometry();
@@ -176,7 +182,11 @@ export function createDioramaView(host) {
       stage.dataset.vertices = vertexCounts.reduce((sum, n) => sum + n, 0);
       stage.dataset.ready = "true";
       sceneFrames++;
-      renderRequested = shadowsDirty = true;
+      if (textureChanged || data.meshes.length) renderRequested = true;
+      // Layer zero only receives shadows. A changed caster geometry may
+      // include color-only tessellation changes; conservatively redraw its
+      // shadow as before. Exact no-change replies need neither kind of draw.
+      if (data.meshes.length) shadowsDirty = true;
       if (firstScene && shadersReady) checkVR();
     };
     mesher.onerror = event => { meshBusy = false; report("mesh-worker-error", { message: event.message }, true); status.textContent = "Could not build edges. Reload the player to try again."; };
@@ -217,7 +227,8 @@ export function createDioramaView(host) {
       const nextLayout = [size, gap, thickness].join(":");
       if (nextLayout !== layoutKey) { updateViewPresentation(); renderRequested = shadowsDirty = true; layoutKey = nextLayout; }
       if (meshBusy) return;
-      const pixels = source.slice();
+      const pixels = meshSpare ?? new Uint8Array(source.length);
+      pixels.set(source); meshSpare = null;
       mesher.postMessage({ epoch: meshEpoch, pixels, thickness, force: forceMesh }, [pixels.buffer]);
       meshBusy = true; forceMesh = false; geometryDirty = false;
     }
