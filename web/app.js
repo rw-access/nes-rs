@@ -204,7 +204,7 @@ function tick(now) {
   requestAnimationFrame(tick);
 }
 async function ensureViewer() {
-  viewerPromise ??= import("./vr.js?v=8").then(({ createDioramaView }) => {
+  viewerPromise ??= import("./vr.js?v=9").then(({ createDioramaView }) => {
     viewer = createDioramaView({ buttons: BUTTONS, input: controllerInput, audio, getEmulator: () => emulator,
       isPlaying, isRewinding: () => rewinding, setRewind, clearInput, resetClock, pause: () => setPaused(true),
       tick: (now, state) => mode === "flat" ? 0 : advance(now, state),
