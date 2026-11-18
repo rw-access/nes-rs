@@ -16,6 +16,8 @@ pub(crate) mod ppu;
 pub mod snapshot;
 pub mod video;
 
+#[cfg(feature = "audio-dac-taps")]
+pub use console::AudioDacLevels;
 #[cfg(feature = "audio-stems")]
 pub use console::{AudioStems, AUDIO_STEM_CHANNELS};
 pub use console::{

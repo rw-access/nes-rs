@@ -27,6 +27,10 @@ pub const AUDIO_STEM_CHANNELS: usize = 5;
 #[cfg(feature = "audio-stems")]
 /// Per-sample channel order: Pulse 1, Pulse 2, Triangle, Noise, DMC.
 pub type AudioStems = [f32; AUDIO_STEM_CHANNELS];
+#[cfg(feature = "audio-dac-taps")]
+/// Emulated pre-mixer DAC codes in this order: pulse 1, pulse 2, triangle, noise, DMC.
+/// The first four are 0..=15; DMC is 0..=127. Codes are not linear PCM.
+pub type AudioDacLevels = [u8; 5];
 pub const CPU_RAM_BYTES: usize = 0x800;
 
 /// Selects whether the PPU writes final palette values to the framebuffer.
@@ -54,6 +58,11 @@ pub struct FrameOutput<'a> {
     #[cfg(feature = "audio-stems")]
     /// Five attributed channels at the same sample edges as `audio_samples`.
     pub audio_stems: &'a [AudioStems],
+    #[cfg(feature = "audio-dac-taps")]
+    /// Unmixed and unfiltered DAC codes at the same edges as `audio_samples`,
+    /// before presentation channel masks. Empty unless capture is enabled.
+    /// This is a point-sampled tap, not a cycle-complete transition stream.
+    pub audio_dac_levels: &'a [AudioDacLevels],
     pub audio_sample_rate: u32,
     pub audio_discontinuity: bool,
 }
@@ -386,6 +395,10 @@ pub struct Console {
     audio_samples: Vec<f32>,
     #[cfg(feature = "audio-stems")]
     audio_stems: Vec<AudioStems>,
+    #[cfg(feature = "audio-dac-taps")]
+    audio_dac_capture: bool,
+    #[cfg(feature = "audio-dac-taps")]
+    audio_dac_levels: Vec<AudioDacLevels>,
     in_rewind: bool,
     rewind_history_active: bool,
     rewind_exhausted: bool,
@@ -470,6 +483,8 @@ impl Console {
         self.audio_samples.clear();
         #[cfg(feature = "audio-stems")]
         self.audio_stems.clear();
+        #[cfg(feature = "audio-dac-taps")]
+        self.audio_dac_levels.clear();
         self.audio_reset.mark();
         #[cfg(feature = "layered-render")]
         self.screen.layers.clear();
@@ -537,6 +552,10 @@ impl Console {
             audio_samples: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
             #[cfg(feature = "audio-stems")]
             audio_stems: Vec::with_capacity((AUDIO_SAMPLE_RATE / 60) as usize + 1),
+            #[cfg(feature = "audio-dac-taps")]
+            audio_dac_capture: false,
+            #[cfg(feature = "audio-dac-taps")]
+            audio_dac_levels: Vec::new(),
             tape: RewindTape::new(Self::INITIAL_TAPE_STEP),
             in_rewind: false,
             rewind_history_active: false,
@@ -573,12 +592,26 @@ impl Console {
         self.video_output
     }
 
+    #[cfg(feature = "audio-dac-taps")]
+    /// Enable an opt-in DAC observation buffer for future frames. Capture is
+    /// off by default, does not affect emulation or the stock mixer, and is a
+    /// frontend choice rather than part of a save state. Observe
+    /// `FrameOutput::audio_discontinuity` for resets and rewind.
+    pub fn set_audio_dac_capture(&mut self, enabled: bool) {
+        self.audio_dac_capture = enabled;
+        if !enabled {
+            self.audio_dac_levels.clear();
+        }
+    }
+
     /// Emulate one frame and return its video/audio output.
     pub fn next_frame(&mut self) -> FrameOutput<'_> {
         let audio_discontinuity = self.audio_reset.take();
         self.audio_samples.clear();
         #[cfg(feature = "audio-stems")]
         self.audio_stems.clear();
+        #[cfg(feature = "audio-dac-taps")]
+        self.audio_dac_levels.clear();
 
         if self.rewind_exhausted {
             self.in_rewind = false;
@@ -593,6 +626,8 @@ impl Console {
                 audio_samples: &self.audio_samples,
                 #[cfg(feature = "audio-stems")]
                 audio_stems: &self.audio_stems,
+                #[cfg(feature = "audio-dac-taps")]
+                audio_dac_levels: &self.audio_dac_levels,
                 audio_sample_rate: AUDIO_SAMPLE_RATE,
                 audio_discontinuity,
             };
@@ -620,28 +655,28 @@ impl Console {
             let audio_samples = &mut self.audio_samples;
             #[cfg(feature = "audio-stems")]
             let audio_stems = &mut self.audio_stems;
+            #[cfg(feature = "audio-dac-taps")]
+            let dac_capture = self.audio_dac_capture;
+            #[cfg(feature = "audio-dac-taps")]
+            let audio_dac_levels = &mut self.audio_dac_levels;
+            let collect = |sample: AudioSample| {
+                audio_samples.push(sample.mono);
+                #[cfg(feature = "audio-stems")]
+                audio_stems.push(sample.stems);
+                #[cfg(feature = "audio-dac-taps")]
+                if dac_capture {
+                    audio_dac_levels.push(sample.dac_levels);
+                }
+            };
             match self.video_output {
                 VideoOutput::Enabled => {
-                    state.wait_vblank_with_mode::<true, false, _>(screen, |sample| {
-                        audio_samples.push(sample.mono);
-                        #[cfg(feature = "audio-stems")]
-                        audio_stems.push(sample.stems);
-                    });
+                    state.wait_vblank_with_mode::<true, false, _>(screen, collect)
+                }
+                VideoOutput::Disabled if self.aggressive_headless => {
+                    state.wait_vblank_with_mode::<false, true, _>(screen, collect)
                 }
                 VideoOutput::Disabled => {
-                    if self.aggressive_headless {
-                        state.wait_vblank_with_mode::<false, true, _>(screen, |sample| {
-                            audio_samples.push(sample.mono);
-                            #[cfg(feature = "audio-stems")]
-                            audio_stems.push(sample.stems);
-                        });
-                    } else {
-                        state.wait_vblank_with_mode::<false, false, _>(screen, |sample| {
-                            audio_samples.push(sample.mono);
-                            #[cfg(feature = "audio-stems")]
-                            audio_stems.push(sample.stems);
-                        });
-                    }
+                    state.wait_vblank_with_mode::<false, false, _>(screen, collect)
                 }
             }
         }
@@ -670,6 +705,8 @@ impl Console {
             audio_samples: &self.audio_samples,
             #[cfg(feature = "audio-stems")]
             audio_stems: &self.audio_stems,
+            #[cfg(feature = "audio-dac-taps")]
+            audio_dac_levels: &self.audio_dac_levels,
             audio_sample_rate: AUDIO_SAMPLE_RATE,
             audio_discontinuity,
         }
@@ -1187,6 +1224,73 @@ mod tests {
         assert!(!rewound.audio_samples.is_empty());
         #[cfg(feature = "audio-stems")]
         assert_eq!(rewound.audio_stems.len(), rewound.audio_samples.len());
+    }
+
+    #[cfg(all(
+        feature = "audio-dac-taps",
+        not(feature = "apu-disabled"),
+        not(feature = "rewind-disabled")
+    ))]
+    #[test]
+    fn dac_capture_follows_audio_across_snapshot_rewind_and_exhaustion() {
+        let rom = patterned_nrom_cartridge();
+        let mut control = Console::new_nrom(rom.clone());
+        let mut tapped = Console::new_nrom(rom);
+        // Synthetic non-silence from direct APU register writes; never
+        // substitute output audio for a real DAC read.
+        for machine in [&mut control, &mut tapped] {
+            let apu = &mut machine.state.bus.apu;
+            apu.write_register(0x4015, 1);
+            apu.write_register(0x4000, 0xb9);
+            apu.write_register(0x4002, 58);
+            apu.write_register(0x4003, 0xf8);
+            apu.write_register(0x4011, 41);
+        }
+        let before_capture = tapped.snapshot();
+        tapped.set_audio_dac_capture(true);
+        let mut history = Vec::new();
+        for _ in 0..4 {
+            let expected = control.next_frame();
+            assert!(expected.audio_dac_levels.is_empty());
+            let out = tapped.next_frame();
+            assert_eq!(out.audio_samples.len(), out.audio_dac_levels.len());
+            assert_eq!(out.audio_samples, expected.audio_samples);
+            assert_eq!(out.pixels, expected.pixels);
+            assert!(out.audio_dac_levels.iter().all(|tap| tap[4] == 41));
+            assert!(out.audio_dac_levels.iter().any(|tap| tap[0] == 9));
+            assert!(out.audio_dac_levels.iter().any(|tap| tap[0] == 0));
+            history.push((out.audio_dac_levels.to_vec(), out.audio_samples.to_vec()));
+        }
+        assert!(tapped.rewind());
+        let newest_replay = tapped.next_frame();
+        assert!(newest_replay.audio_discontinuity);
+        assert_eq!(newest_replay.frame_number, 4);
+        assert_eq!(
+            newest_replay.audio_samples.len(),
+            newest_replay.audio_dac_levels.len()
+        );
+        // The tape saves *after* each frame's samples while the frame number
+        // increments *after* saving. Replaying a tape entry therefore emits
+        // the audio interval after that entry, not its previously heard audio.
+        for index in (1..4).rev() {
+            assert!(tapped.rewind());
+            let rewind = tapped.next_frame();
+            assert!(rewind.audio_discontinuity);
+            assert_eq!(rewind.frame_number as usize, index);
+            assert!(rewind.audio_dac_levels == history[index].0);
+            assert!(rewind.audio_samples == history[index].1);
+        }
+        assert!(!tapped.rewind());
+        let held = tapped.next_frame();
+        assert!(held.audio_samples.is_empty());
+        assert!(held.audio_dac_levels.is_empty());
+        tapped.restore_snapshot_and_reset_timeline(before_capture);
+        let restored = tapped.next_frame();
+        assert!(restored.audio_discontinuity);
+        assert_eq!(restored.audio_dac_levels, history[0].0);
+        assert_eq!(restored.audio_samples, history[0].1);
+        tapped.set_audio_dac_capture(false);
+        assert!(tapped.next_frame().audio_dac_levels.is_empty());
     }
 
     #[cfg(not(feature = "rewind-disabled"))]
