@@ -2,6 +2,8 @@ use std::cell::Cell;
 
 use crate::dsp::FirstOrderFilter;
 
+#[cfg(feature = "audio-dac-taps")]
+use crate::console::AudioDacLevels;
 #[cfg(feature = "audio-stems")]
 use crate::console::AudioStems;
 
@@ -11,6 +13,8 @@ pub(crate) struct AudioSample {
     pub(crate) mono: f32,
     #[cfg(feature = "audio-stems")]
     pub(crate) stems: AudioStems,
+    #[cfg(feature = "audio-dac-taps")]
+    pub(crate) dac_levels: AudioDacLevels,
 }
 
 const LENGTH_COUNTER_TABLE: [u8; 32] = [
@@ -1047,20 +1051,28 @@ impl APU {
         // Keep the legacy mono arithmetic and filter order as its own path.
         let mono = self.sample();
         #[cfg(feature = "audio-stems")]
-        {
+        let stems = {
             let stems = self.mixed_stems();
-            let stems = std::array::from_fn(|channel| {
+            std::array::from_fn(|channel| {
                 let mut value = stems[channel];
                 for filter in self.stem_filters[channel].iter_mut() {
                     value = filter.filter(value);
                 }
                 value
-            });
-            AudioSample { mono, stems }
-        }
-        #[cfg(not(feature = "audio-stems"))]
-        {
-            AudioSample { mono }
+            })
+        };
+        AudioSample {
+            mono,
+            #[cfg(feature = "audio-stems")]
+            stems,
+            #[cfg(feature = "audio-dac-taps")]
+            dac_levels: [
+                self.pulses[0].sample(),
+                self.pulses[1].sample(),
+                self.triangle.sample(),
+                self.noise.sample(),
+                self.dmc.output_level,
+            ],
         }
     }
 
@@ -1396,9 +1408,72 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "audio-dac-taps")]
+    #[test]
+    fn dac_taps_observe_raw_levels_but_respect_hardware_channel_state() {
+        let mut apu = APU::default();
+        apu.write_register(0x4015, 0b1111);
+        for (base, volume) in [(0x4000, 7), (0x4004, 11)] {
+            apu.write_register(base, 0xf0 | volume);
+            apu.write_register(base + 2, 9);
+            apu.write_register(base + 3, 0xf8);
+        }
+        apu.write_register(0x4008, 0xff);
+        apu.write_register(0x400a, 9);
+        apu.write_register(0x400b, 0xf8);
+        apu.triangle.linear_counter_offset = 10;
+        apu.triangle.phase = 4;
+        apu.write_register(0x400c, 0x39);
+        apu.write_register(0x400f, 0xf8);
+        apu.noise.shift_register = 2;
+        apu.write_register(0x4011, 73);
+        let independent_raw = [7, 11, 11, 9, 73];
+        let mut stock_filters = apu.first_order_filters.clone();
+        for (pulse_one, triangular) in [(true, true), (false, false), (true, false)] {
+            apu.channel_mask.pulse1 = pulse_one;
+            apu.channel_mask.triangle = triangular;
+            let output = apu.sample_with_output();
+            assert_eq!(output.dac_levels, independent_raw);
+            let expected_pulse = PULSE_TABLE[if pulse_one { 18 } else { 11 }];
+            let expected_tnd = TND_TABLE[if triangular { 124 } else { 91 }];
+            let expected_mono = stock_filters
+                .iter_mut()
+                .fold(expected_pulse + expected_tnd, |sample, filter| {
+                    filter.filter(sample)
+                });
+            assert_eq!(output.mono.to_bits(), expected_mono.to_bits());
+        }
+        apu.write_register(0x4015, 0);
+        assert_eq!(apu.sample_with_output().dac_levels, [0, 0, 0, 0, 73]);
+    }
+
     #[cfg(feature = "timestamped-scheduler")]
     #[test]
     fn timestamped_batched_quiet_advance_matches_exact_steps() {
+        fn output_identity(sample: AudioSample) -> (u32, Option<[u32; 5]>, Option<[u8; 5]>) {
+            let stems = {
+                #[cfg(feature = "audio-stems")]
+                {
+                    Some(sample.stems.map(f32::to_bits))
+                }
+                #[cfg(not(feature = "audio-stems"))]
+                {
+                    None
+                }
+            };
+            let taps = {
+                #[cfg(feature = "audio-dac-taps")]
+                {
+                    Some(sample.dac_levels)
+                }
+                #[cfg(not(feature = "audio-dac-taps"))]
+                {
+                    None
+                }
+            };
+            (sample.mono.to_bits(), stems, taps)
+        }
+
         fn configured(start_on_apu_cycle: bool) -> APU {
             let mut apu = APU::default();
             apu.on_apu_cycle = start_on_apu_cycle;
@@ -1407,14 +1482,14 @@ mod tests {
             apu.frame_counter_step = 0;
 
             apu.pulses[0].timer = 2;
-            apu.pulses[0].timer_period = 5;
+            apu.pulses[0].timer_period = 9;
             apu.pulses[0].duty_offset = 3;
             apu.pulses[0].enabled = true;
             apu.pulses[0].length_counter = 20;
             apu.pulses[0].volume_envelope.use_constant_volume = true;
             apu.pulses[0].volume_envelope.period_or_constant_volume = 9;
             apu.pulses[1].timer = 1;
-            apu.pulses[1].timer_period = 7;
+            apu.pulses[1].timer_period = 11;
             apu.pulses[1].duty_offset = 6;
             apu.pulses[1].enabled = true;
             apu.pulses[1].length_counter = 20;
@@ -1449,14 +1524,16 @@ mod tests {
                 let mut batched_samples = Vec::new();
 
                 for _ in 0..cycles {
-                    if let Some(sample) = exact.step(|_| panic!("quiet DMC must not read memory")) {
-                        exact_samples.push(sample.to_bits());
+                    if let Some(sample) =
+                        exact.step_with_output(|_| panic!("quiet DMC must not read memory"))
+                    {
+                        exact_samples.push(output_identity(sample));
                     }
                 }
-                batched.advance_cpu_cycles(
+                batched.advance_cpu_cycles_with_output(
                     cycles,
                     |_| panic!("quiet DMC must not read memory"),
-                    |sample| batched_samples.push(sample.to_bits()),
+                    |sample| batched_samples.push(output_identity(sample)),
                 );
 
                 assert_eq!(
